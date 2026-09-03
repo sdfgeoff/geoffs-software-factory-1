@@ -24,7 +24,7 @@ use crate::{
     store::Store,
 };
 
-const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it and keep its state accurate. Commit cohesive changes often. Do not modify another agent's worktree.";
+const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it, commit cohesive changes, and submit it for review when ready. If you have approve_review scope, claim reviews before reviewing them. Keep ticket state accurate. Do not modify another agent's worktree or the primary worktree.";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentEvent {
@@ -165,6 +165,80 @@ impl AgentManager {
 
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {
         Ok(self.store.agents().await?)
+    }
+
+    pub async fn scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
+        self.store.agent_scopes(agent_id).await
+    }
+
+    pub async fn set_scopes(
+        &self,
+        agent_id: i64,
+        scopes: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        self.store.set_agent_scopes(agent_id, scopes).await
+    }
+
+    pub async fn submit_review(
+        &self,
+        ticket_id: i64,
+        agent_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let agent = self
+            .store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&agent.worktree_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await
+            .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
+        if !output.status.success() {
+            return Err(AppError::bad_request(format!(
+                "failed to resolve review commit: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let ticket = self
+            .store
+            .submit_review(ticket_id, agent_id, &commit, expected_revision)
+            .await?;
+        self.emit(agent_id, "ticket_updated", json!(ticket));
+        Ok(ticket)
+    }
+
+    pub async fn claim_review(
+        &self,
+        ticket_id: i64,
+        agent_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let ticket = self
+            .store
+            .claim_review(ticket_id, agent_id, expected_revision)
+            .await?;
+        self.emit(agent_id, "ticket_updated", json!(ticket));
+        Ok(ticket)
+    }
+
+    pub async fn request_changes(
+        &self,
+        ticket_id: i64,
+        agent_id: i64,
+        feedback: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let ticket = self
+            .store
+            .request_changes(ticket_id, agent_id, feedback, expected_revision)
+            .await?;
+        self.emit(agent_id, "ticket_updated", json!(ticket));
+        Ok(ticket)
     }
 
     pub async fn create(&self, name: &str) -> Result<Agent, AppError> {
@@ -324,6 +398,8 @@ impl AgentManager {
             .map_err(|error| AppError::internal(error.to_string()))?;
         let board_url = serde_json::to_string(&self.board_url)
             .map_err(|error| AppError::internal(error.to_string()))?;
+        let agent_id = serde_json::to_string(&agent.id.to_string())
+            .map_err(|error| AppError::internal(error.to_string()))?;
         let mut child = Command::new(&self.codex_path)
             .args(["app-server", "--listen", "stdio://", "-c"])
             .arg(format!(
@@ -336,7 +412,7 @@ impl AgentManager {
             ])
             .args(["-c"])
             .arg(format!(
-                "mcp_servers.multi_agent_board.env={{MULTI_AGENT_BOARD_URL={board_url}}}"
+                "mcp_servers.multi_agent_board.env={{MULTI_AGENT_BOARD_URL={board_url},MULTI_AGENT_BOARD_AGENT_ID={agent_id}}}"
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

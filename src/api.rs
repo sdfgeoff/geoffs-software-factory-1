@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    http::HeaderMap,
     routing::get,
 };
 use serde::Deserialize;
@@ -111,8 +112,16 @@ struct UpdateTicket {
 async fn update_ticket(
     State(store): State<Store>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     Json(input): Json<UpdateTicket>,
 ) -> Result<Json<Ticket>, AppError> {
+    if agent_header(&headers)?.is_some()
+        && matches!(input.state, Some(TicketState::Review | TicketState::Done))
+    {
+        return Err(AppError::forbidden(
+            "agents must use the review workflow for review and done states",
+        ));
+    }
     let assignee_id = match input.assignee_id {
         None => None,
         Some(value) if value.is_null() => Some(None),
@@ -138,20 +147,37 @@ async fn update_ticket(
 
 #[derive(Deserialize)]
 struct ClaimTicket {
-    agent_id: i64,
+    agent_id: Option<i64>,
     expected_revision: Option<i64>,
 }
 
 async fn claim_ticket(
     State(store): State<Store>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     Json(input): Json<ClaimTicket>,
 ) -> Result<Json<Ticket>, AppError> {
+    let agent_id = agent_header(&headers)?
+        .or(input.agent_id)
+        .ok_or_else(|| AppError::bad_request("agent_id is required"))?;
     Ok(Json(
         store
-            .claim_ticket(id, input.agent_id, input.expected_revision)
+            .claim_ticket(id, agent_id, input.expected_revision)
             .await?,
     ))
+}
+
+fn agent_header(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
+    headers
+        .get("x-multi-agent-board-agent-id")
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| AppError::forbidden("invalid agent identity"))
+        })
+        .transpose()
 }
 
 async fn list_channels(State(store): State<Store>) -> Result<Json<Vec<Channel>>, AppError> {

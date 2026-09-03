@@ -14,6 +14,9 @@ pub struct Ticket {
     pub description: String,
     pub state: TicketState,
     pub assignee_id: Option<i64>,
+    pub review_commit: Option<String>,
+    pub reviewer_id: Option<i64>,
+    pub review_feedback: Option<String>,
     pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -25,6 +28,7 @@ pub struct Ticket {
 pub enum TicketState {
     Todo,
     InProgress,
+    Review,
     Done,
 }
 

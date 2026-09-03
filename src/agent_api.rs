@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
+    http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
@@ -22,6 +23,13 @@ pub fn router(manager: AgentManager) -> Router {
         )
         .route("/agents/{id}/pause", post(pause_agent))
         .route("/agents/{id}/resume", post(resume_agent))
+        .route(
+            "/agents/{id}/scopes",
+            get(agent_scopes).put(set_agent_scopes),
+        )
+        .route("/tickets/{id}/submit-review", post(submit_review))
+        .route("/tickets/{id}/claim-review", post(claim_review))
+        .route("/tickets/{id}/request-changes", post(request_changes))
         .route("/events", get(events))
         .with_state(manager)
 }
@@ -74,6 +82,89 @@ async fn resume_agent(
     Path(id): Path<i64>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(manager.resume(id).await?))
+}
+
+#[derive(Deserialize)]
+struct SetScopes {
+    scopes: Vec<String>,
+}
+
+async fn agent_scopes(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(manager.scopes(id).await?))
+}
+
+async fn set_agent_scopes(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    Json(input): Json<SetScopes>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(manager.set_scopes(id, &input.scopes).await?))
+}
+
+#[derive(Deserialize)]
+struct ReviewRevision {
+    expected_revision: Option<i64>,
+}
+
+async fn submit_review(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewRevision>,
+) -> Result<Json<crate::domain::Ticket>, AppError> {
+    Ok(Json(
+        manager
+            .submit_review(id, caller_agent(&headers)?, input.expected_revision)
+            .await?,
+    ))
+}
+
+async fn claim_review(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewRevision>,
+) -> Result<Json<crate::domain::Ticket>, AppError> {
+    Ok(Json(
+        manager
+            .claim_review(id, caller_agent(&headers)?, input.expected_revision)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct RequestChanges {
+    feedback: String,
+    expected_revision: Option<i64>,
+}
+
+async fn request_changes(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<RequestChanges>,
+) -> Result<Json<crate::domain::Ticket>, AppError> {
+    Ok(Json(
+        manager
+            .request_changes(
+                id,
+                caller_agent(&headers)?,
+                &input.feedback,
+                input.expected_revision,
+            )
+            .await?,
+    ))
+}
+
+fn caller_agent(headers: &HeaderMap) -> Result<i64, AppError> {
+    headers
+        .get("x-multi-agent-board-agent-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| AppError::forbidden("agent identity is required"))
 }
 
 async fn events(

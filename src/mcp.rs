@@ -7,13 +7,15 @@ use crate::error::AppError;
 #[derive(Clone)]
 struct BoardClient {
     base_url: String,
+    agent_id: i64,
     client: reqwest::Client,
 }
 
 impl BoardClient {
-    fn new(base_url: String) -> Self {
+    fn new(base_url: String, agent_id: i64) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').into(),
+            agent_id,
             client: reqwest::Client::builder()
                 .no_proxy()
                 .build()
@@ -29,7 +31,8 @@ impl BoardClient {
     ) -> Result<Value, AppError> {
         let mut request = self
             .client
-            .request(method, format!("{}{path}", self.base_url));
+            .request(method, format!("{}{path}", self.base_url))
+            .header("x-multi-agent-board-agent-id", self.agent_id);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -53,12 +56,17 @@ impl BoardClient {
     }
 }
 
-pub async fn run<R, W>(reader: R, mut writer: W, board_url: String) -> Result<(), std::io::Error>
+pub async fn run<R, W>(
+    reader: R,
+    mut writer: W,
+    board_url: String,
+    agent_id: i64,
+) -> Result<(), std::io::Error>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let board = BoardClient::new(board_url);
+    let board = BoardClient::new(board_url, agent_id);
     let mut lines = reader.lines();
     while let Some(line) = lines.next_line().await? {
         let request = match serde_json::from_str(&line) {
@@ -139,12 +147,27 @@ fn tools() -> Value {
         tool(
             "set_ticket_details",
             "Update ticket fields",
-            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"state":{"type":"string","enum":["todo","in_progress","done"]},"assignee_id":{"type":["integer","null"]},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"state":{"type":"string","enum":["todo","in_progress"]},"assignee_id":{"type":["integer","null"]},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
         ),
         tool(
             "claim_ticket",
-            "Atomically claim a ticket for an agent",
-            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"agent_id":{"type":"integer"},"expected_revision":{"type":"integer"}},"required":["ticket_id","agent_id"]})
+            "Atomically claim a ticket for this agent",
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
+        ),
+        tool(
+            "submit_ticket_for_review",
+            "Submit this agent's ticket commit for review",
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
+        ),
+        tool(
+            "claim_ticket_review",
+            "Claim a review; requires approve_review scope",
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
+        ),
+        tool(
+            "request_ticket_changes",
+            "Return a claimed review to its worker with feedback; requires approve_review scope",
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"feedback":{"type":"string"},"expected_revision":{"type":"integer"}},"required":["ticket_id","feedback"]})
         ),
         tool(
             "list_message_board_channels",
@@ -199,7 +222,6 @@ async fn call_tool(
         }
         "claim_ticket" => {
             let ticket_id = integer(&args, "ticket_id")?;
-            integer(&args, "agent_id")?;
             let mut body = args;
             body.as_object_mut()
                 .ok_or_else(|| AppError::bad_request("tool arguments must be an object"))?
@@ -211,6 +233,13 @@ async fn call_tool(
                     Some(body),
                 )
                 .await?
+        }
+        "submit_ticket_for_review" => {
+            review_request(board, Method::POST, &args, "submit-review").await?
+        }
+        "claim_ticket_review" => review_request(board, Method::POST, &args, "claim-review").await?,
+        "request_ticket_changes" => {
+            review_request(board, Method::POST, &args, "request-changes").await?
         }
         "list_message_board_channels" => board.request(Method::GET, "/channels", None).await?,
         "read_message_board_channel" => {
@@ -250,6 +279,26 @@ async fn call_tool(
         _ => return Err(AppError::bad_request(format!("unknown tool: {name}"))),
     };
     Ok(json!({"content": [{"type": "text", "text": value.to_string()}]}))
+}
+
+async fn review_request(
+    board: &BoardClient,
+    method: Method,
+    args: &Value,
+    action: &str,
+) -> Result<Value, AppError> {
+    let ticket_id = integer(args, "ticket_id")?;
+    let mut body = args.clone();
+    body.as_object_mut()
+        .ok_or_else(|| AppError::bad_request("tool arguments must be an object"))?
+        .remove("ticket_id");
+    board
+        .request(
+            method,
+            &format!("/tickets/{ticket_id}/{action}"),
+            Some(body),
+        )
+        .await
 }
 
 fn string<'a>(args: &'a Value, name: &str) -> Result<&'a str, AppError> {
@@ -293,7 +342,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let app = crate::api::router(store.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (BoardClient::new(format!("http://{address}")), store)
+        (BoardClient::new(format!("http://{address}"), 1), store)
     }
 
     #[tokio::test]
@@ -344,14 +393,15 @@ mod tests {
         let first = call_tool(
             &board,
             Some("claim_ticket"),
-            Some(&json!({"ticket_id": ticket.id, "agent_id": 1, "expected_revision": 1})),
+            Some(&json!({"ticket_id": ticket.id, "expected_revision": 1})),
         )
         .await;
         assert!(first.is_ok());
+        let other_board = BoardClient::new(board.base_url.clone(), 2);
         let second = call_tool(
-            &board,
+            &other_board,
             Some("claim_ticket"),
-            Some(&json!({"ticket_id": ticket.id, "agent_id": 2})),
+            Some(&json!({"ticket_id": ticket.id})),
         )
         .await;
         assert!(second.is_err());

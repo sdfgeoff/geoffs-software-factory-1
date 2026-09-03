@@ -84,7 +84,7 @@ impl Store {
 
     pub async fn tickets(&self) -> Result<Vec<Ticket>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, title, description, state, assignee_id, revision, created_at, updated_at \
+            "SELECT id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -93,7 +93,7 @@ impl Store {
 
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, title, description, state, assignee_id, revision, created_at, updated_at \
+            "SELECT id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -162,7 +162,7 @@ impl Store {
             "UPDATE tickets SET assignee_id = ?, state = 'in_progress', revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, revision, created_at, updated_at",
+             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(agent_id)
         .bind(id)
@@ -180,6 +180,144 @@ impl Store {
                 "ticket is already claimed or has changed",
             )),
         }
+    }
+
+    pub async fn submit_review(
+        &self,
+        id: i64,
+        agent_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        let ticket = sqlx::query_as(
+            "UPDATE tickets SET state = 'review', review_commit = ?, reviewer_id = NULL, \
+             revision = revision + 1, updated_at = unixepoch() \
+             WHERE id = ? AND state = 'in_progress' AND assignee_id = ? \
+             AND (? IS NULL OR revision = ?) \
+             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+        )
+        .bind(commit)
+        .bind(id)
+        .bind(agent_id)
+        .bind(expected_revision)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        ticket.ok_or_else(|| {
+            AppError::conflict(
+                "ticket is not assigned to this agent, is not in progress, or has changed",
+            )
+        })
+    }
+
+    pub async fn claim_review(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        if !self.has_agent_scope(reviewer_id, "approve_review").await? {
+            return Err(AppError::forbidden("agent lacks approve_review scope"));
+        }
+        let ticket = sqlx::query_as(
+            "UPDATE tickets SET reviewer_id = ?, revision = revision + 1, updated_at = unixepoch() \
+             WHERE id = ? AND state = 'review' AND assignee_id != ? \
+             AND (reviewer_id IS NULL OR reviewer_id = ?) AND (? IS NULL OR revision = ?) \
+             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+        )
+        .bind(reviewer_id)
+        .bind(id)
+        .bind(reviewer_id)
+        .bind(reviewer_id)
+        .bind(expected_revision)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        ticket.ok_or_else(|| {
+            AppError::conflict("review is unavailable, belongs to this agent, or has changed")
+        })
+    }
+
+    pub async fn request_changes(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        feedback: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        if !self.has_agent_scope(reviewer_id, "approve_review").await? {
+            return Err(AppError::forbidden("agent lacks approve_review scope"));
+        }
+        if feedback.trim().is_empty() || feedback.chars().count() > 10_000 {
+            return Err(AppError::bad_request(
+                "review feedback must contain between 1 and 10000 characters",
+            ));
+        }
+        let ticket = sqlx::query_as(
+            "UPDATE tickets SET state = 'in_progress', review_feedback = ?, revision = revision + 1, \
+             updated_at = unixepoch() WHERE id = ? AND state = 'review' AND reviewer_id = ? \
+             AND (? IS NULL OR revision = ?) \
+             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+        )
+        .bind(feedback.trim())
+        .bind(id)
+        .bind(reviewer_id)
+        .bind(expected_revision)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        ticket.ok_or_else(|| {
+            AppError::conflict("review is not assigned to this agent or has changed")
+        })
+    }
+
+    pub async fn agent_scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(
+            sqlx::query_scalar("SELECT scope FROM agent_scopes WHERE agent_id = ? ORDER BY scope")
+                .bind(agent_id)
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn set_agent_scopes(
+        &self,
+        agent_id: i64,
+        scopes: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        for scope in scopes {
+            validate_scope(scope)?;
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM agent_scopes WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        for scope in scopes {
+            sqlx::query("INSERT OR IGNORE INTO agent_scopes (agent_id, scope) VALUES (?, ?)")
+                .bind(agent_id)
+                .bind(scope)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        self.agent_scopes(agent_id).await
+    }
+
+    pub async fn has_agent_scope(&self, agent_id: i64, scope: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_scopes WHERE agent_id = ? AND scope = ?)",
+        )
+        .bind(agent_id)
+        .bind(scope)
+        .fetch_one(&self.pool)
+        .await
     }
 
     pub async fn channels(&self) -> Result<Vec<Channel>, sqlx::Error> {
@@ -404,6 +542,18 @@ fn validate_message(author: &str, body: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_scope(scope: &str) -> Result<(), AppError> {
+    if scope.is_empty()
+        || scope.len() > 100
+        || !scope.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
+        })
+    {
+        return Err(AppError::bad_request("invalid agent scope"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -467,6 +617,69 @@ mod tests {
                 .body,
             "Schema is ready"
         );
+    }
+
+    #[tokio::test]
+    async fn review_transitions_require_scope_and_ownership() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        let outsider = store
+            .create_agent("outsider", "/tmp/outsider")
+            .await
+            .unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Review me".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = store
+            .submit_review(ticket.id, worker.id, "abc123", Some(ticket.revision))
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .claim_review(ticket.id, outsider.id, Some(ticket.revision))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .set_agent_scopes(
+                    reviewer.id,
+                    &["approve_review".into(), "approve_review".into()]
+                )
+                .await
+                .unwrap(),
+            vec!["approve_review"]
+        );
+        let ticket = store
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = store
+            .request_changes(
+                ticket.id,
+                reviewer.id,
+                "Please add a test",
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ticket.state, TicketState::InProgress);
+        assert_eq!(ticket.assignee_id, Some(worker.id));
+        assert_eq!(ticket.review_feedback.as_deref(), Some("Please add a test"));
     }
 
     #[tokio::test]

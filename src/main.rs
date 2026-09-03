@@ -7,7 +7,7 @@ use multi_agent_board::{agent_runtime::AgentManager, server, store::Store};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
         println!(
-            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR  Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA  SQLite database path\n  MULTI_AGENT_BOARD_URL   Board API URL (required in MCP mode)\n  CODEX_BIN               Codex CLI path (default codex)"
+            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR      Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA      SQLite database path\n  MULTI_AGENT_BOARD_URL       Board API URL (required in MCP mode)\n  MULTI_AGENT_BOARD_AGENT_ID  Calling agent ID (required in MCP mode)\n  CODEX_BIN                   Codex CLI path (default codex)"
         );
         return Ok(());
     }
@@ -24,10 +24,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         let board_url = std::env::var("MULTI_AGENT_BOARD_URL")?;
+        let agent_id = std::env::var("MULTI_AGENT_BOARD_AGENT_ID")?.parse()?;
         return Ok(multi_agent_board::mcp::run(
             tokio::io::BufReader::new(tokio::io::stdin()),
             tokio::io::stdout(),
             board_url,
+            agent_id,
         )
         .await?);
     }
