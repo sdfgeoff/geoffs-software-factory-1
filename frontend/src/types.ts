@@ -11,6 +11,7 @@ export interface Ticket {
   description: string;
   state: TicketState;
   assignee_id: number | null;
+  implementation_branch: string | null;
   review_commit: string | null;
   review_target_branch: string | null;
   reviewer_id: number | null;

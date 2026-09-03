@@ -122,8 +122,14 @@ function TicketCard({
         {ticket.title}
       </summary>
       <form onSubmit={save}>
-        {(ticket.review_commit || ticket.review_feedback) && (
+        {(ticket.implementation_branch || ticket.review_commit || ticket.review_feedback) && (
           <dl className="review-meta">
+            {ticket.implementation_branch && (
+              <>
+                <dt>Implementation branch</dt>
+                <dd>{ticket.implementation_branch}</dd>
+              </>
+            )}
             {ticket.review_commit && (
               <>
                 <dt>Review commit</dt>

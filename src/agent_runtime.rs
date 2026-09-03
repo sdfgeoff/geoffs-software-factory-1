@@ -195,6 +195,7 @@ impl AgentManager {
             .project()
             .await?
             .ok_or_else(|| AppError::bad_request("project is not selected"))?;
+        let implementation_branch = current_branch(&agent.worktree_path).await?;
         let commit = git_text(&agent.worktree_path, &["rev-parse", "HEAD"]).await?;
         let target_branch = git_text(&project.path, &["symbolic-ref", "--short", "HEAD"]).await?;
         let ticket = self
@@ -202,6 +203,7 @@ impl AgentManager {
             .submit_review(
                 ticket_id,
                 agent_id,
+                Some(&implementation_branch),
                 &commit,
                 &target_branch,
                 expected_revision,
@@ -218,8 +220,8 @@ impl AgentManager {
             self.notify_agent(
                 reviewer.id,
                 &format!(
-                    "Ticket #{} '{}' is ready for review. Claim its review before inspecting it.",
-                    ticket.id, ticket.title
+                    "Ticket #{} '{}' from branch '{}' is ready for review. Claim its review before inspecting it.",
+                    ticket.id, ticket.title, implementation_branch
                 ),
             )
             .await?;
@@ -254,11 +256,16 @@ impl AgentManager {
             .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
         if let Some(worker_id) = ticket.assignee_id {
+            let branch_instruction = ticket
+                .implementation_branch
+                .as_deref()
+                .map(|branch| format!(" Switch to branch '{branch}' before updating it."))
+                .unwrap_or_default();
             self.notify_agent(
                 worker_id,
                 &format!(
-                    "Changes were requested on ticket #{} '{}': {}",
-                    ticket.id, ticket.title, feedback
+                    "Changes were requested on ticket #{} '{}'.{} Feedback: {}",
+                    ticket.id, ticket.title, branch_instruction, feedback
                 ),
             )
             .await?;
@@ -301,15 +308,6 @@ impl AgentManager {
             .review_target_branch
             .as_deref()
             .ok_or_else(|| AppError::conflict("review has no target branch"))?;
-        let worker = self
-            .store
-            .agent(
-                ticket
-                    .assignee_id
-                    .ok_or_else(|| AppError::conflict("review has no worker"))?,
-            )
-            .await?
-            .ok_or_else(|| AppError::conflict("review worker no longer exists"))?;
         let project = self
             .store
             .project()
@@ -327,11 +325,11 @@ impl AgentManager {
                 "primary branch changed after review submission",
             ));
         }
-        let worker_branch =
-            git_text(&worker.worktree_path, &["symbolic-ref", "--short", "HEAD"]).await?;
-        if git_text(&project.path, &["rev-parse", &worker_branch]).await? != commit {
+        if let Some(implementation_branch) = ticket.implementation_branch.as_deref()
+            && git_text(&project.path, &["rev-parse", implementation_branch]).await? != commit
+        {
             return Err(AppError::conflict(
-                "worker branch changed after review submission",
+                "implementation branch changed after review submission",
             ));
         }
         let ancestor = git_output(
@@ -782,6 +780,16 @@ async fn git_text(cwd: &str, arguments: &[&str]) -> Result<String, AppError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+async fn current_branch(cwd: &str) -> Result<String, AppError> {
+    let output = git_output(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+    if !output.status.success() {
+        return Err(AppError::bad_request(
+            "cannot submit a review from a detached HEAD; check out an implementation branch first",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn validate_agent_name(name: &str) -> Result<(), AppError> {
     if name.is_empty()
         || name.len() > 50
@@ -1015,6 +1023,14 @@ mod tests {
             .submit_review(ticket.id, worker.id, Some(ticket.revision))
             .await
             .unwrap();
+        assert_eq!(
+            ticket.implementation_branch.as_deref(),
+            Some("agents/worker")
+        );
+        run_git(
+            Path::new(&worker.worktree_path),
+            &["switch", "-c", "tickets/next"],
+        );
         assert!(
             store
                 .pending_notification(reviewer.id)
@@ -1111,6 +1127,114 @@ mod tests {
                 .is_err()
         );
 
+        let detached = store
+            .create_ticket(NewTicket {
+                title: "Detached review".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let detached = store
+            .claim_ticket(detached.id, worker.id, Some(detached.revision))
+            .await
+            .unwrap();
+        run_git(Path::new(&worker.worktree_path), &["checkout", "--detach"]);
+        let error = manager
+            .submit_review(detached.id, worker.id, Some(detached.revision))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("detached HEAD"));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_review_survives_worker_rename() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("mab-legacy-review-test-{unique}"));
+        let repository = base.join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Test"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["commit", "--allow-empty", "-qm", "initial"][..],
+            &["branch", "-M", "main"][..],
+        ] {
+            run_git(&repository, arguments);
+        }
+
+        let store = Store::memory().await.unwrap();
+        store
+            .set_project(repository.to_str().unwrap())
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let worker = manager.create("old-name").await.unwrap();
+        let reviewer = manager.create("reviewer").await.unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        std::fs::write(
+            Path::new(&worker.worktree_path).join("legacy.txt"),
+            "legacy",
+        )
+        .unwrap();
+        run_git(Path::new(&worker.worktree_path), &["add", "legacy.txt"]);
+        run_git(
+            Path::new(&worker.worktree_path),
+            &["commit", "-qm", "legacy review"],
+        );
+
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Legacy review".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let commit = git_text(&worker.worktree_path, &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let ticket = store
+            .submit_review(
+                ticket.id,
+                worker.id,
+                None,
+                &commit,
+                "main",
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        store.rename_agent(worker.id, "new-name").await.unwrap();
+        let ticket = manager
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = manager
+            .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+
+        assert_eq!(ticket.state, TicketState::Done);
+        assert_eq!(
+            std::fs::read_to_string(repository.join("legacy.txt")).unwrap(),
+            "legacy"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

@@ -9,6 +9,7 @@ const ticket: Ticket = {
   description: "",
   state: "in_progress",
   assignee_id: null,
+  implementation_branch: null,
   review_commit: null,
   review_target_branch: null,
   reviewer_id: null,
@@ -34,5 +35,26 @@ describe("KanbanBoard", () => {
         ?.textContent,
     ).toContain("Build the board");
     expect(screen.getByRole("heading", { name: /review/i })).toBeTruthy();
+  });
+
+  it("shows the implementation branch for a review", () => {
+    render(
+      <KanbanBoard
+        tickets={[
+          {
+            ...ticket,
+            state: "review",
+            implementation_branch: "tickets/7-board",
+            review_commit: "1234567890abcdef",
+            review_target_branch: "main",
+          },
+        ]}
+        agents={[]}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("tickets/7-board")).toBeTruthy();
   });
 });
