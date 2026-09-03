@@ -42,3 +42,36 @@ pub struct Message {
     pub body: String,
     pub created_at: i64,
 }
+
+#[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
+pub struct Agent {
+    pub id: i64,
+    pub name: String,
+    pub state: AgentState,
+    pub thread_id: Option<String>,
+    pub worktree_path: String,
+    pub active_turn_id: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum AgentState {
+    Paused,
+    Idle,
+    Running,
+    AwaitingApproval,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
+pub struct AgentMessage {
+    pub id: i64,
+    pub agent_id: i64,
+    pub role: String,
+    pub body: String,
+    pub created_at: i64,
+}

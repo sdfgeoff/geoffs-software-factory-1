@@ -6,7 +6,7 @@ use sqlx::{
 };
 
 use crate::{
-    domain::{Channel, Message, Project, Ticket, TicketState},
+    domain::{Agent, AgentMessage, AgentState, Channel, Message, Project, Ticket, TicketState},
     error::AppError,
 };
 
@@ -241,6 +241,108 @@ impl Store {
             .bind(channel)
             .fetch_one(&self.pool)
             .await
+    }
+
+    pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+             created_at, updated_at FROM agents ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+             created_at, updated_at FROM agents WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+             created_at, updated_at FROM agents WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn create_agent(&self, name: &str, worktree: &str) -> Result<Agent, AppError> {
+        let result = sqlx::query("INSERT INTO agents (name, worktree_path) VALUES (?, ?)")
+            .bind(name)
+            .bind(worktree)
+            .execute(&self.pool)
+            .await?;
+        Ok(self.agent(result.last_insert_rowid()).await?.unwrap())
+    }
+
+    pub async fn update_agent_runtime(
+        &self,
+        id: i64,
+        state: AgentState,
+        thread_id: Option<&str>,
+        active_turn_id: Option<&str>,
+        last_error: Option<&str>,
+    ) -> Result<Agent, AppError> {
+        let result = sqlx::query(
+            "UPDATE agents SET state = ?, thread_id = COALESCE(?, thread_id), \
+             active_turn_id = ?, last_error = ?, updated_at = unixepoch() WHERE id = ?",
+        )
+        .bind(state)
+        .bind(thread_id)
+        .bind(active_turn_id)
+        .bind(last_error)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(self.agent(id).await?.unwrap())
+    }
+
+    pub async fn agent_messages(&self, agent_id: i64) -> Result<Vec<AgentMessage>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(sqlx::query_as(
+            "SELECT id, agent_id, role, body, created_at FROM agent_messages \
+             WHERE agent_id = ? ORDER BY created_at, id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn add_agent_message(
+        &self,
+        agent_id: i64,
+        role: &str,
+        body: &str,
+    ) -> Result<AgentMessage, AppError> {
+        if body.trim().is_empty() || body.chars().count() > 50_000 {
+            return Err(AppError::bad_request(
+                "agent message must contain between 1 and 50000 characters",
+            ));
+        }
+        let result =
+            sqlx::query("INSERT INTO agent_messages (agent_id, role, body) VALUES (?, ?, ?)")
+                .bind(agent_id)
+                .bind(role)
+                .bind(body.trim())
+                .execute(&self.pool)
+                .await?;
+        Ok(sqlx::query_as(
+            "SELECT id, agent_id, role, body, created_at FROM agent_messages WHERE id = ?",
+        )
+        .bind(result.last_insert_rowid())
+        .fetch_one(&self.pool)
+        .await?)
     }
 }
 
