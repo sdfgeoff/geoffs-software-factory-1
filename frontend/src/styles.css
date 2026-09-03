@@ -221,6 +221,9 @@ aside > button {
   margin-bottom: 0.25rem;
   text-align: left;
 }
+.channel-setting {
+  margin-bottom: 1rem;
+}
 aside button.selected {
   background: #1f4b43;
   color: white;
