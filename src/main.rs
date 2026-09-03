@@ -34,6 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?);
     }
     let store = Store::open(&data_path).await?;
+    let recovered_events = store.recover_wake_events_after_restart().await?;
+    if recovered_events > 0 {
+        eprintln!("Recovered {recovered_events} interrupted wake event(s)");
+    }
     let recovered = store.recover_agents_after_restart().await?;
     if recovered > 0 {
         eprintln!("Recovered {recovered} interrupted agent(s)");

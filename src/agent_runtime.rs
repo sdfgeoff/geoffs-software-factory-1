@@ -530,6 +530,8 @@ impl AgentManager {
             .is_ok()
         {
             let _ = self.store.delete_notification(notification_id).await;
+        } else {
+            let _ = self.store.retry_wake_event(notification_id).await;
         }
     }
 

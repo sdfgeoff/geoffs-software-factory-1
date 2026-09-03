@@ -7,13 +7,13 @@ use axum::{
     routing::get,
 };
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, ClaimTicketRequest, CreateTicketRequest, MessageRangeQuery,
-    PostMessageRequest, SetProjectRequest,
+    AGENT_ID_HEADER, ClaimTicketRequest, CreateTicketRequest, CreateWakeEventRequest,
+    MessageRangeQuery, PostMessageRequest, SetProjectRequest,
 };
 use serde::Deserialize;
 
 use crate::{
-    domain::{Channel, Message, Project, Ticket, TicketState},
+    domain::{Channel, Message, Project, Ticket, TicketState, WakeEvent},
     error::AppError,
     store::{NewTicket, Store, TicketChanges},
 };
@@ -24,6 +24,10 @@ pub fn router(store: Store) -> Router {
         .route("/tickets", get(list_tickets).post(create_ticket))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
         .route("/tickets/{id}/claim", axum::routing::post(claim_ticket))
+        .route(
+            "/agents/{id}/wake-events",
+            get(list_wake_events).post(create_wake_event),
+        )
         .route("/channels", get(list_channels))
         .route(
             "/channels/{name}/messages",
@@ -149,6 +153,30 @@ async fn claim_ticket(
     Ok(Json(
         store
             .claim_ticket(id, agent_id, input.expected_revision)
+            .await?,
+    ))
+}
+
+async fn list_wake_events(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<WakeEvent>>, AppError> {
+    Ok(Json(store.wake_events(id).await?))
+}
+
+async fn create_wake_event(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+    Json(input): Json<CreateWakeEventRequest>,
+) -> Result<Json<WakeEvent>, AppError> {
+    Ok(Json(
+        store
+            .enqueue_wake_event(
+                id,
+                &input.kind,
+                input.payload,
+                input.deduplication_key.as_deref(),
+            )
             .await?,
     ))
 }
@@ -333,5 +361,47 @@ mod tests {
                 .unwrap();
         assert_eq!(message["agent_id"], agent.id);
         assert_eq!(message["author"], "worker");
+    }
+
+    #[tokio::test]
+    async fn wake_events_round_trip_and_deduplicate_over_http() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("first", "/tmp/first").await.unwrap();
+        let app = router(store);
+        let request = || {
+            Request::post(format!("/agents/{}/wake-events", agent.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"kind":"channel.message","payload":{"channel":"general","message_id":9},"deduplication_key":"message:9"}"#,
+                ))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let duplicate = app.clone().oneshot(request()).await.unwrap();
+        let duplicate: Value =
+            serde_json::from_slice(&to_bytes(duplicate.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(duplicate["id"], first["id"]);
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/agents/{}/wake-events", agent.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let events: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 1);
+        assert_eq!(events[0]["delivery_state"], "pending");
+        assert_eq!(events[0]["payload"]["message_id"], 9);
     }
 }

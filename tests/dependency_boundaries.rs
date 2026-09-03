@@ -18,7 +18,11 @@ fn isolated_crates_have_only_allowed_dependencies() {
     );
     let metadata: Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_dependencies(&metadata, "multi-agent-board-protocol", &["serde"]);
+    assert_dependencies(
+        &metadata,
+        "multi-agent-board-protocol",
+        &["serde", "serde_json"],
+    );
     assert_dependencies(
         &metadata,
         "multi-agent-board-mcp",

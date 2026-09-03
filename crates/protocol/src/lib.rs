@@ -48,6 +48,13 @@ pub struct SendAgentMessageRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct CreateWakeEventRequest {
+    pub kind: String,
+    pub payload: serde_json::Value,
+    pub deduplication_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SetAgentScopesRequest {
     pub scopes: Vec<String>,
 }
