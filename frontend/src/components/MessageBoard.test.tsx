@@ -21,12 +21,13 @@ const agent: Agent = {
 };
 
 describe("MessageBoard", () => {
-  it("opens the matching agent from a message author", async () => {
+  it("opens a renamed agent from a historical message", async () => {
     vi.mocked(api.messages).mockResolvedValue([
       {
         id: 1,
         channel_name: "general",
-        author: agent.name,
+        agent_id: agent.id,
+        author: "Former-Name",
         body: "Done",
         created_at: 0,
       },
@@ -45,7 +46,7 @@ describe("MessageBoard", () => {
     );
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Worker-Bartholemew" }),
+      await screen.findByRole("button", { name: "Former-Name" }),
     );
     expect(onSelectAgent).toHaveBeenCalledWith(agent.id);
   });

@@ -26,6 +26,7 @@ export interface Channel {
 export interface BoardMessage {
   id: number;
   channel_name: string;
+  agent_id: number | null;
   author: string;
   body: string;
   created_at: number;

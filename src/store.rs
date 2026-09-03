@@ -423,7 +423,7 @@ impl Store {
             return Err(AppError::not_found("channel not found"));
         }
         Ok(sqlx::query_as(
-            "SELECT id, channel_name, author, body, created_at FROM messages \
+            "SELECT id, channel_name, agent_id, author, body, created_at FROM messages \
              WHERE channel_name = ? AND (? IS NULL OR created_at >= ?) \
              AND (? IS NULL OR created_at <= ?) ORDER BY created_at, id",
         )
@@ -439,6 +439,7 @@ impl Store {
     pub async fn post_message(
         &self,
         channel: &str,
+        agent_id: Option<i64>,
         author: &str,
         body: &str,
     ) -> Result<Message, AppError> {
@@ -449,16 +450,18 @@ impl Store {
             .bind(channel)
             .execute(&mut *transaction)
             .await?;
-        let result =
-            sqlx::query("INSERT INTO messages (channel_name, author, body) VALUES (?, ?, ?)")
-                .bind(channel)
-                .bind(author.trim())
-                .bind(body.trim())
-                .execute(&mut *transaction)
-                .await?;
+        let result = sqlx::query(
+            "INSERT INTO messages (channel_name, agent_id, author, body) VALUES (?, ?, ?, ?)",
+        )
+        .bind(channel)
+        .bind(agent_id)
+        .bind(author.trim())
+        .bind(body.trim())
+        .execute(&mut *transaction)
+        .await?;
         let id = result.last_insert_rowid();
         let message = sqlx::query_as(
-            "SELECT id, channel_name, author, body, created_at FROM messages WHERE id = ?",
+            "SELECT id, channel_name, agent_id, author, body, created_at FROM messages WHERE id = ?",
         )
         .bind(id)
         .fetch_one(&mut *transaction)
@@ -513,26 +516,15 @@ impl Store {
     }
 
     pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Agent, AppError> {
-        let current = self
-            .agent(id)
-            .await?
-            .ok_or_else(|| AppError::not_found("agent not found"))?;
-        let mut transaction = self.pool.begin().await?;
         let result =
             sqlx::query("UPDATE agents SET name = ?, updated_at = unixepoch() WHERE id = ?")
                 .bind(name)
                 .bind(id)
-                .execute(&mut *transaction)
+                .execute(&self.pool)
                 .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
-        sqlx::query("UPDATE messages SET author = ? WHERE author = ?")
-            .bind(name)
-            .bind(current.name)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
         Ok(self.agent(id).await?.unwrap())
     }
 
@@ -709,7 +701,7 @@ mod tests {
     async fn posting_creates_a_channel() {
         let store = Store::memory().await.unwrap();
         store
-            .post_message("backend", "Ada", "Schema is ready")
+            .post_message("backend", None, "Ada", "Schema is ready")
             .await
             .unwrap();
 
@@ -729,9 +721,13 @@ mod tests {
     #[tokio::test]
     async fn agent_can_be_renamed() {
         let store = Store::memory().await.unwrap();
-        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store.create_agent("human", "/tmp/worker").await.unwrap();
         store
-            .post_message("general", "worker", "Finished")
+            .post_message("general", None, "human", "Unrelated")
+            .await
+            .unwrap();
+        store
+            .post_message("general", Some(agent.id), "human", "Finished")
             .await
             .unwrap();
 
@@ -739,10 +735,11 @@ mod tests {
 
         assert_eq!(renamed.name, "builder");
         assert_eq!(renamed.worktree_path, "/tmp/worker");
-        assert_eq!(
-            store.messages("general", None, None).await.unwrap()[0].author,
-            "builder"
-        );
+        let messages = store.messages("general", None, None).await.unwrap();
+        assert_eq!(messages[0].author, "human");
+        assert_eq!(messages[0].agent_id, None);
+        assert_eq!(messages[1].author, "human");
+        assert_eq!(messages[1].agent_id, Some(agent.id));
     }
 
     #[tokio::test]

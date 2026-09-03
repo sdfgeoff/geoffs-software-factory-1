@@ -185,11 +185,22 @@ async fn read_messages(
 async fn post_message(
     State(store): State<Store>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<PostMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
+    let agent_id = agent_header(&headers)?;
+    let author = if let Some(agent_id) = agent_id {
+        store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::forbidden("agent identity is invalid"))?
+            .name
+    } else {
+        input.author
+    };
     Ok(Json(
         store
-            .post_message(&name, &input.author, &input.body)
+            .post_message(&name, agent_id, &author, &input.body)
             .await?,
     ))
 }
@@ -299,5 +310,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn agent_messages_keep_a_stable_author_identity() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let response = router(store)
+            .oneshot(
+                Request::post("/channels/general/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::from(r#"{"author":"spoofed","body":"Done"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let message: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(message["agent_id"], agent.id);
+        assert_eq!(message["author"], "worker");
     }
 }

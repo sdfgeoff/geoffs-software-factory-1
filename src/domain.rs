@@ -43,6 +43,7 @@ pub struct Channel {
 pub struct Message {
     pub id: i64,
     pub channel_name: String,
+    pub agent_id: Option<i64>,
     pub author: String,
     pub body: String,
     pub created_at: i64,

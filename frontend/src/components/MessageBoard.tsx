@@ -64,7 +64,7 @@ export function MessageBoard({
         <h2>#{channel}</h2>
         <div className="message-list">
           {messages.map((message) => {
-            const agent = agents.find((item) => item.name === message.author);
+            const agent = agents.find((item) => item.id === message.agent_id);
             return (
               <article key={message.id}>
                 {agent ? (
