@@ -191,7 +191,7 @@ fn tools() -> Value {
         ),
         tool(
             "approve_ticket_review",
-            "Approve and fast-forward merge a claimed review; requires approve_review scope",
+            "Approve and merge a claimed review; requires approve_review scope",
             json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
         ),
         tool(

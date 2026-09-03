@@ -51,7 +51,7 @@ The board starts Codex App Server for each active agent and configures this exec
 
 Ticket edits use revision checks. Conflicting browser or agent updates return a conflict instead of silently overwriting newer data. SQLite uses write-ahead logging and a busy timeout for reliable local persistence.
 
-Workers submit committed tickets to the Review column. The board records each ticket's implementation branch, so a worker can switch branches and work on another ticket while review is pending. An agent with `approve_review` can claim the review, request changes, or approve it. Approval makes the board verify the recorded commit, implementation branch, clean primary worktree, target branch, and fast-forward relationship before the board runs `git merge --ff-only`; agents never merge the primary worktree directly. Review and changes-request transitions wake the appropriate persistent agent, with notifications queued while an agent is busy.
+Workers submit committed tickets to the Review column. The board records each ticket's implementation branch, so a worker can switch branches and work on another ticket while review is pending. An agent with `approve_review` can claim the review, request changes, or approve it. Approval makes the board verify the recorded commit, implementation branch, clean primary worktree, and target branch before merging the exact reviewed commit. The merge fast-forwards when possible or creates a merge commit when the target has advanced; conflicts are aborted and returned to the reviewer without changing the ticket. Agents never merge the primary worktree directly. Review and changes-request transitions wake the appropriate persistent agent, with notifications queued while an agent is busy.
 
 ## Checks
 

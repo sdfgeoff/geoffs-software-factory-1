@@ -340,20 +340,53 @@ impl AgentManager {
                 "implementation branch changed after review submission",
             ));
         }
-        let ancestor = git_output(
+        let can_fast_forward = git_output(
             &project.path,
             &["merge-base", "--is-ancestor", "HEAD", commit],
         )
         .await?;
-        if !ancestor.status.success() {
-            return Err(AppError::conflict("review commit is not a fast-forward"));
-        }
-        let merge = git_output(&project.path, &["merge", "--ff-only", commit]).await?;
+        let merge = if can_fast_forward.status.success() {
+            git_output(&project.path, &["merge", "--ff-only", commit]).await?
+        } else {
+            git_output(&project.path, &["merge", "--no-ff", "--no-edit", commit]).await?
+        };
         if !merge.status.success() {
-            return Err(AppError::conflict(format!(
-                "fast-forward merge failed: {}",
-                String::from_utf8_lossy(&merge.stderr).trim()
-            )));
+            let conflicts = git_text(&project.path, &["diff", "--name-only", "--diff-filter=U"])
+                .await
+                .unwrap_or_default();
+            let merge_in_progress = git_output(
+                &project.path,
+                &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
+            )
+            .await?
+            .status
+            .success();
+            if merge_in_progress {
+                let abort = git_output(&project.path, &["merge", "--abort"]).await?;
+                if !abort.status.success() {
+                    return Err(AppError::internal(format!(
+                        "merge failed and could not be aborted: {}",
+                        String::from_utf8_lossy(&abort.stderr).trim()
+                    )));
+                }
+            }
+            if !git_text(&project.path, &["status", "--porcelain"])
+                .await?
+                .is_empty()
+            {
+                return Err(AppError::internal(
+                    "merge failed and left the primary worktree dirty",
+                ));
+            }
+            let detail = if conflicts.is_empty() {
+                String::from_utf8_lossy(&merge.stderr).trim().to_owned()
+            } else {
+                format!(
+                    "conflicts in {}; merge {target_branch} into the implementation branch and resubmit",
+                    conflicts.lines().collect::<Vec<_>>().join(", ")
+                )
+            };
+            return Err(AppError::conflict(format!("review merge failed: {detail}")));
         }
         let ticket = self
             .store
@@ -1189,7 +1222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn board_merges_only_valid_fast_forward_reviews() {
+    async fn board_merges_valid_reviews_after_the_target_advances() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1349,11 +1382,97 @@ mod tests {
         std::fs::write(repository.join("main.txt"), "diverged").unwrap();
         run_git(&repository, &["add", "main.txt"]);
         run_git(&repository, &["commit", "-qm", "main moved"]);
+        let second = manager
+            .approve_review(second.id, reviewer.id, Some(second.revision))
+            .await
+            .unwrap();
+        assert_eq!(second.state, TicketState::Done);
+        assert_eq!(
+            git_text(
+                repository.to_str().unwrap(),
+                &["rev-list", "--parents", "-n", "1", "HEAD"]
+            )
+            .await
+            .unwrap()
+            .split_whitespace()
+            .count(),
+            3
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("later.txt")).unwrap(),
+            "later"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("main.txt")).unwrap(),
+            "diverged"
+        );
+
+        std::fs::write(Path::new(&worker.worktree_path).join("work.txt"), "worker").unwrap();
+        run_git(Path::new(&worker.worktree_path), &["add", "work.txt"]);
+        run_git(
+            Path::new(&worker.worktree_path),
+            &["commit", "-qm", "worker conflict"],
+        );
+        let conflicting = store
+            .create_ticket(NewTicket {
+                title: "Conflicting review".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let conflicting = store
+            .claim_ticket(conflicting.id, worker.id, Some(conflicting.revision))
+            .await
+            .unwrap();
+        let conflicting = manager
+            .submit_review(conflicting.id, worker.id, Some(conflicting.revision))
+            .await
+            .unwrap();
+        let conflicting = manager
+            .claim_review(conflicting.id, reviewer.id, Some(conflicting.revision))
+            .await
+            .unwrap();
+        std::fs::write(repository.join("work.txt"), "main").unwrap();
+        run_git(&repository, &["add", "work.txt"]);
+        run_git(&repository, &["commit", "-qm", "main conflict"]);
+
+        let error = manager
+            .approve_review(conflicting.id, reviewer.id, Some(conflicting.revision))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("conflicts in work.txt"));
         assert!(
-            manager
-                .approve_review(second.id, reviewer.id, Some(second.revision))
+            git_text(repository.to_str().unwrap(), &["status", "--porcelain"])
                 .await
-                .is_err()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            git_text(
+                repository.to_str().unwrap(),
+                &["symbolic-ref", "--short", "HEAD"]
+            )
+            .await
+            .unwrap(),
+            "main"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("work.txt")).unwrap(),
+            "main"
+        );
+        assert_eq!(
+            store.ticket(conflicting.id).await.unwrap().unwrap().state,
+            TicketState::Review
+        );
+        assert!(
+            !git_output(
+                repository.to_str().unwrap(),
+                &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]
+            )
+            .await
+            .unwrap()
+            .status
+            .success()
         );
 
         let detached = store
