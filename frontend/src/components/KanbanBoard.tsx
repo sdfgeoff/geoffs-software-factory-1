@@ -5,6 +5,7 @@ import type { Agent, Ticket, TicketState } from "../types";
 const columns: { state: TicketState; label: string }[] = [
   { state: "todo", label: "To do" },
   { state: "in_progress", label: "In progress" },
+  { state: "review", label: "Review" },
   { state: "done", label: "Done" },
 ];
 interface Props {
@@ -93,6 +94,7 @@ function TicketCard({
   const [assignee, setAssignee] = useState(
     ticket.assignee_id?.toString() ?? "",
   );
+  const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
   useEffect(() => {
     setTitle(ticket.title);
     setDescription(ticket.description);
@@ -120,6 +122,26 @@ function TicketCard({
         {ticket.title}
       </summary>
       <form onSubmit={save}>
+        {(ticket.review_commit || ticket.review_feedback) && (
+          <dl className="review-meta">
+            {ticket.review_commit && (
+              <>
+                <dt>Review commit</dt>
+                <dd title={ticket.review_commit}>
+                  {ticket.review_commit.slice(0, 12)} → {ticket.review_target_branch}
+                </dd>
+              </>
+            )}
+            <dt>Reviewer</dt>
+            <dd>{reviewer?.name ?? "Unclaimed"}</dd>
+            {ticket.review_feedback && (
+              <>
+                <dt>Feedback</dt>
+                <dd>{ticket.review_feedback}</dd>
+              </>
+            )}
+          </dl>
+        )}
         <label>
           Title
           <input

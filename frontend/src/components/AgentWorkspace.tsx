@@ -20,6 +20,7 @@ export function AgentWorkspace({
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [scopes, setScopes] = useState<string[]>([]);
   const selected = agents.find((agent) => agent.id === selectedId) ?? null;
   useEffect(() => {
     if (!selectedId && agents[0]) setSelectedId(agents[0].id);
@@ -27,6 +28,10 @@ export function AgentWorkspace({
   useEffect(() => {
     if (selectedId)
       void api.agentMessages(selectedId).then(setMessages).catch(onError);
+  }, [selectedId, refresh, onError]);
+  useEffect(() => {
+    if (selectedId)
+      void api.agentScopes(selectedId).then(setScopes).catch(onError);
   }, [selectedId, refresh, onError]);
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -56,6 +61,18 @@ export function AgentWorkspace({
       selected.state === "paused"
         ? await api.resumeAgent(selected.id)
         : await api.pauseAgent(selected.id);
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function setScope(scope: string, enabled: boolean) {
+    if (!selected) return;
+    const next = enabled
+      ? [...new Set([...scopes, scope])]
+      : scopes.filter((item) => item !== scope);
+    try {
+      setScopes(await api.setAgentScopes(selected.id, next));
       await onChanged();
     } catch (error) {
       onError(error);
@@ -110,6 +127,22 @@ export function AgentWorkspace({
             {selected.last_error && (
               <p className="inline-error">{selected.last_error}</p>
             )}
+            <fieldset className="capabilities">
+              <legend>Capabilities</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={scopes.includes("approve_review")}
+                  onChange={(event) =>
+                    void setScope("approve_review", event.target.checked)
+                  }
+                />
+                <span>
+                  <strong>approve_review</strong>
+                  Review changes and authorize board-owned merges
+                </span>
+              </label>
+            </fieldset>
             <div className="message-list agent-chat">
               {messages.map((message) => (
                 <article className={message.role} key={message.id}>

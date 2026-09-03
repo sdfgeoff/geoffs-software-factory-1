@@ -130,7 +130,7 @@ nav button.active {
 }
 .kanban {
   display: grid;
-  grid-template-columns: repeat(3, minmax(16rem, 1fr));
+  grid-template-columns: repeat(4, minmax(16rem, 1fr));
   gap: 1rem;
   align-items: start;
   overflow-x: auto;
@@ -181,6 +181,24 @@ aside form,
   gap: 0.7rem;
   padding: 0.9rem;
   border-top: 1px solid #eee8de;
+}
+.review-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 0.6rem;
+  margin: 0;
+  padding: 0.9rem;
+  border-top: 1px solid #eee8de;
+  font-size: 0.78rem;
+}
+.review-meta dt {
+  color: #81796d;
+  font-weight: 700;
+}
+.review-meta dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .messages-layout,
 .agents-layout {
@@ -285,6 +303,31 @@ aside button.selected {
   padding: 0.6rem;
   background: #f9ded7;
   color: #7b2118;
+}
+.capabilities {
+  margin: 0.8rem 0;
+  padding: 0.8rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.5rem;
+}
+.capabilities legend {
+  color: #4b5563;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.capabilities label {
+  display: flex;
+  align-items: start;
+  gap: 0.6rem;
+}
+.capabilities input {
+  width: auto;
+  margin-top: 0.2rem;
+}
+.capabilities span {
+  display: grid;
+  gap: 0.15rem;
+  font-weight: 400;
 }
 .empty {
   margin: auto;

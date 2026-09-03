@@ -9,6 +9,10 @@ const ticket: Ticket = {
   description: "",
   state: "in_progress",
   assignee_id: null,
+  review_commit: null,
+  review_target_branch: null,
+  reviewer_id: null,
+  review_feedback: null,
   revision: 1,
   created_at: 0,
   updated_at: 0,
@@ -29,5 +33,6 @@ describe("KanbanBoard", () => {
       screen.getByRole("heading", { name: /in progress/i }).parentElement
         ?.textContent,
     ).toContain("Build the board");
+    expect(screen.getByRole("heading", { name: /review/i })).toBeTruthy();
   });
 });

@@ -1,4 +1,4 @@
-export type TicketState = "todo" | "in_progress" | "done";
+export type TicketState = "todo" | "in_progress" | "review" | "done";
 export type AgentState =
   "paused" | "idle" | "running" | "awaiting_approval" | "error";
 export interface Project {
@@ -11,6 +11,10 @@ export interface Ticket {
   description: string;
   state: TicketState;
   assignee_id: number | null;
+  review_commit: string | null;
+  review_target_branch: string | null;
+  reviewer_id: number | null;
+  review_feedback: string | null;
   revision: number;
   created_at: number;
   updated_at: number;

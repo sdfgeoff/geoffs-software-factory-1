@@ -59,6 +59,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
+  agentScopes: (id: number) => request<string[]>(`/agents/${id}/scopes`),
+  setAgentScopes: (id: number, scopes: string[]) =>
+    request<string[]>(`/agents/${id}/scopes`, {
+      method: "PUT",
+      body: JSON.stringify({ scopes }),
+    }),
   pauseAgent: (id: number) =>
     request<Agent>(`/agents/${id}/pause`, { method: "POST" }),
   resumeAgent: (id: number) =>
