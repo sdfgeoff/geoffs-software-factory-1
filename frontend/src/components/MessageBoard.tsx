@@ -33,6 +33,14 @@ export function MessageBoard({ channels, refresh, onChanged, onError }: Props) {
     <section className="messages-layout">
       <aside>
         <h2>Channels</h2>
+        <label className="channel-setting">
+          New channel (optional)
+          <input
+            value={newChannel}
+            onChange={(event) => setNewChannel(event.target.value)}
+            placeholder={channel}
+          />
+        </label>
         {channels.map((item) => (
           <button
             className={channel === item.name ? "selected" : "ghost"}
@@ -57,14 +65,6 @@ export function MessageBoard({ channels, refresh, onChanged, onError }: Props) {
           ))}
         </div>
         <form onSubmit={post}>
-          <label>
-            New channel (optional)
-            <input
-              value={newChannel}
-              onChange={(event) => setNewChannel(event.target.value)}
-              placeholder={channel}
-            />
-          </label>
           <label>
             Message
             <textarea
