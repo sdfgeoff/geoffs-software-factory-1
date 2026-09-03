@@ -1,14 +1,23 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { BoardMessage, Channel } from "../types";
+import type { Agent, BoardMessage, Channel } from "../types";
 interface Props {
+  agents: Agent[];
   channels: Channel[];
   refresh: number;
+  onSelectAgent: (id: number) => void;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
 }
 
-export function MessageBoard({ channels, refresh, onChanged, onError }: Props) {
+export function MessageBoard({
+  agents,
+  channels,
+  refresh,
+  onSelectAgent,
+  onChanged,
+  onError,
+}: Props) {
   const [channel, setChannel] = useState("general");
   const [messages, setMessages] = useState<BoardMessage[]>([]);
   const [body, setBody] = useState("");
@@ -54,15 +63,28 @@ export function MessageBoard({ channels, refresh, onChanged, onError }: Props) {
       <div className="conversation">
         <h2>#{channel}</h2>
         <div className="message-list">
-          {messages.map((message) => (
-            <article key={message.id}>
-              <strong>{message.author}</strong>
-              <time>
-                {new Date(message.created_at * 1000).toLocaleString()}
-              </time>
-              <p>{message.body}</p>
-            </article>
-          ))}
+          {messages.map((message) => {
+            const agent = agents.find((item) => item.name === message.author);
+            return (
+              <article key={message.id}>
+                {agent ? (
+                  <button
+                    className="message-author"
+                    type="button"
+                    onClick={() => onSelectAgent(agent.id)}
+                  >
+                    {message.author}
+                  </button>
+                ) : (
+                  <strong>{message.author}</strong>
+                )}
+                <time>
+                  {new Date(message.created_at * 1000).toLocaleString()}
+                </time>
+                <p>{message.body}</p>
+              </article>
+            );
+          })}
         </div>
         <form onSubmit={post}>
           <label>

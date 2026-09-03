@@ -3,42 +3,46 @@ import { api } from "../api";
 import type { Agent, AgentMessage } from "../types";
 interface Props {
   agents: Agent[];
+  selectedAgentId: number | null;
   refresh: number;
   deltas: Record<number, string>;
+  onSelectAgent: (id: number) => void;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
 }
 
 export function AgentWorkspace({
   agents,
+  selectedAgentId,
   refresh,
   deltas,
+  onSelectAgent,
   onChanged,
   onError,
 }: Props) {
-  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
-  const selected = agents.find((agent) => agent.id === selectedId) ?? null;
+  const selected =
+    agents.find((agent) => agent.id === selectedAgentId) ?? null;
   useEffect(() => {
-    if (!selectedId && agents[0]) setSelectedId(agents[0].id);
-  }, [agents, selectedId]);
+    if (!selectedAgentId && agents[0]) onSelectAgent(agents[0].id);
+  }, [agents, selectedAgentId, onSelectAgent]);
   useEffect(() => {
-    if (selectedId)
-      void api.agentMessages(selectedId).then(setMessages).catch(onError);
-  }, [selectedId, refresh, onError]);
+    if (selectedAgentId)
+      void api.agentMessages(selectedAgentId).then(setMessages).catch(onError);
+  }, [selectedAgentId, refresh, onError]);
   useEffect(() => {
-    if (selectedId)
-      void api.agentScopes(selectedId).then(setScopes).catch(onError);
-  }, [selectedId, refresh, onError]);
+    if (selectedAgentId)
+      void api.agentScopes(selectedAgentId).then(setScopes).catch(onError);
+  }, [selectedAgentId, refresh, onError]);
   async function create(event: FormEvent) {
     event.preventDefault();
     try {
       const agent = await api.createAgent(name);
       setName("");
-      setSelectedId(agent.id);
+      onSelectAgent(agent.id);
       await onChanged();
     } catch (error) {
       onError(error);
@@ -90,7 +94,7 @@ export function AgentWorkspace({
                 : "ghost agent-button"
             }
             key={agent.id}
-            onClick={() => setSelectedId(agent.id)}
+            onClick={() => onSelectAgent(agent.id)}
           >
             <span>{agent.name}</span>
             <small data-state={agent.state}>

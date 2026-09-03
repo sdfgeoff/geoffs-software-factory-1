@@ -35,8 +35,10 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
+        selectedAgentId={agent.id}
         refresh={0}
         deltas={{}}
+        onSelectAgent={() => {}}
         onChanged={async () => {}}
         onError={() => {}}
       />,

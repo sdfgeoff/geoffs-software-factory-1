@@ -14,6 +14,7 @@ export function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [view, setView] = useState<View>("board");
+  const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
   const [deltas, setDeltas] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -104,8 +105,13 @@ export function App() {
       )}
       {view === "messages" && (
         <MessageBoard
+          agents={agents}
           channels={channels}
           refresh={refresh}
+          onSelectAgent={(id) => {
+            setSelectedAgentId(id);
+            setView("agents");
+          }}
           onChanged={reload}
           onError={report}
         />
@@ -113,8 +119,10 @@ export function App() {
       {view === "agents" && (
         <AgentWorkspace
           agents={agents}
+          selectedAgentId={selectedAgentId}
           refresh={refresh}
           deltas={deltas}
+          onSelectAgent={setSelectedAgentId}
           onChanged={reload}
           onError={report}
         />

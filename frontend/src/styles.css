@@ -263,6 +263,15 @@ aside button.selected {
 .message-list article strong {
   margin-right: 0.6rem;
 }
+.message-author {
+  margin-right: 0.6rem;
+  padding: 0;
+  background: transparent;
+  color: #1f4b43;
+}
+.message-author:hover {
+  text-decoration: underline;
+}
 .message-list article time {
   color: #90877a;
   font-size: 0.7rem;
