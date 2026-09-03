@@ -31,11 +31,30 @@ $E = mc^2$`}
       />,
     );
 
-    expect(container.querySelector("linearGradient")?.id).toBe(
-      "user-content-fade",
-    );
+    const gradientId = container.querySelector("linearGradient")?.id;
+    expect(gradientId).toMatch(/^user-content-.+-fade$/);
     expect(container.querySelector("rect")?.getAttribute("fill")).toBe(
-      "url(#user-content-fade)",
+      `url(#${gradientId})`,
+    );
+  });
+
+  it("namespaces identical SVG definitions per message", () => {
+    const source = `<svg><defs><linearGradient id="fade"><stop offset="0%" stop-color="red" /></linearGradient></defs><rect fill="url(#fade)" /></svg>`;
+    const { container } = render(
+      <>
+        <MessageContent source={source} />
+        <MessageContent source={source} />
+      </>,
+    );
+    const gradients = container.querySelectorAll("linearGradient");
+    const rectangles = container.querySelectorAll("rect");
+
+    expect(gradients[0].id).not.toBe(gradients[1].id);
+    expect(rectangles[0].getAttribute("fill")).toBe(
+      `url(#${gradients[0].id})`,
+    );
+    expect(rectangles[1].getAttribute("fill")).toBe(
+      `url(#${gradients[1].id})`,
     );
   });
 });

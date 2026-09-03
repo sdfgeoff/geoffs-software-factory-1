@@ -1,3 +1,4 @@
+import { useId, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeMathjax from "rehype-mathjax";
 import rehypeRaw from "rehype-raw";
@@ -69,18 +70,21 @@ const svgAttributes = [
   "y1",
   "y2",
 ];
-const messageSchema: SanitizeOptions = {
-  ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), ...svgTags],
-  attributes: {
-    ...defaultSchema.attributes,
-    code: [
-      ...(defaultSchema.attributes?.code ?? []),
-      ["className", "math-inline", "math-display"],
-    ],
-    ...Object.fromEntries(svgTags.map((tag) => [tag, svgAttributes])),
-  },
-};
+function messageSchema(clobberPrefix: string): SanitizeOptions {
+  return {
+    ...defaultSchema,
+    clobberPrefix,
+    tagNames: [...(defaultSchema.tagNames ?? []), ...svgTags],
+    attributes: {
+      ...defaultSchema.attributes,
+      code: [
+        ...(defaultSchema.attributes?.code ?? []),
+        ["className", "math-inline", "math-display"],
+      ],
+      ...Object.fromEntries(svgTags.map((tag) => [tag, svgAttributes])),
+    },
+  };
+}
 
 type HastNode = {
   tagName?: string;
@@ -88,9 +92,7 @@ type HastNode = {
   children?: HastNode[];
 };
 
-function namespaceSvgFragmentReferences() {
-  const prefix = messageSchema.clobberPrefix ?? "user-content-";
-
+function namespaceSvgFragmentReferences(prefix: string) {
   return (tree: HastNode) => {
     function visit(node: HastNode, insideSvg = false) {
       const isSvg = insideSvg || node.tagName === "svg";
@@ -114,14 +116,22 @@ function namespaceSvgFragmentReferences() {
 }
 
 export function MessageContent({ source }: { source: string }) {
+  const namespace = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const clobberPrefix = `user-content-${namespace}-`;
+  const schema = useMemo(() => messageSchema(clobberPrefix), [clobberPrefix]);
+  const namespaceFragments = useMemo(
+    () => () => namespaceSvgFragmentReferences(clobberPrefix),
+    [clobberPrefix],
+  );
+
   return (
     <div className="message-content">
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
         rehypePlugins={[
           rehypeRaw,
-          [rehypeSanitize, messageSchema],
-          namespaceSvgFragmentReferences,
+          [rehypeSanitize, schema],
+          namespaceFragments,
           rehypeMathjax,
         ]}
       >
