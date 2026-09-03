@@ -532,7 +532,19 @@ impl Store {
         &self,
         agent_id: i64,
     ) -> Result<Option<(i64, String)>, AppError> {
-        let event = self.claim_pending_wake_event(agent_id).await?;
+        let row: Option<WakeEventRow> = sqlx::query_as(
+            "UPDATE agent_wake_events SET delivery_state = 'delivering', \
+             delivery_attempts = delivery_attempts + 1, last_attempt_at = unixepoch(), \
+             updated_at = unixepoch() WHERE id = (SELECT id FROM agent_wake_events \
+             WHERE agent_id = ? AND kind = 'notification' AND delivery_state = 'pending' \
+             AND json_type(payload, '$.message') = 'text' ORDER BY id LIMIT 1) \
+             RETURNING id, agent_id, kind, payload, deduplication_key, delivery_state, \
+             delivery_attempts, last_attempt_at, delivered_at, created_at, updated_at",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let event = row.map(wake_event_from_row).transpose()?;
         event
             .map(|event| {
                 let message = event
@@ -1037,6 +1049,44 @@ mod tests {
                 .1,
             "second"
         );
+    }
+
+    #[tokio::test]
+    async fn notification_consumer_skips_generic_and_malformed_events() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .enqueue_wake_event(
+                agent.id,
+                "channel.message",
+                serde_json::json!({"message_id": 1}),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .enqueue_wake_event(
+                agent.id,
+                "notification",
+                serde_json::json!({"unexpected": true}),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .enqueue_notification(agent.id, "review requested")
+            .await
+            .unwrap();
+
+        let notification = store.pending_notification(agent.id).await.unwrap().unwrap();
+        assert_eq!(notification.1, "review requested");
+        let events = store.wake_events(agent.id).await.unwrap();
+        assert_eq!(events[0].kind, "channel.message");
+        assert_eq!(events[0].delivery_state, WakeEventState::Pending);
+        assert_eq!(events[1].kind, "notification");
+        assert_eq!(events[1].delivery_state, WakeEventState::Pending);
+        assert_eq!(events[2].id, notification.0);
+        assert_eq!(events[2].delivery_state, WakeEventState::Delivering);
     }
 
     #[tokio::test]
