@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
     resumeAgent: vi.fn(),
     sendAgentMessage: vi.fn(),
     setAgentScopes: vi.fn(),
+    setAgentWakeSettings: vi.fn(),
   },
 }));
 
@@ -24,6 +25,8 @@ const agent: Agent = {
   worktree_path: "/repo/reviewer",
   active_turn_id: null,
   last_error: null,
+  wake_on_pending_task: false,
+  idle_heartbeat_minutes: null,
   created_at: 0,
   updated_at: 0,
 };
@@ -39,6 +42,7 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.resumeAgent).mockResolvedValue(agent);
     vi.mocked(api.sendAgentMessage).mockResolvedValue(agent);
     vi.mocked(api.setAgentScopes).mockResolvedValue(["approve_review"]);
+    vi.mocked(api.setAgentWakeSettings).mockResolvedValue(agent);
   });
 
   it("assigns the approve_review capability", async () => {
@@ -59,6 +63,31 @@ describe("AgentWorkspace", () => {
     );
     await waitFor(() =>
       expect(api.setAgentScopes).toHaveBeenCalledWith(1, ["approve_review"]),
+    );
+  });
+
+  it("saves pending-task and heartbeat settings", async () => {
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        selectedAgentId={agent.id}
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /pending tasks/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /idle heartbeat/i }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Minutes" }), {
+      target: { value: "30" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save wake settings" }));
+
+    await waitFor(() =>
+      expect(api.setAgentWakeSettings).toHaveBeenCalledWith(agent.id, true, 30),
     );
   });
 

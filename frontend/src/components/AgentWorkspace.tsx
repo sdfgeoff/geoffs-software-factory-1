@@ -26,12 +26,24 @@ export function AgentWorkspace({
   const [renamedName, setRenamedName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
+  const [wakeOnPendingTask, setWakeOnPendingTask] = useState(false);
+  const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
+  const [heartbeatMinutes, setHeartbeatMinutes] = useState("20");
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
   useEffect(() => {
     if (!selectedAgentId && agents[0]) onSelectAgent(agents[0].id);
   }, [agents, selectedAgentId, onSelectAgent]);
   useEffect(() => setRenamedName(selected?.name ?? ""), [selected?.name]);
+  useEffect(() => {
+    setWakeOnPendingTask(selected?.wake_on_pending_task ?? false);
+    setHeartbeatEnabled(selected?.idle_heartbeat_minutes !== null);
+    setHeartbeatMinutes(String(selected?.idle_heartbeat_minutes ?? 20));
+  }, [
+    selected?.id,
+    selected?.idle_heartbeat_minutes,
+    selected?.wake_on_pending_task,
+  ]);
   useEffect(() => {
     if (selectedAgentId)
       void api.agentMessages(selectedAgentId).then(setMessages).catch(onError);
@@ -90,6 +102,20 @@ export function AgentWorkspace({
       : scopes.filter((item) => item !== scope);
     try {
       setScopes(await api.setAgentScopes(selected.id, next));
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function saveWakeSettings(event: FormEvent) {
+    event.preventDefault();
+    if (!selected) return;
+    try {
+      await api.setAgentWakeSettings(
+        selected.id,
+        wakeOnPendingTask,
+        heartbeatEnabled ? Number(heartbeatMinutes) : null,
+      );
       await onChanged();
     } catch (error) {
       onError(error);
@@ -184,6 +210,50 @@ export function AgentWorkspace({
                 </span>
               </label>
             </fieldset>
+            <form className="wake-settings" onSubmit={saveWakeSettings}>
+              <fieldset className="capabilities">
+                <legend>Wake settings</legend>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={wakeOnPendingTask}
+                    onChange={(event) =>
+                      setWakeOnPendingTask(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <strong>Pending tasks</strong>
+                    Wake for available work and reviews
+                  </span>
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={heartbeatEnabled}
+                    onChange={(event) =>
+                      setHeartbeatEnabled(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <strong>Idle heartbeat</strong>
+                    Wake periodically while idle
+                  </span>
+                </label>
+                <label className="heartbeat-minutes">
+                  Minutes
+                  <input
+                    type="number"
+                    min="1"
+                    max="10080"
+                    required={heartbeatEnabled}
+                    disabled={!heartbeatEnabled}
+                    value={heartbeatMinutes}
+                    onChange={(event) => setHeartbeatMinutes(event.target.value)}
+                  />
+                </label>
+              </fieldset>
+              <button type="submit">Save wake settings</button>
+            </form>
             <div className="message-list agent-chat">
               {messages.map((message) => (
                 <article className={message.role} key={message.id}>

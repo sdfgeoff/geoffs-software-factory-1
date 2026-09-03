@@ -40,6 +40,8 @@ export interface Agent {
   worktree_path: string;
   active_turn_id: string | null;
   last_error: string | null;
+  wake_on_pending_task: boolean;
+  idle_heartbeat_minutes: number | null;
   created_at: number;
   updated_at: number;
 }

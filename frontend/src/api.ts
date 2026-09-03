@@ -70,6 +70,18 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ scopes }),
     }),
+  setAgentWakeSettings: (
+    id: number,
+    wakeOnPendingTask: boolean,
+    idleHeartbeatMinutes: number | null,
+  ) =>
+    request<Agent>(`/agents/${id}/wake-settings`, {
+      method: "PUT",
+      body: JSON.stringify({
+        wake_on_pending_task: wakeOnPendingTask,
+        idle_heartbeat_minutes: idleHeartbeatMinutes,
+      }),
+    }),
   pauseAgent: (id: number) =>
     request<Agent>(`/agents/${id}/pause`, { method: "POST" }),
   resumeAgent: (id: number) =>

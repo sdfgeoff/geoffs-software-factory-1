@@ -8,6 +8,7 @@ use axum::{
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, CreateAgentRequest, RenameAgentRequest, RequestChangesRequest,
     ReviewRevisionRequest, SendAgentMessageRequest, SetAgentScopesRequest,
+    SetAgentWakeSettingsRequest,
 };
 use std::{convert::Infallible, time::Duration};
 
@@ -30,6 +31,10 @@ pub fn router(manager: AgentManager) -> Router {
         .route(
             "/agents/{id}/scopes",
             get(agent_scopes).put(set_agent_scopes),
+        )
+        .route(
+            "/agents/{id}/wake-settings",
+            axum::routing::put(set_agent_wake_settings),
         )
         .route("/tickets/{id}/submit-review", post(submit_review))
         .route("/tickets/{id}/claim-review", post(claim_review))
@@ -100,6 +105,18 @@ async fn set_agent_scopes(
     Json(input): Json<SetAgentScopesRequest>,
 ) -> Result<Json<Vec<String>>, AppError> {
     Ok(Json(manager.set_scopes(id, &input.scopes).await?))
+}
+
+async fn set_agent_wake_settings(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    Json(input): Json<SetAgentWakeSettingsRequest>,
+) -> Result<Json<Agent>, AppError> {
+    Ok(Json(
+        manager
+            .set_wake_settings(id, input.wake_on_pending_task, input.idle_heartbeat_minutes)
+            .await?,
+    ))
 }
 
 async fn submit_review(
@@ -264,5 +281,70 @@ mod tests {
             store.wake_events(agent.id).await.unwrap()[0].delivery_state,
             crate::domain::WakeEventState::Pending
         );
+    }
+
+    #[tokio::test]
+    async fn wake_settings_are_validated_and_exposed_over_http() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        assert!(!agent.wake_on_pending_task);
+        assert_eq!(agent.idle_heartbeat_minutes, None);
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(manager);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/agents/{}/wake-settings", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"wake_on_pending_task":true,"idle_heartbeat_minutes":20}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["wake_on_pending_task"], true);
+        assert_eq!(body["idle_heartbeat_minutes"], 20);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/agents/{}/wake-settings", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"wake_on_pending_task":false,"idle_heartbeat_minutes":null}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["idle_heartbeat_minutes"], Value::Null);
+
+        let response = app
+            .oneshot(
+                Request::put(format!("/agents/{}/wake-settings", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"wake_on_pending_task":false,"idle_heartbeat_minutes":0}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

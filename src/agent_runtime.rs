@@ -187,6 +187,20 @@ impl AgentManager {
         self.store.set_agent_scopes(agent_id, scopes).await
     }
 
+    pub async fn set_wake_settings(
+        &self,
+        agent_id: i64,
+        wake_on_pending_task: bool,
+        idle_heartbeat_minutes: Option<i64>,
+    ) -> Result<Agent, AppError> {
+        let agent = self
+            .store
+            .set_agent_wake_settings(agent_id, wake_on_pending_task, idle_heartbeat_minutes)
+            .await?;
+        self.emit(agent_id, "agent_updated", json!(agent));
+        Ok(agent)
+    }
+
     pub async fn submit_review(
         &self,
         ticket_id: i64,

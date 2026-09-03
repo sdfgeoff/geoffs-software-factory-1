@@ -377,7 +377,8 @@ impl Store {
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT a.id, a.name, a.state, a.thread_id, a.worktree_path, a.active_turn_id, \
-             a.last_error, a.created_at, a.updated_at FROM agents a \
+             a.last_error, a.wake_on_pending_task, a.idle_heartbeat_minutes, \
+             a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
              WHERE s.scope = ? AND a.id != ? AND a.state != 'paused' \
              ORDER BY CASE a.state WHEN 'idle' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, a.id",
@@ -641,7 +642,8 @@ impl Store {
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             created_at, updated_at FROM agents ORDER BY id",
+             wake_on_pending_task, idle_heartbeat_minutes, created_at, updated_at \
+             FROM agents ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await
@@ -650,7 +652,8 @@ impl Store {
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             created_at, updated_at FROM agents WHERE id = ?",
+             wake_on_pending_task, idle_heartbeat_minutes, created_at, updated_at \
+             FROM agents WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -660,7 +663,8 @@ impl Store {
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             created_at, updated_at FROM agents WHERE name = ?",
+             wake_on_pending_task, idle_heartbeat_minutes, created_at, updated_at \
+             FROM agents WHERE name = ?",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -683,6 +687,32 @@ impl Store {
                 .bind(id)
                 .execute(&self.pool)
                 .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(self.agent(id).await?.unwrap())
+    }
+
+    pub async fn set_agent_wake_settings(
+        &self,
+        id: i64,
+        wake_on_pending_task: bool,
+        idle_heartbeat_minutes: Option<i64>,
+    ) -> Result<Agent, AppError> {
+        if idle_heartbeat_minutes.is_some_and(|minutes| !(1..=10_080).contains(&minutes)) {
+            return Err(AppError::bad_request(
+                "idle heartbeat must be between 1 and 10080 minutes",
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE agents SET wake_on_pending_task = ?, idle_heartbeat_minutes = ?, \
+             updated_at = unixepoch() WHERE id = ?",
+        )
+        .bind(wake_on_pending_task)
+        .bind(idle_heartbeat_minutes)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
@@ -1225,10 +1255,21 @@ mod tests {
             })
             .await
             .unwrap();
+        let agent = store
+            .create_agent("persistent-agent", "/tmp/persistent-agent")
+            .await
+            .unwrap();
+        store
+            .set_agent_wake_settings(agent.id, true, Some(20))
+            .await
+            .unwrap();
         store.close().await;
 
         let reopened = Store::open(&path).await.unwrap();
         assert_eq!(reopened.tickets().await.unwrap().len(), 1);
+        let agent = reopened.agent(agent.id).await.unwrap().unwrap();
+        assert!(agent.wake_on_pending_task);
+        assert_eq!(agent.idle_heartbeat_minutes, Some(20));
         reopened.close().await;
         std::fs::remove_file(path).unwrap();
     }

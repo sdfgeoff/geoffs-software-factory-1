@@ -389,6 +389,15 @@ aside button.selected {
   gap: 0.15rem;
   font-weight: 400;
 }
+.wake-settings .capabilities {
+  margin: 0;
+}
+.capabilities .heartbeat-minutes {
+  align-items: center;
+}
+.heartbeat-minutes input {
+  width: 7rem;
+}
 .empty {
   margin: auto;
   text-align: center;

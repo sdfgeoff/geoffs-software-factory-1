@@ -16,6 +16,8 @@ const agent: Agent = {
   worktree_path: "/repo/worker",
   active_turn_id: null,
   last_error: null,
+  wake_on_pending_task: false,
+  idle_heartbeat_minutes: null,
   created_at: 0,
   updated_at: 0,
 };
