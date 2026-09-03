@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { Agent } from "../types";
 import { MessageBoard } from "./MessageBoard";
@@ -21,6 +21,8 @@ const agent: Agent = {
 };
 
 describe("MessageBoard", () => {
+  afterEach(cleanup);
+
   it("opens a renamed agent from a historical message", async () => {
     vi.mocked(api.messages).mockResolvedValue([
       {
@@ -48,6 +50,34 @@ describe("MessageBoard", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Former-Name" }),
     );
+    expect(onSelectAgent).toHaveBeenCalledWith(agent.id);
+  });
+
+  it("keeps links for legacy messages without an agent id", async () => {
+    vi.mocked(api.messages).mockResolvedValue([
+      {
+        id: 1,
+        channel_name: "general",
+        agent_id: null,
+        author: agent.name,
+        body: "Before the migration",
+        created_at: 0,
+      },
+    ]);
+    const onSelectAgent = vi.fn();
+
+    render(
+      <MessageBoard
+        agents={[agent]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        refresh={0}
+        onSelectAgent={onSelectAgent}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: agent.name }));
     expect(onSelectAgent).toHaveBeenCalledWith(agent.id);
   });
 });
