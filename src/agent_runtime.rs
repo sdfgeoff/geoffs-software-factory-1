@@ -258,13 +258,7 @@ impl AgentManager {
             .rpc
             .request(
                 "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": message}],
-                    "cwd": agent.worktree_path,
-                    "approvalPolicy": "never",
-                    "sandboxPolicy": {"type": "workspaceWrite", "writableRoots": [agent.worktree_path], "networkAccess": false}
-                }),
+                turn_params(&thread_id, message, &agent.worktree_path),
             )
             .await;
         match result {
@@ -359,12 +353,12 @@ impl AgentManager {
         let params = if let Some(thread_id) = &agent.thread_id {
             json!({
                 "threadId": thread_id, "cwd": agent.worktree_path,
-                "approvalPolicy": "never", "sandbox": "workspace-write",
+                "approvalPolicy": "never", "sandbox": "danger-full-access",
                 "developerInstructions": instructions
             })
         } else {
             json!({
-                "cwd": agent.worktree_path, "approvalPolicy": "never", "sandbox": "workspace-write",
+                "cwd": agent.worktree_path, "approvalPolicy": "never", "sandbox": "danger-full-access",
                 "developerInstructions": instructions, "serviceName": "multi_agent_board"
             })
         };
@@ -512,6 +506,16 @@ fn validate_agent_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn turn_params(thread_id: &str, message: &str, worktree_path: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": message}],
+        "cwd": worktree_path,
+        "approvalPolicy": "never",
+        "sandboxPolicy": {"type": "dangerFullAccess"}
+    })
+}
+
 fn worktree_path(root: &Path, name: &str) -> Result<PathBuf, AppError> {
     let parent = root
         .parent()
@@ -561,6 +565,14 @@ mod tests {
         assert!(validate_agent_name("backend-1").is_ok());
         assert!(validate_agent_name("../escape").is_err());
         assert!(validate_agent_name("spaces are bad").is_err());
+    }
+
+    #[test]
+    fn turns_run_without_approval_or_sandbox_prompts() {
+        let params = turn_params("thread-1", "Run tests", "/repo");
+
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandboxPolicy"]["type"], "dangerFullAccess");
     }
 
     #[tokio::test]

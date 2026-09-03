@@ -38,6 +38,7 @@ Then open <http://127.0.0.1:5173>. Vite proxies API requests to the Rust server.
 5. Agent worktrees are created beside the selected repository in `.<repository>-agent-worktrees/<agent>`.
 6. An agent's identity and Codex thread survive pause, resume, and application restarts. A process runs only while that agent is active.
 7. If the board stops during a turn, that agent starts in `error` state with its thread intact; sending another message resumes the thread.
+8. Agents run with approvals disabled and unrestricted filesystem, command, and network access. Only select repositories and create agents that you trust.
 
 The server binds to loopback by default. It has no authentication, so do not expose it on a network without adding an authenticated reverse proxy.
 
