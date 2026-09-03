@@ -111,6 +111,7 @@ async fn update_ticket(
                     title: input.title,
                     description: input.description,
                     state: input.state,
+                    assignee_id: None,
                     expected_revision: input.expected_revision,
                 },
             )

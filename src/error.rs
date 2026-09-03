@@ -39,6 +39,14 @@ impl AppError {
     }
 }
 
+impl std::fmt::Display for AppError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AppError {}
+
 impl From<sqlx::Error> for AppError {
     fn from(error: sqlx::Error) -> Self {
         Self {

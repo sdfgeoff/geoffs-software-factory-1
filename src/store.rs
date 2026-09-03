@@ -26,6 +26,7 @@ pub struct TicketChanges {
     pub title: Option<String>,
     pub description: Option<String>,
     pub state: Option<TicketState>,
+    pub assignee_id: Option<Option<i64>>,
     pub expected_revision: Option<i64>,
 }
 
@@ -122,13 +123,15 @@ impl Store {
         validate_title(&title)?;
         let description = changes.description.unwrap_or(current.description);
         let state = changes.state.unwrap_or(current.state);
+        let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
         let result = sqlx::query(
-            "UPDATE tickets SET title = ?, description = ?, state = ?, revision = revision + 1, \
+            "UPDATE tickets SET title = ?, description = ?, state = ?, assignee_id = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND revision = ?",
         )
         .bind(title.trim())
         .bind(description)
         .bind(state)
+        .bind(assignee_id)
         .bind(id)
         .bind(current.revision)
         .execute(&self.pool)
@@ -137,6 +140,36 @@ impl Store {
             return Err(AppError::conflict("ticket was changed by another user"));
         }
         Ok(self.ticket(id).await?.unwrap())
+    }
+
+    pub async fn claim_ticket(
+        &self,
+        id: i64,
+        agent_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        let claimed = sqlx::query_as(
+            "UPDATE tickets SET assignee_id = ?, state = 'in_progress', revision = revision + 1, \
+             updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
+             AND (? IS NULL OR revision = ?) \
+             RETURNING id, title, description, state, assignee_id, revision, created_at, updated_at",
+        )
+        .bind(agent_id)
+        .bind(id)
+        .bind(agent_id)
+        .bind(expected_revision)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        match claimed {
+            Some(ticket) => Ok(ticket),
+            None if self.ticket(id).await?.is_none() => {
+                Err(AppError::not_found("ticket not found"))
+            }
+            None => Err(AppError::conflict(
+                "ticket is already claimed or has changed",
+            )),
+        }
     }
 
     pub async fn channels(&self) -> Result<Vec<Channel>, sqlx::Error> {

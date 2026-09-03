@@ -10,6 +10,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".multi-agent-board.sqlite3"));
     let store = Store::open(&data_path).await?;
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        return Ok(multi_agent_board::mcp::run(
+            tokio::io::BufReader::new(tokio::io::stdin()),
+            tokio::io::stdout(),
+            store,
+        )
+        .await?);
+    }
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("Multi-agent board listening on http://{address}");
     axum::serve(listener, server::router(store)).await?;
