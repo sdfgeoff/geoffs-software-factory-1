@@ -5,7 +5,10 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
-use serde::Deserialize;
+use multi_agent_board_protocol::{
+    AGENT_ID_HEADER, CreateAgentRequest, RequestChangesRequest, ReviewRevisionRequest,
+    SendAgentMessageRequest, SetAgentScopesRequest,
+};
 use std::{convert::Infallible, time::Duration};
 
 use crate::{
@@ -35,18 +38,13 @@ pub fn router(manager: AgentManager) -> Router {
         .with_state(manager)
 }
 
-#[derive(Deserialize)]
-struct CreateAgent {
-    name: String,
-}
-
 async fn list_agents(State(manager): State<AgentManager>) -> Result<Json<Vec<Agent>>, AppError> {
     Ok(Json(manager.list().await?))
 }
 
 async fn create_agent(
     State(manager): State<AgentManager>,
-    Json(input): Json<CreateAgent>,
+    Json(input): Json<CreateAgentRequest>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(manager.create(&input.name).await?))
 }
@@ -58,15 +56,10 @@ async fn list_messages(
     Ok(Json(manager.messages(id).await?))
 }
 
-#[derive(Deserialize)]
-struct SendMessage {
-    message: String,
-}
-
 async fn send_message(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-    Json(input): Json<SendMessage>,
+    Json(input): Json<SendAgentMessageRequest>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(manager.send_message(id, &input.message).await?))
 }
@@ -85,11 +78,6 @@ async fn resume_agent(
     Ok(Json(manager.resume(id).await?))
 }
 
-#[derive(Deserialize)]
-struct SetScopes {
-    scopes: Vec<String>,
-}
-
 async fn agent_scopes(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
@@ -100,21 +88,16 @@ async fn agent_scopes(
 async fn set_agent_scopes(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-    Json(input): Json<SetScopes>,
+    Json(input): Json<SetAgentScopesRequest>,
 ) -> Result<Json<Vec<String>>, AppError> {
     Ok(Json(manager.set_scopes(id, &input.scopes).await?))
-}
-
-#[derive(Deserialize)]
-struct ReviewRevision {
-    expected_revision: Option<i64>,
 }
 
 async fn submit_review(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<ReviewRevision>,
+    Json(input): Json<ReviewRevisionRequest>,
 ) -> Result<Json<crate::domain::Ticket>, AppError> {
     Ok(Json(
         manager
@@ -127,7 +110,7 @@ async fn claim_review(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<ReviewRevision>,
+    Json(input): Json<ReviewRevisionRequest>,
 ) -> Result<Json<crate::domain::Ticket>, AppError> {
     Ok(Json(
         manager
@@ -136,17 +119,11 @@ async fn claim_review(
     ))
 }
 
-#[derive(Deserialize)]
-struct RequestChanges {
-    feedback: String,
-    expected_revision: Option<i64>,
-}
-
 async fn request_changes(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<RequestChanges>,
+    Json(input): Json<RequestChangesRequest>,
 ) -> Result<Json<crate::domain::Ticket>, AppError> {
     Ok(Json(
         manager
@@ -164,7 +141,7 @@ async fn approve_review(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<ReviewRevision>,
+    Json(input): Json<ReviewRevisionRequest>,
 ) -> Result<Json<crate::domain::Ticket>, AppError> {
     Ok(Json(
         manager
@@ -175,7 +152,7 @@ async fn approve_review(
 
 fn caller_agent(headers: &HeaderMap) -> Result<i64, AppError> {
     headers
-        .get("x-multi-agent-board-agent-id")
+        .get(AGENT_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| AppError::forbidden("agent identity is required"))

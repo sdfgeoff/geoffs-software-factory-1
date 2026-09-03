@@ -3,17 +3,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use multi_agent_board_protocol::ErrorResponse;
 
 #[derive(Debug)]
 pub struct AppError {
     status: StatusCode,
     message: String,
-}
-
-#[derive(Serialize)]
-struct ErrorBody<'a> {
-    error: &'a str,
 }
 
 impl AppError {
@@ -74,8 +69,8 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(ErrorBody {
-                error: &self.message,
+            Json(ErrorResponse {
+                error: self.message,
             }),
         )
             .into_response()

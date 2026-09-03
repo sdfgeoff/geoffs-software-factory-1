@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
 [package]
 name = "multi-agent-board"
 version = "0.1.0"
@@ -9,6 +13,7 @@ async-stream = "0.3"
 axum = "0.8"
 futures-core = "0.3"
 mime_guess = "2"
+multi-agent-board-protocol = { path = "crates/protocol" }
 rust-embed = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }

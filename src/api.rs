@@ -6,6 +6,10 @@ use axum::{
     http::HeaderMap,
     routing::get,
 };
+use multi_agent_board_protocol::{
+    AGENT_ID_HEADER, ClaimTicketRequest, CreateTicketRequest, MessageRangeQuery,
+    PostMessageRequest, SetProjectRequest,
+};
 use serde::Deserialize;
 
 use crate::{
@@ -28,18 +32,13 @@ pub fn router(store: Store) -> Router {
         .with_state(store)
 }
 
-#[derive(Deserialize)]
-struct SetProject {
-    path: String,
-}
-
 async fn get_project(State(store): State<Store>) -> Result<Json<Option<Project>>, AppError> {
     Ok(Json(store.project().await?))
 }
 
 async fn set_project(
     State(store): State<Store>,
-    Json(input): Json<SetProject>,
+    Json(input): Json<SetProjectRequest>,
 ) -> Result<Json<Project>, AppError> {
     let path = PathBuf::from(input.path);
     let canonical = path
@@ -64,20 +63,13 @@ async fn set_project(
     Ok(Json(store.set_project(path).await?))
 }
 
-#[derive(Deserialize)]
-struct CreateTicket {
-    title: String,
-    #[serde(default)]
-    description: String,
-}
-
 async fn list_tickets(State(store): State<Store>) -> Result<Json<Vec<Ticket>>, AppError> {
     Ok(Json(store.tickets().await?))
 }
 
 async fn create_ticket(
     State(store): State<Store>,
-    Json(input): Json<CreateTicket>,
+    Json(input): Json<CreateTicketRequest>,
 ) -> Result<Json<Ticket>, AppError> {
     Ok(Json(
         store
@@ -145,17 +137,11 @@ async fn update_ticket(
     ))
 }
 
-#[derive(Deserialize)]
-struct ClaimTicket {
-    agent_id: Option<i64>,
-    expected_revision: Option<i64>,
-}
-
 async fn claim_ticket(
     State(store): State<Store>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<ClaimTicket>,
+    Json(input): Json<ClaimTicketRequest>,
 ) -> Result<Json<Ticket>, AppError> {
     let agent_id = agent_header(&headers)?
         .or(input.agent_id)
@@ -169,7 +155,7 @@ async fn claim_ticket(
 
 fn agent_header(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
     headers
-        .get("x-multi-agent-board-agent-id")
+        .get(AGENT_ID_HEADER)
         .map(|value| {
             value
                 .to_str()
@@ -184,16 +170,10 @@ async fn list_channels(State(store): State<Store>) -> Result<Json<Vec<Channel>>,
     Ok(Json(store.channels().await?))
 }
 
-#[derive(Deserialize)]
-struct MessageRange {
-    start_time: Option<i64>,
-    end_time: Option<i64>,
-}
-
 async fn read_messages(
     State(store): State<Store>,
     Path(name): Path<String>,
-    Query(range): Query<MessageRange>,
+    Query(range): Query<MessageRangeQuery>,
 ) -> Result<Json<Vec<Message>>, AppError> {
     Ok(Json(
         store
@@ -202,16 +182,10 @@ async fn read_messages(
     ))
 }
 
-#[derive(Deserialize)]
-struct PostMessage {
-    author: String,
-    body: String,
-}
-
 async fn post_message(
     State(store): State<Store>,
     Path(name): Path<String>,
-    Json(input): Json<PostMessage>,
+    Json(input): Json<PostMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
     Ok(Json(
         store
