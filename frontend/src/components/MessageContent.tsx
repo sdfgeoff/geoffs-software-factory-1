@@ -82,6 +82,37 @@ const messageSchema: SanitizeOptions = {
   },
 };
 
+type HastNode = {
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+};
+
+function namespaceSvgFragmentReferences() {
+  const prefix = messageSchema.clobberPrefix ?? "user-content-";
+
+  return (tree: HastNode) => {
+    function visit(node: HastNode, insideSvg = false) {
+      const isSvg = insideSvg || node.tagName === "svg";
+
+      if (isSvg && node.properties) {
+        for (const [name, value] of Object.entries(node.properties)) {
+          if (typeof value === "string") {
+            node.properties[name] = value.replace(
+              /url\(\s*#([^\s)]+)\s*\)/g,
+              `url(#${prefix}$1)`,
+            );
+          }
+        }
+      }
+
+      node.children?.forEach((child) => visit(child, isSvg));
+    }
+
+    visit(tree);
+  };
+}
+
 export function MessageContent({ source }: { source: string }) {
   return (
     <div className="message-content">
@@ -90,6 +121,7 @@ export function MessageContent({ source }: { source: string }) {
         rehypePlugins={[
           rehypeRaw,
           [rehypeSanitize, messageSchema],
+          namespaceSvgFragmentReferences,
           rehypeMathjax,
         ]}
       >

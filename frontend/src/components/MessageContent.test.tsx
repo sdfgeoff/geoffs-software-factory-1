@@ -23,4 +23,19 @@ $E = mc^2$`}
     expect(container.querySelector("svg circle")).toBeTruthy();
     expect(container.querySelector("mjx-container svg")).toBeTruthy();
   });
+
+  it("keeps sanitized SVG fragment references linked to their definitions", () => {
+    const { container } = render(
+      <MessageContent
+        source={`<svg viewBox="0 0 10 10"><defs><linearGradient id="fade"><stop offset="0%" stop-color="red" /><stop offset="100%" stop-color="blue" /></linearGradient></defs><rect width="10" height="10" fill="url(#fade)" /></svg>`}
+      />,
+    );
+
+    expect(container.querySelector("linearGradient")?.id).toBe(
+      "user-content-fade",
+    );
+    expect(container.querySelector("rect")?.getAttribute("fill")).toBe(
+      "url(#user-content-fade)",
+    );
+  });
 });
