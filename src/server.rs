@@ -31,7 +31,7 @@ mod tests {
             store.clone(),
             "codex".into(),
             "multi-agent-board".into(),
-            ":memory:".into(),
+            "http://127.0.0.1:1/api".into(),
         );
         router(store, agents)
     }

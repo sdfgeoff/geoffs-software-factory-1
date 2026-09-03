@@ -7,7 +7,7 @@ use multi_agent_board::{agent_runtime::AgentManager, server, store::Store};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
         println!(
-            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR  Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA  SQLite database path\n  CODEX_BIN               Codex CLI path (default codex)"
+            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR  Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA  SQLite database path\n  MULTI_AGENT_BOARD_URL   Board API URL (required in MCP mode)\n  CODEX_BIN               Codex CLI path (default codex)"
         );
         return Ok(());
     }
@@ -22,28 +22,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         std::env::current_dir()?.join(data_path)
     };
-    let store = Store::open(&data_path).await?;
     if std::env::args().nth(1).as_deref() == Some("mcp") {
+        let board_url = std::env::var("MULTI_AGENT_BOARD_URL")?;
         return Ok(multi_agent_board::mcp::run(
             tokio::io::BufReader::new(tokio::io::stdin()),
             tokio::io::stdout(),
-            store,
+            board_url,
         )
         .await?);
     }
+    let store = Store::open(&data_path).await?;
     let recovered = store.recover_agents_after_restart().await?;
     if recovered > 0 {
         eprintln!("Recovered {recovered} interrupted agent(s)");
     }
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    let local_address = listener.local_addr()?;
+    let host = if local_address.ip().is_unspecified() {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    } else {
+        local_address.ip()
+    };
+    let coordination_address = SocketAddr::new(host, local_address.port());
     let agents = AgentManager::new(
         store.clone(),
         std::env::var_os("CODEX_BIN")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("codex")),
         std::env::current_exe()?,
-        data_path,
+        format!("http://{coordination_address}/api"),
     );
-    let listener = tokio::net::TcpListener::bind(address).await?;
     println!("Multi-agent board listening on http://{address}");
     axum::serve(listener, server::router(store, agents)).await?;
     Ok(())

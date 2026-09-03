@@ -38,7 +38,7 @@ pub struct AgentManager {
     store: Store,
     codex_path: PathBuf,
     executable_path: PathBuf,
-    data_path: PathBuf,
+    board_url: String,
     processes: Arc<Mutex<HashMap<i64, Arc<RunningAgent>>>>,
     // ponytail: a global operation lock is enough for a local MVP; use per-agent locks if contention appears.
     operations: Arc<Mutex<()>>,
@@ -145,14 +145,14 @@ impl AgentManager {
         store: Store,
         codex_path: PathBuf,
         executable_path: PathBuf,
-        data_path: PathBuf,
+        board_url: String,
     ) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
             store,
             codex_path,
             executable_path,
-            data_path,
+            board_url,
             processes: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(())),
             events,
@@ -322,6 +322,8 @@ impl AgentManager {
         }
         let command_value = serde_json::to_string(&self.executable_path.to_string_lossy().as_ref())
             .map_err(|error| AppError::internal(error.to_string()))?;
+        let board_url = serde_json::to_string(&self.board_url)
+            .map_err(|error| AppError::internal(error.to_string()))?;
         let mut child = Command::new(&self.codex_path)
             .args(["app-server", "--listen", "stdio://", "-c"])
             .arg(format!(
@@ -332,7 +334,10 @@ impl AgentManager {
                 "-c",
                 "mcp_servers.multi_agent_board.default_tools_approval_mode=\"approve\"",
             ])
-            .env("MULTI_AGENT_BOARD_DATA", &self.data_path)
+            .args(["-c"])
+            .arg(format!(
+                "mcp_servers.multi_agent_board.env={{MULTI_AGENT_BOARD_URL={board_url}}}"
+            ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -612,7 +617,7 @@ mod tests {
             store,
             "codex".into(),
             "multi-agent-board".into(),
-            ":memory:".into(),
+            "http://127.0.0.1:1/api".into(),
         );
 
         let first = manager.create("backend").await.unwrap();
