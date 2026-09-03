@@ -13,6 +13,11 @@
     "@vitejs/plugin-react": "latest",
     "react": "latest",
     "react-dom": "latest",
+    "react-markdown": "^10.1.0",
+    "rehype-mathjax": "^7.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-math": "^6.0.0",
     "typescript": "latest",
     "vite": "latest"
   },
@@ -22,5 +27,8 @@
     "@types/react-dom": "latest",
     "jsdom": "^29.1.1",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "@xmldom/xmldom": "0.9.12"
   }
 }

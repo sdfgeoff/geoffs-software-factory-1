@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Agent, BoardMessage, Channel } from "../types";
+import { MessageContent } from "./MessageContent";
 interface Props {
   agents: Agent[];
   channels: Channel[];
@@ -85,7 +86,7 @@ export function MessageBoard({
                 <time>
                   {new Date(message.created_at * 1000).toLocaleString()}
                 </time>
-                <p>{message.body}</p>
+                <MessageContent source={message.body} />
               </article>
             );
           })}

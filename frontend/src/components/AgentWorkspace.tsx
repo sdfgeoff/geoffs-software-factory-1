@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Agent, AgentMessage } from "../types";
+import { MessageContent } from "./MessageContent";
 interface Props {
   agents: Agent[];
   selectedAgentId: number | null;
@@ -185,13 +186,13 @@ export function AgentWorkspace({
               {messages.map((message) => (
                 <article className={message.role} key={message.id}>
                   <strong>{message.role}</strong>
-                  <p>{message.body}</p>
+                  <MessageContent source={message.body} />
                 </article>
               ))}
               {deltas[selected.id] && (
                 <article className="agent streaming">
                   <strong>agent</strong>
-                  <p>{deltas[selected.id]}</p>
+                  <MessageContent source={deltas[selected.id]} />
                 </article>
               )}
             </div>

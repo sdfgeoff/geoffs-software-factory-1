@@ -276,9 +276,53 @@ aside button.selected {
   color: #90877a;
   font-size: 0.7rem;
 }
-.message-list article p {
-  margin: 0.35rem 0 0;
+.message-content {
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+.message-content > :first-child {
+  margin-top: 0;
+}
+.message-content > :last-child {
+  margin-bottom: 0;
+}
+.message-content p {
   white-space: pre-wrap;
+}
+.message-content pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  background: #eee8de;
+}
+.message-content code {
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  background: #eee8de;
+}
+.message-content pre code {
+  padding: 0;
+  background: transparent;
+}
+.message-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.message-content th,
+.message-content td {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #d8d1c5;
+}
+.message-content svg,
+.message-content mjx-container {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.message-content svg {
+  height: auto;
 }
 .agent-chat article.user {
   margin-left: 20%;
