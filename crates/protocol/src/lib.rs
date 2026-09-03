@@ -38,6 +38,11 @@ pub struct CreateAgentRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct RenameAgentRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SendAgentMessageRequest {
     pub message: String,
 }

@@ -327,7 +327,8 @@ impl AgentManager {
                 "primary branch changed after review submission",
             ));
         }
-        let worker_branch = format!("agents/{}", worker.name);
+        let worker_branch =
+            git_text(&worker.worktree_path, &["symbolic-ref", "--short", "HEAD"]).await?;
         if git_text(&project.path, &["rev-parse", &worker_branch]).await? != commit {
             return Err(AppError::conflict(
                 "worker branch changed after review submission",
@@ -395,6 +396,25 @@ impl AgentManager {
             .ok_or_else(|| AppError::bad_request("worktree path is not valid UTF-8"))?;
         let agent = self.store.create_agent(name, path).await?;
         self.emit(agent.id, "agent_created", json!(agent));
+        Ok(agent)
+    }
+
+    pub async fn rename(&self, agent_id: i64, name: &str) -> Result<Agent, AppError> {
+        let _operation = self.operations.lock().await;
+        validate_agent_name(name)?;
+        let agent = self
+            .store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        if agent.name == name {
+            return Ok(agent);
+        }
+        if self.store.agent_named(name).await?.is_some() {
+            return Err(AppError::conflict("agent name already exists"));
+        }
+        let agent = self.store.rename_agent(agent_id, name).await?;
+        self.emit(agent.id, "agent_updated", json!(agent));
         Ok(agent)
     }
 

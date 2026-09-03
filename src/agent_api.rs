@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
 };
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, CreateAgentRequest, RequestChangesRequest, ReviewRevisionRequest,
-    SendAgentMessageRequest, SetAgentScopesRequest,
+    AGENT_ID_HEADER, CreateAgentRequest, RenameAgentRequest, RequestChangesRequest,
+    ReviewRevisionRequest, SendAgentMessageRequest, SetAgentScopesRequest,
 };
 use std::{convert::Infallible, time::Duration};
 
@@ -20,6 +20,7 @@ use crate::{
 pub fn router(manager: AgentManager) -> Router {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
+        .route("/agents/{id}", axum::routing::patch(rename_agent))
         .route(
             "/agents/{id}/messages",
             get(list_messages).post(send_message),
@@ -47,6 +48,14 @@ async fn create_agent(
     Json(input): Json<CreateAgentRequest>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(manager.create(&input.name).await?))
+}
+
+async fn rename_agent(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    Json(input): Json<RenameAgentRequest>,
+) -> Result<Json<Agent>, AppError> {
+    Ok(Json(manager.rename(id, &input.name).await?))
 }
 
 async fn list_messages(
@@ -178,4 +187,46 @@ async fn events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::store::Store;
+
+    #[tokio::test]
+    async fn agent_can_be_renamed_over_http() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+
+        let response = router(manager)
+            .oneshot(
+                Request::patch(format!("/agents/{}", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"builder"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["name"], "builder");
+        assert_eq!(body["worktree_path"], "/tmp/worker");
+    }
 }

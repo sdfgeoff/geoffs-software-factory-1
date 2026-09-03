@@ -512,6 +512,19 @@ impl Store {
         Ok(self.agent(result.last_insert_rowid()).await?.unwrap())
     }
 
+    pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Agent, AppError> {
+        let result =
+            sqlx::query("UPDATE agents SET name = ?, updated_at = unixepoch() WHERE id = ?")
+                .bind(name)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(self.agent(id).await?.unwrap())
+    }
+
     pub async fn update_agent_runtime(
         &self,
         id: i64,
@@ -700,6 +713,17 @@ mod tests {
                 .body,
             "Schema is ready"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_can_be_renamed() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+
+        let renamed = store.rename_agent(agent.id, "builder").await.unwrap();
+
+        assert_eq!(renamed.name, "builder");
+        assert_eq!(renamed.worktree_path, "/tmp/worker");
     }
 
     #[tokio::test]
