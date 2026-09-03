@@ -334,7 +334,7 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
         notification: MergeNotification<'_>,
-    ) -> Result<(Ticket, Message), AppError> {
+    ) -> Result<(Ticket, Message, Vec<i64>), AppError> {
         let (ticket, message) = self
             .complete_review_with_message(
                 id,
@@ -350,7 +350,8 @@ impl Store {
                 }),
             )
             .await?;
-        Ok((ticket, message.expect("notification was requested")))
+        let (message, wake_agent_ids) = message.expect("notification was requested");
+        Ok((ticket, message, wake_agent_ids))
     }
 
     async fn complete_review_with_message(
@@ -360,7 +361,7 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
         message: Option<MessageWrite<'_>>,
-    ) -> Result<(Ticket, Option<Message>), AppError> {
+    ) -> Result<(Ticket, Option<(Message, Vec<i64>)>), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
@@ -729,50 +730,8 @@ impl Store {
             },
         )
         .await?;
-        let agents: Vec<(i64, String, bool)> = sqlx::query_as(
-            "SELECT a.id, a.name, EXISTS(SELECT 1 FROM agent_channel_subscriptions s \
-             WHERE s.agent_id = a.id AND s.channel_name = ?) AS subscribed FROM agents a",
-        )
-        .bind(channel)
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut wake_agent_ids = Vec::new();
-        for (target_id, name, subscribed) in agents {
-            if agent_id == Some(target_id) {
-                continue;
-            }
-            let mentioned = mentions_agent(&message.body, &name);
-            if !subscribed && !mentioned {
-                continue;
-            }
-            let prompt = format!(
-                "A message was posted in #{channel} by {}:\n{}",
-                message.author, message.body
-            );
-            let payload = serde_json::to_string(&serde_json::json!({
-                "message": prompt,
-                "channel": channel,
-                "message_id": message.id,
-                "author": message.author,
-                "body": message.body,
-                "mentioned": mentioned,
-                "subscribed": subscribed,
-            }))
-            .map_err(|error| AppError::internal(format!("failed to encode wake event: {error}")))?;
-            sqlx::query(
-                "INSERT OR IGNORE INTO agent_wake_events \
-                 (agent_id, kind, payload, deduplication_key) \
-                 VALUES (?, 'channel.message', ?, ?)",
-            )
-            .bind(target_id)
-            .bind(payload)
-            .bind(format!("channel-message:{}", message.id))
-            .execute(&mut *transaction)
-            .await?;
-            wake_agent_ids.push(target_id);
-        }
         transaction.commit().await?;
-        Ok((message, wake_agent_ids))
+        Ok(message)
     }
 
     async fn channel_exists(&self, channel: &str) -> Result<bool, sqlx::Error> {
@@ -1073,7 +1032,7 @@ impl Store {
 async fn insert_message(
     transaction: &mut Transaction<'_, Sqlite>,
     message: MessageWrite<'_>,
-) -> Result<Message, AppError> {
+) -> Result<(Message, Vec<i64>), AppError> {
     validate_channel(message.channel)?;
     validate_message(message.author, message.body)?;
     if message
@@ -1107,12 +1066,55 @@ async fn insert_message(
             .fetch_one(&mut **transaction)
             .await?
     };
-    Ok(sqlx::query_as(
+    let message: Message = sqlx::query_as(
         "SELECT id, channel_name, agent_id, author, body, created_at FROM messages WHERE id = ?",
     )
     .bind(id)
     .fetch_one(&mut **transaction)
-    .await?)
+    .await?;
+    let agents: Vec<(i64, String, bool)> = sqlx::query_as(
+        "SELECT a.id, a.name, EXISTS(SELECT 1 FROM agent_channel_subscriptions s \
+         WHERE s.agent_id = a.id AND s.channel_name = ?) AS subscribed FROM agents a",
+    )
+    .bind(&message.channel_name)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut wake_agent_ids = Vec::new();
+    for (target_id, name, subscribed) in agents {
+        if message.agent_id == Some(target_id) {
+            continue;
+        }
+        let mentioned = mentions_agent(&message.body, &name);
+        if !subscribed && !mentioned {
+            continue;
+        }
+        let prompt = format!(
+            "A message was posted in #{} by {}:\n{}",
+            message.channel_name, message.author, message.body
+        );
+        let payload = serde_json::to_string(&serde_json::json!({
+            "message": prompt,
+            "channel": message.channel_name,
+            "message_id": message.id,
+            "author": message.author,
+            "body": message.body,
+            "mentioned": mentioned,
+            "subscribed": subscribed,
+        }))
+        .map_err(|error| AppError::internal(format!("failed to encode wake event: {error}")))?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO agent_wake_events \
+             (agent_id, kind, payload, deduplication_key) \
+             VALUES (?, 'channel.message', ?, ?)",
+        )
+        .bind(target_id)
+        .bind(payload)
+        .bind(format!("channel-message:{}", message.id))
+        .execute(&mut **transaction)
+        .await?;
+        wake_agent_ids.push(target_id);
+    }
+    Ok((message, wake_agent_ids))
 }
 
 fn validate_title(title: &str) -> Result<(), AppError> {

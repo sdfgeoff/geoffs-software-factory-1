@@ -379,7 +379,7 @@ impl AgentManager {
         reviewer_id: i64,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
-        let _operation = self.operations.lock().await;
+        let operation = self.operations.lock().await;
         if !self
             .store
             .has_agent_scope(reviewer_id, "approve_review")
@@ -486,14 +486,17 @@ impl AgentManager {
             .agent(reviewer_id)
             .await?
             .ok_or_else(|| AppError::not_found("reviewer not found"))?;
-        let ticket = if let Some(channel) = self.merge_notification_channel.as_deref() {
+        let (ticket, wake_agent_ids) = if let Some(channel) =
+            self.merge_notification_channel.as_deref()
+        {
             let source_branch = ticket.implementation_branch.as_deref().unwrap_or("unknown");
             let body = format!(
                 "Ticket #{} “{}” was merged.\n\n1. Source branch: `{source_branch}`\n2. Target branch: `{target_branch}`\n3. Merge commit: `{resulting_commit}`\n4. Approved by: @{}",
                 ticket.id, ticket.title, reviewer.name
             );
             let key = format!("ticket-merge:{}:{commit}", ticket.id);
-            self.store
+            let (ticket, _message, wake_agent_ids) = self
+                .store
                 .complete_review_and_post_message(
                     ticket_id,
                     reviewer_id,
@@ -506,13 +509,20 @@ impl AgentManager {
                         deduplication_key: &key,
                     },
                 )
-                .await?
-                .0
+                .await?;
+            (ticket, wake_agent_ids)
         } else {
-            self.store
-                .complete_review(ticket_id, reviewer_id, commit, expected_revision)
-                .await?
+            (
+                self.store
+                    .complete_review(ticket_id, reviewer_id, commit, expected_revision)
+                    .await?,
+                Vec::new(),
+            )
         };
+        drop(operation);
+        for agent_id in wake_agent_ids {
+            self.deliver_pending(agent_id).await;
+        }
         self.emit(reviewer_id, "ticket_updated", json!(ticket));
         Ok(ticket)
     }
@@ -1466,6 +1476,7 @@ mod tests {
         .unwrap();
         let worker = manager.create("worker").await.unwrap();
         let reviewer = manager.create("reviewer").await.unwrap();
+        let subscriber = manager.create("subscriber").await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
@@ -1556,11 +1567,68 @@ mod tests {
             .execute_test_sql("DROP TRIGGER fail_merge_notification")
             .await
             .unwrap();
+        store
+            .execute_test_sql("INSERT INTO channels (name) VALUES ('merges')")
+            .await
+            .unwrap();
+        manager
+            .set_channel_subscriptions(subscriber.id, &["merges".into()])
+            .await
+            .unwrap();
+        while events.try_recv().is_ok() {}
+        store
+            .update_agent_runtime(
+                subscriber.id,
+                AgentState::Running,
+                Some("subscriber-thread"),
+                Some("subscriber-turn"),
+                None,
+            )
+            .await
+            .unwrap();
+        let (client, server) = duplex(8192);
+        let (reader, writer) = split(client);
+        let (rpc, _events) = RpcPeer::attach(BufReader::new(reader), writer);
+        let child = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.processes.lock().await.insert(
+            subscriber.id,
+            Arc::new(RunningAgent {
+                rpc,
+                child: Mutex::new(child),
+            }),
+        );
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/steer");
+            assert!(
+                request["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Ticket #1 “Merge me” was merged")
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turnId\":\"subscriber-turn\"}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
         let ticket = manager
             .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
             .await
             .unwrap();
-        assert_eq!(events.recv().await.unwrap().kind, "ticket_updated");
+        while events.recv().await.unwrap().kind != "ticket_updated" {}
         assert_eq!(ticket.state, TicketState::Done);
         assert_eq!(
             std::fs::read_to_string(repository.join("work.txt")).unwrap(),
@@ -1580,6 +1648,17 @@ mod tests {
         ] {
             assert!(messages[0].body.contains(expected));
         }
+        let subscriber_events = store.wake_events(subscriber.id).await.unwrap();
+        assert_eq!(subscriber_events.len(), 1);
+        assert_eq!(subscriber_events[0].kind, "channel.message");
+        assert_eq!(
+            subscriber_events[0].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
+        manager
+            .set_channel_subscriptions(subscriber.id, &[])
+            .await
+            .unwrap();
 
         let second = store
             .create_ticket(NewTicket {
