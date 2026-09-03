@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { Agent, AgentMessage } from "../types";
+import type { Agent, AgentMessage, Channel } from "../types";
 import { MessageContent } from "./MessageContent";
 interface Props {
   agents: Agent[];
+  channels: Channel[];
   selectedAgentId: number | null;
   refresh: number;
   deltas: Record<number, string>;
@@ -14,6 +15,7 @@ interface Props {
 
 export function AgentWorkspace({
   agents,
+  channels,
   selectedAgentId,
   refresh,
   deltas,
@@ -26,6 +28,7 @@ export function AgentWorkspace({
   const [renamedName, setRenamedName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
+  const [subscriptions, setSubscriptions] = useState<string[]>([]);
   const [wakeOnPendingTask, setWakeOnPendingTask] = useState(false);
   const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
   const [heartbeatMinutes, setHeartbeatMinutes] = useState("20");
@@ -51,6 +54,13 @@ export function AgentWorkspace({
   useEffect(() => {
     if (selectedAgentId)
       void api.agentScopes(selectedAgentId).then(setScopes).catch(onError);
+  }, [selectedAgentId, refresh, onError]);
+  useEffect(() => {
+    if (selectedAgentId)
+      void api
+        .agentChannelSubscriptions(selectedAgentId)
+        .then(setSubscriptions)
+        .catch(onError);
   }, [selectedAgentId, refresh, onError]);
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -102,6 +112,20 @@ export function AgentWorkspace({
       : scopes.filter((item) => item !== scope);
     try {
       setScopes(await api.setAgentScopes(selected.id, next));
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function setSubscription(channel: string, enabled: boolean) {
+    if (!selected) return;
+    const next = enabled
+      ? [...new Set([...subscriptions, channel])]
+      : subscriptions.filter((item) => item !== channel);
+    try {
+      setSubscriptions(
+        await api.setAgentChannelSubscriptions(selected.id, next),
+      );
       await onChanged();
     } catch (error) {
       onError(error);
@@ -254,6 +278,24 @@ export function AgentWorkspace({
               </fieldset>
               <button type="submit">Save wake settings</button>
             </form>
+            <fieldset className="capabilities">
+              <legend>Channel subscriptions</legend>
+              {channels.map((channel) => (
+                <label key={channel.name}>
+                  <input
+                    type="checkbox"
+                    checked={subscriptions.includes(channel.name)}
+                    onChange={(event) =>
+                      void setSubscription(channel.name, event.target.checked)
+                    }
+                  />
+                  <span>
+                    <strong>#{channel.name}</strong>
+                    Wake for new messages
+                  </span>
+                </label>
+              ))}
+            </fieldset>
             <div className="message-list agent-chat">
               {messages.map((message) => (
                 <article className={message.role} key={message.id}>

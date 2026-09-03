@@ -82,6 +82,13 @@ export const api = {
         idle_heartbeat_minutes: idleHeartbeatMinutes,
       }),
     }),
+  agentChannelSubscriptions: (id: number) =>
+    request<string[]>(`/agents/${id}/channel-subscriptions`),
+  setAgentChannelSubscriptions: (id: number, channels: string[]) =>
+    request<string[]>(`/agents/${id}/channel-subscriptions`, {
+      method: "PUT",
+      body: JSON.stringify({ channels }),
+    }),
   pauseAgent: (id: number) =>
     request<Agent>(`/agents/${id}/pause`, { method: "POST" }),
   resumeAgent: (id: number) =>

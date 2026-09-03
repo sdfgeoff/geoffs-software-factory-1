@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::HeaderMap,
     routing::get,
@@ -13,12 +13,13 @@ use multi_agent_board_protocol::{
 use serde::Deserialize;
 
 use crate::{
+    agent_runtime::AgentManager,
     domain::{Channel, Message, Project, Ticket, TicketState, WakeEvent},
     error::AppError,
     store::{NewTicket, Store, TicketChanges},
 };
 
-pub fn router(store: Store) -> Router {
+pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
         .route("/project", get(get_project).put(set_project))
         .route("/tickets", get(list_tickets).post(create_ticket))
@@ -33,6 +34,7 @@ pub fn router(store: Store) -> Router {
             "/channels/{name}/messages",
             get(read_messages).post(post_message),
         )
+        .layer(Extension(agents))
         .with_state(store)
 }
 
@@ -212,6 +214,7 @@ async fn read_messages(
 
 async fn post_message(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Path(name): Path<String>,
     headers: HeaderMap,
     Json(input): Json<PostMessageRequest>,
@@ -226,11 +229,13 @@ async fn post_message(
     } else {
         input.author
     };
-    Ok(Json(
-        store
-            .post_message(&name, agent_id, &author, &input.body)
-            .await?,
-    ))
+    let (message, wake_agent_ids) = store
+        .post_message_with_wakes(&name, agent_id, &author, &input.body)
+        .await?;
+    for agent_id in wake_agent_ids {
+        agents.deliver_pending(agent_id).await;
+    }
+    Ok(Json(message))
 }
 
 #[cfg(test)]
@@ -244,9 +249,21 @@ mod tests {
 
     use super::*;
 
+    fn test_router(store: Store) -> Router {
+        router(
+            store.clone(),
+            AgentManager::new(
+                store,
+                "codex".into(),
+                "multi-agent-board".into(),
+                "http://127.0.0.1:1/api".into(),
+            ),
+        )
+    }
+
     #[tokio::test]
     async fn tickets_round_trip_over_http() {
-        let app = router(Store::memory().await.unwrap());
+        let app = test_router(Store::memory().await.unwrap());
         let response = app
             .clone()
             .oneshot(
@@ -279,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_ticket_state_is_rejected() {
-        let response = router(Store::memory().await.unwrap())
+        let response = test_router(Store::memory().await.unwrap())
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -290,7 +307,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router(Store::memory().await.unwrap())
+        let response = test_router(Store::memory().await.unwrap())
             .oneshot(
                 Request::patch("/tickets/1")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -314,7 +331,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let app = router(store);
+        let app = test_router(store);
 
         let response = app
             .clone()
@@ -344,7 +361,7 @@ mod tests {
     async fn agent_messages_keep_a_stable_author_identity() {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
-        let response = router(store)
+        let response = test_router(store)
             .oneshot(
                 Request::post("/channels/general/messages")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -364,10 +381,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn posting_a_mention_enqueues_a_durable_wake_event() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .update_agent_runtime(
+                agent.id,
+                crate::domain::AgentState::Paused,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let response = test_router(store.clone())
+            .oneshot(
+                Request::post("/channels/general/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"author":"human","body":"Please check this, @worker."}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = store.wake_events(agent.id).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "channel.message");
+        assert_eq!(
+            events[0].delivery_state,
+            crate::domain::WakeEventState::Pending
+        );
+    }
+
+    #[tokio::test]
     async fn wake_events_round_trip_and_deduplicate_over_http() {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("first", "/tmp/first").await.unwrap();
-        let app = router(store);
+        let app = test_router(store);
         let request = || {
             Request::post(format!("/agents/{}/wake-events", agent.id))
                 .header(header::CONTENT_TYPE, "application/json")

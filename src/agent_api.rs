@@ -7,8 +7,8 @@ use axum::{
 };
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, CreateAgentRequest, RenameAgentRequest, RequestChangesRequest,
-    ReviewRevisionRequest, SendAgentMessageRequest, SetAgentScopesRequest,
-    SetAgentWakeSettingsRequest,
+    ReviewRevisionRequest, SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
+    SetAgentScopesRequest, SetAgentWakeSettingsRequest,
 };
 use std::{convert::Infallible, time::Duration};
 
@@ -35,6 +35,10 @@ pub fn router(manager: AgentManager) -> Router {
         .route(
             "/agents/{id}/wake-settings",
             axum::routing::put(set_agent_wake_settings),
+        )
+        .route(
+            "/agents/{id}/channel-subscriptions",
+            get(agent_channel_subscriptions).put(set_agent_channel_subscriptions),
         )
         .route("/tickets/{id}/submit-review", post(submit_review))
         .route("/tickets/{id}/claim-review", post(claim_review))
@@ -115,6 +119,25 @@ async fn set_agent_wake_settings(
     Ok(Json(
         manager
             .set_wake_settings(id, input.wake_on_pending_task, input.idle_heartbeat_minutes)
+            .await?,
+    ))
+}
+
+async fn agent_channel_subscriptions(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(manager.channel_subscriptions(id).await?))
+}
+
+async fn set_agent_channel_subscriptions(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    Json(input): Json<SetAgentChannelSubscriptionsRequest>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(
+        manager
+            .set_channel_subscriptions(id, &input.channels)
             .await?,
     ))
 }
@@ -346,5 +369,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn channel_subscriptions_are_configurable_over_http() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(manager);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/agents/{}/channel-subscriptions", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"channels":["general"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/agents/{}/channel-subscriptions", agent.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body, serde_json::json!(["general"]));
     }
 }

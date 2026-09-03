@@ -247,6 +247,23 @@ impl AgentManager {
         self.store.set_agent_scopes(agent_id, scopes).await
     }
 
+    pub async fn channel_subscriptions(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
+        self.store.agent_channel_subscriptions(agent_id).await
+    }
+
+    pub async fn set_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let channels = self
+            .store
+            .set_agent_channel_subscriptions(agent_id, channels)
+            .await?;
+        self.emit(agent_id, "channel_subscriptions", json!(channels));
+        Ok(channels)
+    }
+
     pub async fn set_wake_settings(
         &self,
         agent_id: i64,
@@ -1135,6 +1152,51 @@ mod tests {
             manager.store.agent_messages(agent.id).await.unwrap().len(),
             1
         );
+        assert_eq!(
+            manager.store.wake_events(agent.id).await.unwrap()[0].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribed_channel_messages_steer_an_active_turn() {
+        let (manager, agent, _rpc, server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        manager
+            .set_channel_subscriptions(agent.id, &["general".into()])
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/steer");
+            assert_eq!(
+                request["params"]["input"][0]["text"],
+                "A message was posted in #general by human:\nStatus changed"
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turnId\":\"turn-1\"}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let (_, targets) = manager
+            .store
+            .post_message_with_wakes("general", None, "human", "Status changed")
+            .await
+            .unwrap();
+        for agent_id in targets {
+            manager.deliver_pending(agent_id).await;
+        }
+
         assert_eq!(
             manager.store.wake_events(agent.id).await.unwrap()[0].delivery_state,
             crate::domain::WakeEventState::Delivered

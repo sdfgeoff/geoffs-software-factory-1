@@ -6,6 +6,7 @@ import { AgentWorkspace } from "./AgentWorkspace";
 
 vi.mock("../api", () => ({
   api: {
+    agentChannelSubscriptions: vi.fn(),
     agentMessages: vi.fn(),
     agentScopes: vi.fn(),
     pauseAgent: vi.fn(),
@@ -13,6 +14,7 @@ vi.mock("../api", () => ({
     resumeAgent: vi.fn(),
     sendAgentMessage: vi.fn(),
     setAgentScopes: vi.fn(),
+    setAgentChannelSubscriptions: vi.fn(),
     setAgentWakeSettings: vi.fn(),
   },
 }));
@@ -36,6 +38,7 @@ describe("AgentWorkspace", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
+    vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentMessages).mockResolvedValue([]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
     vi.mocked(api.pauseAgent).mockResolvedValue(agent);
@@ -43,6 +46,7 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.resumeAgent).mockResolvedValue(agent);
     vi.mocked(api.sendAgentMessage).mockResolvedValue(agent);
     vi.mocked(api.setAgentScopes).mockResolvedValue(["approve_review"]);
+    vi.mocked(api.setAgentChannelSubscriptions).mockResolvedValue(["general"]);
     vi.mocked(api.setAgentWakeSettings).mockResolvedValue(agent);
   });
 
@@ -50,6 +54,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
         selectedAgentId={agent.id}
         refresh={0}
         deltas={{}}
@@ -67,10 +72,35 @@ describe("AgentWorkspace", () => {
     );
   });
 
+  it("subscribes to a message-board channel", async () => {
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        selectedAgentId={agent.id}
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /#general/i }),
+    );
+    await waitFor(() =>
+      expect(api.setAgentChannelSubscriptions).toHaveBeenCalledWith(1, [
+        "general",
+      ]),
+    );
+  });
+
   it("saves pending-task and heartbeat settings", async () => {
     render(
       <AgentWorkspace
         agents={[agent]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
         selectedAgentId={agent.id}
         refresh={0}
         deltas={{}}
@@ -97,6 +127,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
         selectedAgentId={agent.id}
         refresh={0}
         deltas={{}}
@@ -121,6 +152,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[{ ...agent, state: "running", active_turn_id: "turn-1" }]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
         selectedAgentId={agent.id}
         refresh={0}
         deltas={{}}
@@ -147,6 +179,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[{ ...agent, state: "error", last_error: "Turn failed" }]}
+        channels={[{ name: "general", most_recent_message_at: 0 }]}
         selectedAgentId={agent.id}
         refresh={0}
         deltas={{}}

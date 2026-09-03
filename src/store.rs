@@ -673,8 +673,10 @@ impl Store {
         author: &str,
         body: &str,
     ) -> Result<Message, AppError> {
-        self.post_message_with_key(channel, agent_id, author, body, None)
-            .await
+        Ok(self
+            .post_message_with_key(channel, agent_id, author, body, None)
+            .await?
+            .0)
     }
 
     pub async fn post_message_once(
@@ -690,7 +692,20 @@ impl Store {
                 "message deduplication key must contain between 1 and 500 characters",
             ));
         }
-        self.post_message_with_key(channel, agent_id, author, body, Some(deduplication_key))
+        Ok(self
+            .post_message_with_key(channel, agent_id, author, body, Some(deduplication_key))
+            .await?
+            .0)
+    }
+
+    pub async fn post_message_with_wakes(
+        &self,
+        channel: &str,
+        agent_id: Option<i64>,
+        author: &str,
+        body: &str,
+    ) -> Result<(Message, Vec<i64>), AppError> {
+        self.post_message_with_key(channel, agent_id, author, body, None)
             .await
     }
 
@@ -701,7 +716,7 @@ impl Store {
         author: &str,
         body: &str,
         deduplication_key: Option<&str>,
-    ) -> Result<Message, AppError> {
+    ) -> Result<(Message, Vec<i64>), AppError> {
         let mut transaction = self.pool.begin().await?;
         let message = insert_message(
             &mut transaction,
@@ -714,8 +729,50 @@ impl Store {
             },
         )
         .await?;
+        let agents: Vec<(i64, String, bool)> = sqlx::query_as(
+            "SELECT a.id, a.name, EXISTS(SELECT 1 FROM agent_channel_subscriptions s \
+             WHERE s.agent_id = a.id AND s.channel_name = ?) AS subscribed FROM agents a",
+        )
+        .bind(channel)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut wake_agent_ids = Vec::new();
+        for (target_id, name, subscribed) in agents {
+            if agent_id == Some(target_id) {
+                continue;
+            }
+            let mentioned = mentions_agent(&message.body, &name);
+            if !subscribed && !mentioned {
+                continue;
+            }
+            let prompt = format!(
+                "A message was posted in #{channel} by {}:\n{}",
+                message.author, message.body
+            );
+            let payload = serde_json::to_string(&serde_json::json!({
+                "message": prompt,
+                "channel": channel,
+                "message_id": message.id,
+                "author": message.author,
+                "body": message.body,
+                "mentioned": mentioned,
+                "subscribed": subscribed,
+            }))
+            .map_err(|error| AppError::internal(format!("failed to encode wake event: {error}")))?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_wake_events \
+                 (agent_id, kind, payload, deduplication_key) \
+                 VALUES (?, 'channel.message', ?, ?)",
+            )
+            .bind(target_id)
+            .bind(payload)
+            .bind(format!("channel-message:{}", message.id))
+            .execute(&mut *transaction)
+            .await?;
+            wake_agent_ids.push(target_id);
+        }
         transaction.commit().await?;
-        Ok(message)
+        Ok((message, wake_agent_ids))
     }
 
     async fn channel_exists(&self, channel: &str) -> Result<bool, sqlx::Error> {
@@ -723,6 +780,59 @@ impl Store {
             .bind(channel)
             .fetch_one(&self.pool)
             .await
+    }
+
+    pub async fn agent_channel_subscriptions(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<String>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT channel_name FROM agent_channel_subscriptions \
+             WHERE agent_id = ? ORDER BY channel_name",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn set_agent_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        let mut channels = channels.to_vec();
+        channels.sort();
+        channels.dedup();
+        for channel in &channels {
+            validate_channel(channel)?;
+            if !self.channel_exists(channel).await? {
+                return Err(AppError::bad_request(format!(
+                    "channel #{channel} does not exist"
+                )));
+            }
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM agent_channel_subscriptions WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        for channel in &channels {
+            sqlx::query(
+                "INSERT INTO agent_channel_subscriptions (agent_id, channel_name) VALUES (?, ?)",
+            )
+            .bind(agent_id)
+            .bind(channel)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(channels)
     }
 
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
@@ -1042,6 +1152,14 @@ fn validate_message(author: &str, body: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn mentions_agent(body: &str, name: &str) -> bool {
+    let mention = format!("@{name}");
+    body.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '@' | '-' | '_'))
+    })
+    .any(|token| token == mention)
+}
+
 fn validate_scope(scope: &str) -> Result<(), AppError> {
     if scope.is_empty()
         || scope.len() > 100
@@ -1168,6 +1286,42 @@ mod tests {
 
         assert_eq!(retry.id, first.id);
         assert_eq!(store.messages("merges", None, None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn channel_posts_wake_subscribers_and_exact_mentions() {
+        let store = Store::memory().await.unwrap();
+        let subscriber = store
+            .create_agent("subscriber", "/tmp/subscriber")
+            .await
+            .unwrap();
+        let mentioned = store
+            .create_agent("mentioned", "/tmp/mentioned")
+            .await
+            .unwrap();
+        let partial = store.create_agent("mention", "/tmp/mention").await.unwrap();
+        store
+            .set_agent_channel_subscriptions(subscriber.id, &["general".into()])
+            .await
+            .unwrap();
+
+        let (message, mut targets) = store
+            .post_message_with_wakes("general", None, "human", "Please check this, @mentioned.")
+            .await
+            .unwrap();
+        targets.sort();
+
+        assert_eq!(targets, vec![subscriber.id, mentioned.id]);
+        assert!(store.wake_events(partial.id).await.unwrap().is_empty());
+        let subscriber_events = store.wake_events(subscriber.id).await.unwrap();
+        let subscriber_event = &subscriber_events[0];
+        assert_eq!(subscriber_event.kind, "channel.message");
+        assert_eq!(subscriber_event.payload["channel"], "general");
+        assert_eq!(subscriber_event.payload["message_id"], message.id);
+        assert_eq!(subscriber_event.payload["subscribed"], true);
+        let mention_events = store.wake_events(mentioned.id).await.unwrap();
+        let mention_event = &mention_events[0];
+        assert_eq!(mention_event.payload["mentioned"], true);
     }
 
     #[tokio::test]

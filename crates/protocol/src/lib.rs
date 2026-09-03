@@ -66,6 +66,11 @@ pub struct SetAgentWakeSettingsRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct SetAgentChannelSubscriptionsRequest {
+    pub channels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ReviewRevisionRequest {
     pub expected_revision: Option<i64>,
 }

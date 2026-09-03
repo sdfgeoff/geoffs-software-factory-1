@@ -1,4 +1,4 @@
-use multi_agent_board::store::Store;
+use multi_agent_board::{agent_runtime::AgentManager, store::Store};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -34,7 +34,13 @@ async fn mcp_calls_the_server_without_database_access() {
     store.create_agent("second", "/tmp/second").await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let app = multi_agent_board::api::router(store.clone());
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store.clone(), agents);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let base_url = format!("http://{address}");
 

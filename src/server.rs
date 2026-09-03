@@ -5,7 +5,7 @@ use crate::{agent_runtime::AgentManager, assets, store::Store};
 pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
         .route("/api/health", get(health))
-        .nest("/api", crate::api::router(store))
+        .nest("/api", crate::api::router(store, agents.clone()))
         .nest("/api", crate::agent_api::router(agents))
         .fallback(assets::serve)
 }

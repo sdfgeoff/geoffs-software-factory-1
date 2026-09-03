@@ -119,6 +119,7 @@ export function App() {
       {view === "agents" && (
         <AgentWorkspace
           agents={agents}
+          channels={channels}
           selectedAgentId={selectedAgentId}
           refresh={refresh}
           deltas={deltas}
