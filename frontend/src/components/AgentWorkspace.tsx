@@ -75,7 +75,7 @@ export function AgentWorkspace({
   async function toggle() {
     if (!selected) return;
     try {
-      selected.state === "paused"
+      selected.state === "paused" || selected.state === "error"
         ? await api.resumeAgent(selected.id)
         : await api.pauseAgent(selected.id);
       await onChanged();
@@ -138,7 +138,9 @@ export function AgentWorkspace({
                 <p title={selected.worktree_path}>{selected.worktree_path}</p>
               </div>
               <button className="secondary" onClick={toggle}>
-                {selected.state === "paused" ? "Resume" : "Pause"}
+                {selected.state === "paused" || selected.state === "error"
+                  ? "Resume"
+                  : "Pause"}
               </button>
             </div>
             {selected.last_error && (
@@ -203,19 +205,9 @@ export function AgentWorkspace({
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   required
-                  disabled={
-                    selected.state !== "idle" && selected.state !== "error"
-                  }
                 />
               </label>
-              <button
-                type="submit"
-                disabled={
-                  selected.state !== "idle" && selected.state !== "error"
-                }
-              >
-                Send
-              </button>
+              <button type="submit">Send</button>
             </form>
           </>
         ) : (

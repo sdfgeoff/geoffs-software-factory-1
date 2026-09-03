@@ -58,6 +58,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::current_exe()?,
         format!("http://{coordination_address}/api"),
     );
+    let pending_delivery = agents.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        pending_delivery.deliver_pending_events().await;
+    });
     println!("Multi-agent board listening on http://{address}");
     axum::serve(listener, server::router(store, agents)).await?;
     Ok(())

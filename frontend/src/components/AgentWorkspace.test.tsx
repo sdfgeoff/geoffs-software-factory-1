@@ -8,7 +8,10 @@ vi.mock("../api", () => ({
   api: {
     agentMessages: vi.fn(),
     agentScopes: vi.fn(),
+    pauseAgent: vi.fn(),
     renameAgent: vi.fn(),
+    resumeAgent: vi.fn(),
+    sendAgentMessage: vi.fn(),
     setAgentScopes: vi.fn(),
   },
 }));
@@ -31,7 +34,10 @@ describe("AgentWorkspace", () => {
   beforeEach(() => {
     vi.mocked(api.agentMessages).mockResolvedValue([]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
+    vi.mocked(api.pauseAgent).mockResolvedValue(agent);
     vi.mocked(api.renameAgent).mockResolvedValue(agent);
+    vi.mocked(api.resumeAgent).mockResolvedValue(agent);
+    vi.mocked(api.sendAgentMessage).mockResolvedValue(agent);
     vi.mocked(api.setAgentScopes).mockResolvedValue(["approve_review"]);
   });
 
@@ -79,5 +85,49 @@ describe("AgentWorkspace", () => {
       expect(api.renameAgent).toHaveBeenCalledWith(agent.id, "architect"),
     );
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("sends a message while an agent is running", async () => {
+    render(
+      <AgentWorkspace
+        agents={[{ ...agent, state: "running", active_turn_id: "turn-1" }]}
+        selectedAgentId={agent.id}
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Check the failing test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(api.sendAgentMessage).toHaveBeenCalledWith(
+        agent.id,
+        "Check the failing test",
+      ),
+    );
+  });
+
+  it("requires an explicit resume for an error-state agent", async () => {
+    render(
+      <AgentWorkspace
+        agents={[{ ...agent, state: "error", last_error: "Turn failed" }]}
+        selectedAgentId={agent.id}
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+
+    await waitFor(() => expect(api.resumeAgent).toHaveBeenCalledWith(agent.id));
   });
 });

@@ -199,7 +199,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::store::Store;
+    use crate::{domain::AgentState, store::Store};
 
     #[tokio::test]
     async fn agent_can_be_renamed_over_http() {
@@ -228,5 +228,41 @@ mod tests {
                 .unwrap();
         assert_eq!(body["name"], "builder");
         assert_eq!(body["worktree_path"], "/tmp/worker");
+    }
+
+    #[tokio::test]
+    async fn messages_sent_to_paused_agents_are_accepted_and_left_pending() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .update_agent_runtime(agent.id, AgentState::Paused, None, None, None)
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+
+        let response = router(manager)
+            .oneshot(
+                Request::post(format!("/agents/{}/messages", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"Read this later"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["state"], "paused");
+        assert_eq!(
+            store.wake_events(agent.id).await.unwrap()[0].delivery_state,
+            crate::domain::WakeEventState::Pending
+        );
     }
 }

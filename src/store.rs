@@ -714,6 +714,29 @@ impl Store {
         Ok(self.agent(id).await?.unwrap())
     }
 
+    pub async fn finish_agent_turn(
+        &self,
+        id: i64,
+        turn_id: &str,
+        state: AgentState,
+        last_error: Option<&str>,
+    ) -> Result<Option<Agent>, AppError> {
+        let result = sqlx::query(
+            "UPDATE agents SET state = ?, active_turn_id = NULL, last_error = ?, \
+             updated_at = unixepoch() WHERE id = ? AND active_turn_id = ?",
+        )
+        .bind(state)
+        .bind(last_error)
+        .bind(id)
+        .bind(turn_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(self.agent(id).await?)
+    }
+
     pub async fn agent_messages(&self, agent_id: i64) -> Result<Vec<AgentMessage>, AppError> {
         if self.agent(agent_id).await?.is_none() {
             return Err(AppError::not_found("agent not found"));
@@ -751,6 +774,41 @@ impl Store {
         .bind(result.last_insert_rowid())
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    pub async fn enqueue_agent_message(
+        &self,
+        agent_id: i64,
+        body: &str,
+    ) -> Result<AgentMessage, AppError> {
+        if body.trim().is_empty() || body.chars().count() > 50_000 {
+            return Err(AppError::bad_request(
+                "agent message must contain between 1 and 50000 characters",
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let result =
+            sqlx::query("INSERT INTO agent_messages (agent_id, role, body) VALUES (?, 'user', ?)")
+                .bind(agent_id)
+                .bind(body.trim())
+                .execute(&mut *transaction)
+                .await?;
+        let message: AgentMessage = sqlx::query_as(
+            "SELECT id, agent_id, role, body, created_at FROM agent_messages WHERE id = ?",
+        )
+        .bind(result.last_insert_rowid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let payload = serde_json::json!({"message": &message.body, "message_id": message.id});
+        sqlx::query(
+            "INSERT INTO agent_wake_events (agent_id, kind, payload) VALUES (?, 'message', ?)",
+        )
+        .bind(agent_id)
+        .bind(payload.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(message)
     }
 
     pub async fn recover_agents_after_restart(&self) -> Result<u64, sqlx::Error> {

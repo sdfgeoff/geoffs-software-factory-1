@@ -19,7 +19,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, AgentState},
+    domain::{Agent, AgentState, WakeEvent},
     error::AppError,
     store::Store,
 };
@@ -161,6 +161,14 @@ impl AgentManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.events.subscribe()
+    }
+
+    pub async fn deliver_pending_events(&self) {
+        if let Ok(agents) = self.store.agents().await {
+            for agent in agents {
+                self.deliver_pending(agent.id).await;
+            }
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {
@@ -435,49 +443,32 @@ impl AgentManager {
     }
 
     pub async fn send_message(&self, agent_id: i64, message: &str) -> Result<Agent, AppError> {
-        let _operation = self.operations.lock().await;
-        self.start_message(agent_id, "user", message).await
-    }
-
-    async fn start_message(
-        &self,
-        agent_id: i64,
-        role: &str,
-        message: &str,
-    ) -> Result<Agent, AppError> {
-        let agent = self
-            .store
+        {
+            let _operation = self.operations.lock().await;
+            if self.store.agent(agent_id).await?.is_none() {
+                return Err(AppError::not_found("agent not found"));
+            }
+            let user_message = self.store.enqueue_agent_message(agent_id, message).await?;
+            self.emit(agent_id, "message", json!(user_message));
+        }
+        self.deliver_pending(agent_id).await;
+        self.store
             .agent(agent_id)
             .await?
-            .ok_or_else(|| AppError::not_found("agent not found"))?;
-        match agent.state {
-            AgentState::Paused => {
-                return Err(AppError::conflict("resume the agent before messaging it"));
-            }
-            AgentState::Running | AgentState::AwaitingApproval => {
-                return Err(AppError::conflict("agent already has an active turn"));
-            }
-            AgentState::Idle | AgentState::Error => {}
-        }
-        let user_message = self
-            .store
-            .add_agent_message(agent_id, role, message)
-            .await?;
-        self.emit(agent_id, "message", json!(user_message));
-        self.store
-            .update_agent_runtime(agent_id, AgentState::Running, None, None, None)
-            .await?;
+            .ok_or_else(|| AppError::not_found("agent not found"))
+    }
 
-        let running = match self.ensure_process(&agent).await {
+    async fn start_inbox_turn(&self, agent: &Agent, message: &str) -> Result<(), AppError> {
+        let running = match self.ensure_process(agent).await {
             Ok(running) => running,
             Err(error) => {
-                self.fail_agent(agent_id, &error.to_string()).await;
+                self.fail_agent(agent.id, &error.to_string()).await;
                 return Err(error);
             }
         };
         let thread_id = self
             .store
-            .agent(agent_id)
+            .agent(agent.id)
             .await?
             .and_then(|agent| agent.thread_id)
             .ok_or_else(|| AppError::internal("agent has no Codex thread"))?;
@@ -490,18 +481,42 @@ impl AgentManager {
             .await;
         match result {
             Ok(result) => {
-                let turn_id = result.pointer("/turn/id").and_then(Value::as_str);
-                let updated = self
-                    .store
-                    .update_agent_runtime(agent_id, AgentState::Running, None, turn_id, None)
+                let turn_id = result
+                    .pointer("/turn/id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AppError::internal("Codex did not return a turn ID"))?;
+                self.store
+                    .update_agent_runtime(agent.id, AgentState::Running, None, Some(turn_id), None)
                     .await?;
-                Ok(updated)
+                Ok(())
             }
             Err(error) => {
-                self.fail_agent(agent_id, &error.to_string()).await;
+                self.fail_agent(agent.id, &error.to_string()).await;
                 Err(error)
             }
         }
+    }
+
+    async fn steer_inbox_turn(&self, agent: &Agent, message: &str) -> Result<(), AppError> {
+        let (Some(thread_id), Some(turn_id)) = (&agent.thread_id, &agent.active_turn_id) else {
+            return self.start_inbox_turn(agent, message).await;
+        };
+        let running = self.ensure_process(agent).await?;
+        if running
+            .rpc
+            .request("turn/steer", steer_params(thread_id, turn_id, message))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let agent = self
+            .store
+            .agent(agent.id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        self.start_inbox_turn(&agent, message).await
     }
 
     async fn notify_agent(&self, agent_id: i64, message: &str) -> Result<(), AppError> {
@@ -510,26 +525,41 @@ impl AgentManager {
         Ok(())
     }
 
-    async fn deliver_pending(&self, agent_id: i64) {
+    pub async fn deliver_pending(&self, agent_id: i64) {
         let _operation = self.operations.lock().await;
-        let Ok(Some(agent)) = self.store.agent(agent_id).await else {
-            return;
-        };
-        if !matches!(agent.state, AgentState::Idle | AgentState::Error) {
-            return;
-        }
-        let Ok(Some((notification_id, message))) = self.store.pending_notification(agent_id).await
-        else {
-            return;
-        };
-        if self
-            .start_message(agent_id, "system", &message)
-            .await
-            .is_ok()
-        {
-            let _ = self.store.delete_notification(notification_id).await;
-        } else {
-            let _ = self.store.retry_wake_event(notification_id).await;
+        loop {
+            let Ok(Some(agent)) = self.store.agent(agent_id).await else {
+                return;
+            };
+            if matches!(agent.state, AgentState::Paused | AgentState::Error) {
+                return;
+            }
+            let Ok(Some(event)) = self.store.claim_pending_wake_event(agent_id).await else {
+                return;
+            };
+            let message = wake_event_message(&event);
+            let delivered = match agent.state {
+                AgentState::Idle => self.start_inbox_turn(&agent, &message).await,
+                AgentState::Running | AgentState::AwaitingApproval => {
+                    self.steer_inbox_turn(&agent, &message).await
+                }
+                AgentState::Paused | AgentState::Error => unreachable!(),
+            };
+            if delivered.is_err() {
+                let _ = self.store.retry_wake_event(event.id).await;
+                return;
+            }
+            if event.kind != "message"
+                && let Ok(message) = self
+                    .store
+                    .add_agent_message(agent_id, "system", &message)
+                    .await
+            {
+                self.emit(agent_id, "message", json!(message));
+            }
+            if self.store.complete_wake_event(event.id).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -707,6 +737,9 @@ impl AgentManager {
                 }
             }
             "turn/completed" => {
+                let Some(turn_id) = event.pointer("/params/turn/id").and_then(Value::as_str) else {
+                    return;
+                };
                 let status = event
                     .pointer("/params/turn/status")
                     .and_then(Value::as_str)
@@ -719,15 +752,17 @@ impl AgentManager {
                 } else {
                     AgentState::Error
                 };
-                if let Ok(agent) = self
+                if let Ok(Some(agent)) = self
                     .store
-                    .update_agent_runtime(agent_id, state, None, None, error)
+                    .finish_agent_turn(agent_id, turn_id, state, error)
                     .await
                 {
                     self.emit(agent_id, "agent_updated", json!(agent));
+                    if state == AgentState::Idle {
+                        let manager = self.clone();
+                        tokio::spawn(async move { manager.deliver_pending(agent_id).await });
+                    }
                 }
-                let manager = self.clone();
-                tokio::spawn(async move { manager.deliver_pending(agent_id).await });
             }
             "error" => {
                 let message = event
@@ -821,6 +856,23 @@ fn turn_params(thread_id: &str, message: &str, worktree_path: &str) -> Value {
     })
 }
 
+fn steer_params(thread_id: &str, turn_id: &str, message: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "expectedTurnId": turn_id,
+        "input": [{"type": "text", "text": message}]
+    })
+}
+
+fn wake_event_message(event: &WakeEvent) -> String {
+    event
+        .payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Agent inbox event `{}`:\n{}", event.kind, event.payload))
+}
+
 fn worktree_path(root: &Path, name: &str) -> Result<PathBuf, AppError> {
     let parent = root
         .parent()
@@ -839,7 +891,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::{domain::TicketState, store::NewTicket};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, duplex, split};
 
     use super::*;
 
@@ -879,6 +931,183 @@ mod tests {
 
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandboxPolicy"]["type"], "dangerFullAccess");
+    }
+
+    async fn manager_with_fake_agent(
+        state: AgentState,
+        active_turn_id: Option<&str>,
+    ) -> (AgentManager, Agent, RpcPeer, DuplexStream) {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store
+            .update_agent_runtime(agent.id, state, Some("thread-1"), active_turn_id, None)
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let (client, server) = duplex(8192);
+        let (reader, writer) = split(client);
+        let (rpc, _events) = RpcPeer::attach(BufReader::new(reader), writer);
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60"]).kill_on_drop(true);
+        let child = command.spawn().unwrap();
+        manager.processes.lock().await.insert(
+            agent.id,
+            Arc::new(RunningAgent {
+                rpc: rpc.clone(),
+                child: Mutex::new(child),
+            }),
+        );
+        (manager, agent, rpc, server)
+    }
+
+    #[tokio::test]
+    async fn messages_steer_an_active_turn() {
+        let (manager, agent, _rpc, server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/steer");
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            assert_eq!(request["params"]["expectedTurnId"], "turn-1");
+            assert_eq!(request["params"]["input"][0]["text"], "New context");
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turnId\":\"turn-1\"}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let updated = manager.send_message(agent.id, "New context").await.unwrap();
+
+        assert_eq!(updated.state, AgentState::Running);
+        assert_eq!(updated.active_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            manager.store.agent_messages(agent.id).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            manager.store.wake_events(agent.id).await.unwrap()[0].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_start_a_turn_for_an_idle_agent() {
+        let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/start");
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-2\"}}}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let updated = manager.send_message(agent.id, "Start again").await.unwrap();
+
+        assert_eq!(updated.state, AgentState::Running);
+        assert_eq!(updated.active_turn_id.as_deref(), Some("turn-2"));
+    }
+
+    #[tokio::test]
+    async fn steer_race_starts_a_replacement_turn_and_ignores_stale_completion() {
+        let (manager, agent, rpc, server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let steer: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(steer["method"], "turn/steer");
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"error\":{{\"message\":\"turn completed\"}}}}\n",
+                        steer["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let start: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(start["method"], "turn/start");
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-2\"}}}}}}\n",
+                        start["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        manager.send_message(agent.id, "Race safely").await.unwrap();
+        manager
+            .handle_event(
+                agent.id,
+                &rpc,
+                json!({
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-1", "status": "completed"}}
+                }),
+            )
+            .await;
+
+        let updated = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(updated.state, AgentState::Running);
+        assert_eq!(updated.active_turn_id.as_deref(), Some("turn-2"));
+    }
+
+    #[tokio::test]
+    async fn messages_stay_pending_while_paused_or_in_error() {
+        for state in [AgentState::Paused, AgentState::Error] {
+            let store = Store::memory().await.unwrap();
+            let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+            store
+                .update_agent_runtime(agent.id, state, None, None, Some("not ready"))
+                .await
+                .unwrap();
+            let manager = AgentManager::new(
+                store.clone(),
+                "codex".into(),
+                "multi-agent-board".into(),
+                "http://127.0.0.1:1/api".into(),
+            );
+
+            let unchanged = manager.send_message(agent.id, "Wait here").await.unwrap();
+
+            assert_eq!(unchanged.state, state);
+            assert_eq!(store.agent_messages(agent.id).await.unwrap().len(), 1);
+            assert_eq!(
+                store.wake_events(agent.id).await.unwrap()[0].delivery_state,
+                crate::domain::WakeEventState::Pending
+            );
+        }
     }
 
     #[tokio::test]
@@ -997,7 +1226,7 @@ mod tests {
             .unwrap();
         for agent_id in [worker.id, reviewer.id] {
             store
-                .update_agent_runtime(agent_id, AgentState::Running, None, None, None)
+                .update_agent_runtime(agent_id, AgentState::Error, None, None, Some("test"))
                 .await
                 .unwrap();
         }
