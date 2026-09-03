@@ -410,10 +410,21 @@ impl AgentManager {
         if agent.name == name {
             return Ok(agent);
         }
+        if matches!(
+            agent.state,
+            AgentState::Running | AgentState::AwaitingApproval
+        ) {
+            return Err(AppError::conflict(
+                "wait for the active turn to finish before renaming the agent",
+            ));
+        }
         if self.store.agent_named(name).await?.is_some() {
             return Err(AppError::conflict("agent name already exists"));
         }
         let agent = self.store.rename_agent(agent_id, name).await?;
+        if let Some(running) = self.processes.lock().await.remove(&agent_id) {
+            let _ = running.child.lock().await.kill().await;
+        }
         self.emit(agent.id, "agent_updated", json!(agent));
         Ok(agent)
     }
@@ -605,10 +616,7 @@ impl AgentManager {
         .await?;
         rpc.notify("initialized", json!({})).await?;
 
-        let instructions = format!(
-            "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
-            agent.id, agent.name
-        );
+        let instructions = agent_instructions(agent);
         let params = if let Some(thread_id) = &agent.thread_id {
             json!({
                 "threadId": thread_id, "cwd": agent.worktree_path,
@@ -634,14 +642,12 @@ impl AgentManager {
         self.store
             .update_agent_runtime(agent.id, AgentState::Running, Some(thread_id), None, None)
             .await?;
-        if agent.thread_id.is_none() {
-            let _ = rpc
-                .request(
-                    "thread/name/set",
-                    json!({"threadId": thread_id, "name": agent.name}),
-                )
-                .await;
-        }
+        let _ = rpc
+            .request(
+                "thread/name/set",
+                json!({"threadId": thread_id, "name": agent.name}),
+            )
+            .await;
         let running = Arc::new(RunningAgent {
             rpc,
             child: Mutex::new(child),
@@ -788,6 +794,13 @@ fn validate_agent_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn agent_instructions(agent: &Agent) -> String {
+    format!(
+        "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
+        agent.id, agent.name
+    )
+}
+
 fn turn_params(thread_id: &str, message: &str, worktree_path: &str) -> Value {
     json!({
         "threadId": thread_id,
@@ -901,6 +914,39 @@ mod tests {
         assert!(Path::new(&first.worktree_path).join(".git").exists());
         assert!(Path::new(&second.worktree_path).join(".git").exists());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn renaming_a_started_agent_refreshes_its_runtime_identity() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store
+            .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let (client, _server) = duplex(4096);
+        let (reader, writer) = split(client);
+        let (rpc, _events) = RpcPeer::attach(BufReader::new(reader), writer);
+        let child = Command::new("sh").args(["-c", "sleep 60"]).spawn().unwrap();
+        manager.processes.lock().await.insert(
+            agent.id,
+            Arc::new(RunningAgent {
+                rpc,
+                child: Mutex::new(child),
+            }),
+        );
+
+        let renamed = manager.rename(agent.id, "builder").await.unwrap();
+
+        assert!(!manager.processes.lock().await.contains_key(&agent.id));
+        assert!(agent_instructions(&renamed).contains("agent name is 'builder'"));
+        assert!(!agent_instructions(&renamed).contains("agent name is 'worker'"));
     }
 
     #[tokio::test]

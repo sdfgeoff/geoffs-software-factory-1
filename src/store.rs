@@ -513,15 +513,26 @@ impl Store {
     }
 
     pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Agent, AppError> {
+        let current = self
+            .agent(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        let mut transaction = self.pool.begin().await?;
         let result =
             sqlx::query("UPDATE agents SET name = ?, updated_at = unixepoch() WHERE id = ?")
                 .bind(name)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
+        sqlx::query("UPDATE messages SET author = ? WHERE author = ?")
+            .bind(name)
+            .bind(current.name)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(self.agent(id).await?.unwrap())
     }
 
@@ -719,11 +730,19 @@ mod tests {
     async fn agent_can_be_renamed() {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .post_message("general", "worker", "Finished")
+            .await
+            .unwrap();
 
         let renamed = store.rename_agent(agent.id, "builder").await.unwrap();
 
         assert_eq!(renamed.name, "builder");
         assert_eq!(renamed.worktree_path, "/tmp/worker");
+        assert_eq!(
+            store.messages("general", None, None).await.unwrap()[0].author,
+            "builder"
+        );
     }
 
     #[tokio::test]

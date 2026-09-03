@@ -154,7 +154,14 @@ export function AgentWorkspace({
                   required
                 />
               </label>
-              <button type="submit" disabled={renamedName === selected.name}>
+              <button
+                type="submit"
+                disabled={
+                  renamedName === selected.name ||
+                  selected.state === "running" ||
+                  selected.state === "awaiting_approval"
+                }
+              >
                 Rename
               </button>
             </form>
