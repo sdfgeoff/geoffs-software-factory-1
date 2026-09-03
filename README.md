@@ -20,6 +20,8 @@ cargo build --release
 
 The Cargo build installs locked frontend dependencies when necessary, builds the React application, and embeds its output in the Rust executable. The resulting executable does not need Node.js or separate web assets at runtime. Open <http://127.0.0.1:3000> and enter the absolute path of a Git working tree.
 
+The Cargo workspace keeps the HTTP wire types in `crates/protocol` and the HTTP-only MCP implementation in `crates/mcp`. Database and server code remain in the root crate.
+
 For frontend hot reload, run these in separate terminals:
 
 ```sh
@@ -54,8 +56,8 @@ Workers submit committed tickets to the Review column. An agent with `approve_re
 ## Checks
 
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 npm --prefix frontend run lint
 npm --prefix frontend test
 ```
