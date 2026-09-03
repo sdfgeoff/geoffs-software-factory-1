@@ -30,6 +30,7 @@ pub fn router(manager: AgentManager) -> Router {
         .route("/tickets/{id}/submit-review", post(submit_review))
         .route("/tickets/{id}/claim-review", post(claim_review))
         .route("/tickets/{id}/request-changes", post(request_changes))
+        .route("/tickets/{id}/approve-review", post(approve_review))
         .route("/events", get(events))
         .with_state(manager)
 }
@@ -155,6 +156,19 @@ async fn request_changes(
                 &input.feedback,
                 input.expected_revision,
             )
+            .await?,
+    ))
+}
+
+async fn approve_review(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewRevision>,
+) -> Result<Json<crate::domain::Ticket>, AppError> {
+    Ok(Json(
+        manager
+            .approve_review(id, caller_agent(&headers)?, input.expected_revision)
             .await?,
     ))
 }

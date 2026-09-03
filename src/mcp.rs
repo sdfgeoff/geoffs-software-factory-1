@@ -170,6 +170,11 @@ fn tools() -> Value {
             json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"feedback":{"type":"string"},"expected_revision":{"type":"integer"}},"required":["ticket_id","feedback"]})
         ),
         tool(
+            "approve_ticket_review",
+            "Approve and fast-forward merge a claimed review; requires approve_review scope",
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
+        ),
+        tool(
             "list_message_board_channels",
             "List channels with latest message times",
             json!({"type":"object","properties":{}})
@@ -240,6 +245,9 @@ async fn call_tool(
         "claim_ticket_review" => review_request(board, Method::POST, &args, "claim-review").await?,
         "request_ticket_changes" => {
             review_request(board, Method::POST, &args, "request-changes").await?
+        }
+        "approve_ticket_review" => {
+            review_request(board, Method::POST, &args, "approve-review").await?
         }
         "list_message_board_channels" => board.request(Method::GET, "/channels", None).await?,
         "read_message_board_channel" => {

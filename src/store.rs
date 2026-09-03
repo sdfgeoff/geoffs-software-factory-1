@@ -84,7 +84,7 @@ impl Store {
 
     pub async fn tickets(&self) -> Result<Vec<Ticket>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -93,7 +93,7 @@ impl Store {
 
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -162,7 +162,7 @@ impl Store {
             "UPDATE tickets SET assignee_id = ?, state = 'in_progress', revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(agent_id)
         .bind(id)
@@ -187,16 +187,18 @@ impl Store {
         id: i64,
         agent_id: i64,
         commit: &str,
+        target_branch: &str,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
         let ticket = sqlx::query_as(
-            "UPDATE tickets SET state = 'review', review_commit = ?, reviewer_id = NULL, \
+            "UPDATE tickets SET state = 'review', review_commit = ?, review_target_branch = ?, reviewer_id = NULL, \
              revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'in_progress' AND assignee_id = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(commit)
+        .bind(target_branch)
         .bind(id)
         .bind(agent_id)
         .bind(expected_revision)
@@ -223,7 +225,7 @@ impl Store {
             "UPDATE tickets SET reviewer_id = ?, revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND assignee_id != ? \
              AND (reviewer_id IS NULL OR reviewer_id = ?) AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(reviewer_id)
         .bind(id)
@@ -257,11 +259,39 @@ impl Store {
             "UPDATE tickets SET state = 'in_progress', review_feedback = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND state = 'review' AND reviewer_id = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, review_commit, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(feedback.trim())
         .bind(id)
         .bind(reviewer_id)
+        .bind(expected_revision)
+        .bind(expected_revision)
+        .fetch_optional(&self.pool)
+        .await?;
+        ticket.ok_or_else(|| {
+            AppError::conflict("review is not assigned to this agent or has changed")
+        })
+    }
+
+    pub async fn complete_review(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        if !self.has_agent_scope(reviewer_id, "approve_review").await? {
+            return Err(AppError::forbidden("agent lacks approve_review scope"));
+        }
+        let ticket = sqlx::query_as(
+            "UPDATE tickets SET state = 'done', revision = revision + 1, updated_at = unixepoch() \
+             WHERE id = ? AND state = 'review' AND reviewer_id = ? AND review_commit = ? \
+             AND (? IS NULL OR revision = ?) \
+             RETURNING id, title, description, state, assignee_id, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(reviewer_id)
+        .bind(commit)
         .bind(expected_revision)
         .bind(expected_revision)
         .fetch_optional(&self.pool)
@@ -643,7 +673,13 @@ mod tests {
             .await
             .unwrap();
         let ticket = store
-            .submit_review(ticket.id, worker.id, "abc123", Some(ticket.revision))
+            .submit_review(
+                ticket.id,
+                worker.id,
+                "abc123",
+                "main",
+                Some(ticket.revision),
+            )
             .await
             .unwrap();
 

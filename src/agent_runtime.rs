@@ -190,23 +190,22 @@ impl AgentManager {
             .agent(agent_id)
             .await?
             .ok_or_else(|| AppError::not_found("agent not found"))?;
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&agent.worktree_path)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .await
-            .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
-        if !output.status.success() {
-            return Err(AppError::bad_request(format!(
-                "failed to resolve review commit: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let project = self
+            .store
+            .project()
+            .await?
+            .ok_or_else(|| AppError::bad_request("project is not selected"))?;
+        let commit = git_text(&agent.worktree_path, &["rev-parse", "HEAD"]).await?;
+        let target_branch = git_text(&project.path, &["symbolic-ref", "--short", "HEAD"]).await?;
         let ticket = self
             .store
-            .submit_review(ticket_id, agent_id, &commit, expected_revision)
+            .submit_review(
+                ticket_id,
+                agent_id,
+                &commit,
+                &target_branch,
+                expected_revision,
+            )
             .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
         Ok(ticket)
@@ -238,6 +237,96 @@ impl AgentManager {
             .request_changes(ticket_id, agent_id, feedback, expected_revision)
             .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
+        Ok(ticket)
+    }
+
+    pub async fn approve_review(
+        &self,
+        ticket_id: i64,
+        reviewer_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let _operation = self.operations.lock().await;
+        if !self
+            .store
+            .has_agent_scope(reviewer_id, "approve_review")
+            .await?
+        {
+            return Err(AppError::forbidden("agent lacks approve_review scope"));
+        }
+        let ticket = self
+            .store
+            .ticket(ticket_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        if ticket.state != crate::domain::TicketState::Review
+            || ticket.reviewer_id != Some(reviewer_id)
+            || expected_revision.is_some_and(|revision| revision != ticket.revision)
+        {
+            return Err(AppError::conflict(
+                "review is not assigned to this agent or has changed",
+            ));
+        }
+        let commit = ticket
+            .review_commit
+            .as_deref()
+            .ok_or_else(|| AppError::conflict("review has no commit"))?;
+        let target_branch = ticket
+            .review_target_branch
+            .as_deref()
+            .ok_or_else(|| AppError::conflict("review has no target branch"))?;
+        let worker = self
+            .store
+            .agent(
+                ticket
+                    .assignee_id
+                    .ok_or_else(|| AppError::conflict("review has no worker"))?,
+            )
+            .await?
+            .ok_or_else(|| AppError::conflict("review worker no longer exists"))?;
+        let project = self
+            .store
+            .project()
+            .await?
+            .ok_or_else(|| AppError::bad_request("project is not selected"))?;
+
+        if !git_text(&project.path, &["status", "--porcelain"])
+            .await?
+            .is_empty()
+        {
+            return Err(AppError::conflict("primary worktree is dirty"));
+        }
+        if git_text(&project.path, &["symbolic-ref", "--short", "HEAD"]).await? != target_branch {
+            return Err(AppError::conflict(
+                "primary branch changed after review submission",
+            ));
+        }
+        let worker_branch = format!("agents/{}", worker.name);
+        if git_text(&project.path, &["rev-parse", &worker_branch]).await? != commit {
+            return Err(AppError::conflict(
+                "worker branch changed after review submission",
+            ));
+        }
+        let ancestor = git_output(
+            &project.path,
+            &["merge-base", "--is-ancestor", "HEAD", commit],
+        )
+        .await?;
+        if !ancestor.status.success() {
+            return Err(AppError::conflict("review commit is not a fast-forward"));
+        }
+        let merge = git_output(&project.path, &["merge", "--ff-only", commit]).await?;
+        if !merge.status.success() {
+            return Err(AppError::conflict(format!(
+                "fast-forward merge failed: {}",
+                String::from_utf8_lossy(&merge.stderr).trim()
+            )));
+        }
+        let ticket = self
+            .store
+            .complete_review(ticket_id, reviewer_id, commit, expected_revision)
+            .await?;
+        self.emit(reviewer_id, "ticket_updated", json!(ticket));
         Ok(ticket)
     }
 
@@ -577,6 +666,27 @@ impl AgentManager {
     }
 }
 
+async fn git_output(cwd: &str, arguments: &[&str]) -> Result<std::process::Output, AppError> {
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .output()
+        .await
+        .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))
+}
+
+async fn git_text(cwd: &str, arguments: &[&str]) -> Result<String, AppError> {
+    let output = git_output(cwd, arguments).await?;
+    if !output.status.success() {
+        return Err(AppError::bad_request(format!(
+            "Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn validate_agent_name(name: &str) -> Result<(), AppError> {
     if name.is_empty()
         || name.len() > 50
@@ -618,6 +728,7 @@ fn worktree_path(root: &Path, name: &str) -> Result<PathBuf, AppError> {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::{domain::TicketState, store::NewTicket};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex, split};
 
     use super::*;
@@ -703,5 +814,159 @@ mod tests {
         assert!(Path::new(&first.worktree_path).join(".git").exists());
         assert!(Path::new(&second.worktree_path).join(".git").exists());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn board_merges_only_valid_fast_forward_reviews() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("mab-merge-test-{unique}"));
+        let repository = base.join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Test"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["commit", "--allow-empty", "-qm", "initial"][..],
+            &["branch", "-M", "main"][..],
+        ] {
+            run_git(&repository, arguments);
+        }
+
+        let store = Store::memory().await.unwrap();
+        store
+            .set_project(repository.to_str().unwrap())
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let worker = manager.create("worker").await.unwrap();
+        let reviewer = manager.create("reviewer").await.unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+
+        std::fs::write(Path::new(&worker.worktree_path).join("work.txt"), "ready").unwrap();
+        run_git(Path::new(&worker.worktree_path), &["add", "work.txt"]);
+        run_git(
+            Path::new(&worker.worktree_path),
+            &["commit", "-qm", "ready for review"],
+        );
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Merge me".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = manager
+            .submit_review(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = manager
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+
+        std::fs::write(repository.join("dirty.txt"), "dirty").unwrap();
+        assert!(
+            manager
+                .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(repository.join("dirty.txt")).unwrap();
+        let ticket = manager
+            .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        assert_eq!(ticket.state, TicketState::Done);
+        assert_eq!(
+            std::fs::read_to_string(repository.join("work.txt")).unwrap(),
+            "ready"
+        );
+
+        let second = store
+            .create_ticket(NewTicket {
+                title: "Stale review".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let second = store
+            .claim_ticket(second.id, worker.id, Some(second.revision))
+            .await
+            .unwrap();
+        let second = manager
+            .submit_review(second.id, worker.id, Some(second.revision))
+            .await
+            .unwrap();
+        let second = manager
+            .claim_review(second.id, reviewer.id, Some(second.revision))
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&worker.worktree_path).join("later.txt"), "later").unwrap();
+        run_git(Path::new(&worker.worktree_path), &["add", "later.txt"]);
+        run_git(
+            Path::new(&worker.worktree_path),
+            &["commit", "-qm", "changed after review"],
+        );
+        assert!(
+            manager
+                .approve_review(second.id, reviewer.id, Some(second.revision))
+                .await
+                .is_err()
+        );
+
+        let second = manager
+            .request_changes(
+                second.id,
+                reviewer.id,
+                "Review the new commit",
+                Some(second.revision),
+            )
+            .await
+            .unwrap();
+        let second = manager
+            .submit_review(second.id, worker.id, Some(second.revision))
+            .await
+            .unwrap();
+        let second = manager
+            .claim_review(second.id, reviewer.id, Some(second.revision))
+            .await
+            .unwrap();
+        std::fs::write(repository.join("main.txt"), "diverged").unwrap();
+        run_git(&repository, &["add", "main.txt"]);
+        run_git(&repository, &["commit", "-qm", "main moved"]);
+        assert!(
+            manager
+                .approve_review(second.id, reviewer.id, Some(second.revision))
+                .await
+                .is_err()
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    fn run_git(cwd: &Path, arguments: &[&str]) {
+        assert!(
+            std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(cwd)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

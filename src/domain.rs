@@ -15,6 +15,7 @@ pub struct Ticket {
     pub state: TicketState,
     pub assignee_id: Option<i64>,
     pub review_commit: Option<String>,
+    pub review_target_branch: Option<String>,
     pub reviewer_id: Option<i64>,
     pub review_feedback: Option<String>,
     pub revision: i64,
