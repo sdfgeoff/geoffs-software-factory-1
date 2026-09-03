@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
@@ -171,6 +172,52 @@ impl AgentManager {
         }
     }
 
+    pub async fn run_heartbeat_scheduler(&self) {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            self.heartbeat_tick(Timestamp::now()).await;
+        }
+    }
+
+    async fn heartbeat_tick(&self, now: Timestamp) {
+        let queued = {
+            let _operation = self.operations.lock().await;
+            let Ok(agents) = self
+                .store
+                .agents_due_for_idle_heartbeat(now.as_second())
+                .await
+            else {
+                return;
+            };
+            let mut queued = Vec::with_capacity(agents.len());
+            for agent in agents {
+                let Some(minutes) = agent.idle_heartbeat_minutes else {
+                    continue;
+                };
+                let message = format!("{minutes} minutes have passed. It is now {now}.");
+                if self
+                    .store
+                    .enqueue_wake_event(
+                        agent.id,
+                        "idle.heartbeat",
+                        json!({"message": message, "minutes": minutes, "occurred_at": now.to_string()}),
+                        None,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    queued.push(agent.id);
+                }
+            }
+            queued
+        };
+        for agent_id in queued {
+            self.deliver_pending(agent_id).await;
+        }
+    }
+
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {
         Ok(self.store.agents().await?)
     }
@@ -193,6 +240,7 @@ impl AgentManager {
         wake_on_pending_task: bool,
         idle_heartbeat_minutes: Option<i64>,
     ) -> Result<Agent, AppError> {
+        let _operation = self.operations.lock().await;
         let agent = self
             .store
             .set_agent_wake_settings(agent_id, wake_on_pending_task, idle_heartbeat_minutes)
@@ -1076,6 +1124,51 @@ mod tests {
 
         assert_eq!(updated.state, AgentState::Running);
         assert_eq!(updated.active_turn_id.as_deref(), Some("turn-2"));
+    }
+
+    #[tokio::test]
+    async fn due_heartbeat_starts_a_normal_turn() {
+        let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
+        let agent = manager
+            .set_wake_settings(agent.id, false, Some(20))
+            .await
+            .unwrap();
+        let now = Timestamp::from_second(agent.idle_since.unwrap() + 1_200).unwrap();
+        let expected_time = now.to_string();
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(
+                request["params"]["input"][0]["text"],
+                format!("20 minutes have passed. It is now {expected_time}.")
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-2\"}}}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        manager.heartbeat_tick(now).await;
+
+        let agent = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(agent.state, AgentState::Running);
+        assert!(agent.idle_since.is_none());
+        let events = manager.store.wake_events(agent.id).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "idle.heartbeat");
+        assert_eq!(
+            events[0].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
     }
 
     #[tokio::test]

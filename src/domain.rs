@@ -61,6 +61,7 @@ pub struct Agent {
     pub last_error: Option<String>,
     pub wake_on_pending_task: bool,
     pub idle_heartbeat_minutes: Option<i64>,
+    pub idle_since: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }

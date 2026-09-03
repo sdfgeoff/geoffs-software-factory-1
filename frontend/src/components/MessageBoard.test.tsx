@@ -18,6 +18,7 @@ const agent: Agent = {
   last_error: null,
   wake_on_pending_task: false,
   idle_heartbeat_minutes: null,
+  idle_since: 0,
   created_at: 0,
   updated_at: 0,
 };

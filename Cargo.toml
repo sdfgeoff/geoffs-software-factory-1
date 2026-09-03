@@ -12,6 +12,7 @@ build = "build.rs"
 async-stream = "0.3"
 axum = "0.8"
 futures-core = "0.3"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 mime_guess = "2"
 multi-agent-board-mcp = { path = "crates/mcp" }
 multi-agent-board-protocol = { path = "crates/protocol" }

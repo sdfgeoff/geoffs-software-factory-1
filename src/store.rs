@@ -378,7 +378,7 @@ impl Store {
         sqlx::query_as(
             "SELECT a.id, a.name, a.state, a.thread_id, a.worktree_path, a.active_turn_id, \
              a.last_error, a.wake_on_pending_task, a.idle_heartbeat_minutes, \
-             a.created_at, a.updated_at FROM agents a \
+             a.idle_since, a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
              WHERE s.scope = ? AND a.id != ? AND a.state != 'paused' \
              ORDER BY CASE a.state WHEN 'idle' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, a.id",
@@ -642,9 +642,22 @@ impl Store {
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, created_at, updated_at \
+             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents ORDER BY id",
         )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn agents_due_for_idle_heartbeat(&self, now: i64) -> Result<Vec<Agent>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             FROM agents WHERE state = 'idle' AND idle_heartbeat_minutes IS NOT NULL \
+             AND idle_since IS NOT NULL AND idle_since + idle_heartbeat_minutes * 60 <= ? \
+             ORDER BY id",
+        )
+        .bind(now)
         .fetch_all(&self.pool)
         .await
     }
@@ -652,7 +665,7 @@ impl Store {
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, created_at, updated_at \
+             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE id = ?",
         )
         .bind(id)
@@ -663,7 +676,7 @@ impl Store {
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, created_at, updated_at \
+             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE name = ?",
         )
         .bind(name)
@@ -672,11 +685,13 @@ impl Store {
     }
 
     pub async fn create_agent(&self, name: &str, worktree: &str) -> Result<Agent, AppError> {
-        let result = sqlx::query("INSERT INTO agents (name, worktree_path) VALUES (?, ?)")
-            .bind(name)
-            .bind(worktree)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "INSERT INTO agents (name, worktree_path, idle_since) VALUES (?, ?, unixepoch())",
+        )
+        .bind(name)
+        .bind(worktree)
+        .execute(&self.pool)
+        .await?;
         Ok(self.agent(result.last_insert_rowid()).await?.unwrap())
     }
 
@@ -729,12 +744,16 @@ impl Store {
     ) -> Result<Agent, AppError> {
         let result = sqlx::query(
             "UPDATE agents SET state = ?, thread_id = COALESCE(?, thread_id), \
-             active_turn_id = ?, last_error = ?, updated_at = unixepoch() WHERE id = ?",
+             active_turn_id = ?, last_error = ?, \
+             idle_since = CASE WHEN ? = 'idle' THEN \
+                 CASE WHEN state = 'idle' THEN idle_since ELSE unixepoch() END \
+                 ELSE NULL END, updated_at = unixepoch() WHERE id = ?",
         )
         .bind(state)
         .bind(thread_id)
         .bind(active_turn_id)
         .bind(last_error)
+        .bind(state)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -753,10 +772,12 @@ impl Store {
     ) -> Result<Option<Agent>, AppError> {
         let result = sqlx::query(
             "UPDATE agents SET state = ?, active_turn_id = NULL, last_error = ?, \
+             idle_since = CASE WHEN ? = 'idle' THEN unixepoch() ELSE NULL END, \
              updated_at = unixepoch() WHERE id = ? AND active_turn_id = ?",
         )
         .bind(state)
         .bind(last_error)
+        .bind(state)
         .bind(id)
         .bind(turn_id)
         .execute(&self.pool)
@@ -1294,5 +1315,86 @@ mod tests {
         assert_eq!(recovered.state, AgentState::Error);
         assert!(recovered.active_turn_id.is_none());
         assert!(recovered.thread_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_heartbeat_timing_resets_on_each_idle_period() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let first_idle_since = agent.idle_since.unwrap();
+        assert!(
+            store
+                .agents_due_for_idle_heartbeat(i64::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .set_agent_wake_settings(agent.id, false, Some(20))
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .agents_due_for_idle_heartbeat(first_idle_since + 1_199)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .agents_due_for_idle_heartbeat(first_idle_since + 1_200)
+                .await
+                .unwrap()[0]
+                .id,
+            agent.id
+        );
+
+        store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Running,
+                Some("thread-1"),
+                Some("turn-1"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .agent(agent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .idle_since
+                .is_none()
+        );
+        let idle = store
+            .finish_agent_turn(agent.id, "turn-1", AgentState::Idle, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let next_idle_since = idle.idle_since.unwrap();
+        assert!(
+            store
+                .agents_due_for_idle_heartbeat(next_idle_since + 1_199)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        for state in [AgentState::Paused, AgentState::Running, AgentState::Error] {
+            store
+                .update_agent_runtime(agent.id, state, None, None, None)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .agents_due_for_idle_heartbeat(i64::MAX)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 }

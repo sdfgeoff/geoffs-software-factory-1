@@ -42,6 +42,7 @@ export interface Agent {
   last_error: string | null;
   wake_on_pending_task: boolean;
   idle_heartbeat_minutes: number | null;
+  idle_since: number | null;
   created_at: number;
   updated_at: number;
 }

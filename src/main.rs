@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         tokio::task::yield_now().await;
         pending_delivery.deliver_pending_events().await;
+        pending_delivery.run_heartbeat_scheduler().await;
     });
     println!("Multi-agent board listening on http://{address}");
     axum::serve(listener, server::router(store, agents)).await?;
