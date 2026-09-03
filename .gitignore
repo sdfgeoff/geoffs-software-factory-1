@@ -3,4 +3,4 @@
 /target/
 /frontend/dist/
 /frontend/node_modules/
-
+/.multi-agent-board.sqlite3*

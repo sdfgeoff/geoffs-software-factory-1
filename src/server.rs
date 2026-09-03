@@ -1,10 +1,11 @@
 use axum::{Router, http::StatusCode, routing::get};
 
-use crate::assets;
+use crate::{assets, store::Store};
 
-pub fn router() -> Router {
+pub fn router(store: Store) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .nest("/api", crate::api::router(store))
         .fallback(assets::serve)
 }
 
@@ -21,10 +22,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::router;
+    use crate::store::Store;
 
     #[tokio::test]
     async fn health_is_available() {
-        let response = router()
+        let response = router(Store::memory().await.unwrap())
             .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -34,7 +36,7 @@ mod tests {
 
     #[tokio::test]
     async fn frontend_is_embedded() {
-        let response = router()
+        let response = router(Store::memory().await.unwrap())
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
