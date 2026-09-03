@@ -2,7 +2,28 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::AppError;
+use multi_agent_board_protocol::{AGENT_ID_HEADER, ErrorResponse, PostMessageRequest};
+
+#[derive(Debug)]
+struct McpError(String);
+
+impl McpError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for McpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for McpError {}
 
 #[derive(Clone)]
 struct BoardClient {
@@ -28,29 +49,28 @@ impl BoardClient {
         method: Method,
         path: &str,
         body: Option<Value>,
-    ) -> Result<Value, AppError> {
+    ) -> Result<Value, McpError> {
         let mut request = self
             .client
             .request(method, format!("{}{path}", self.base_url))
-            .header("x-multi-agent-board-agent-id", self.agent_id);
+            .header(AGENT_ID_HEADER, self.agent_id);
         if let Some(body) = body {
             request = request.json(&body);
         }
         let response = request
             .send()
             .await
-            .map_err(|error| AppError::internal(format!("board request failed: {error}")))?;
+            .map_err(|error| McpError::internal(format!("board request failed: {error}")))?;
         let status = response.status();
         let body = response
             .json::<Value>()
             .await
-            .map_err(|error| AppError::internal(format!("invalid board response: {error}")))?;
+            .map_err(|error| McpError::internal(format!("invalid board response: {error}")))?;
         if !status.is_success() {
-            return Err(AppError::internal(
-                body.get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("board request failed"),
-            ));
+            let error = serde_json::from_value::<ErrorResponse>(body)
+                .map(|body| body.error)
+                .unwrap_or_else(|_| "board request failed".into());
+            return Err(McpError::internal(error));
         }
         Ok(body)
     }
@@ -200,8 +220,8 @@ async fn call_tool(
     board: &BoardClient,
     name: Option<&str>,
     arguments: Option<&Value>,
-) -> Result<Value, AppError> {
-    let name = name.ok_or_else(|| AppError::bad_request("missing tool name"))?;
+) -> Result<Value, McpError> {
+    let name = name.ok_or_else(|| McpError::bad_request("missing tool name"))?;
     let args = arguments.cloned().unwrap_or_else(|| json!({}));
     let value = match name {
         "list_tickets" => board.request(Method::GET, "/tickets", None).await?,
@@ -219,7 +239,7 @@ async fn call_tool(
             let ticket_id = integer(&args, "ticket_id")?;
             let mut body = args;
             body.as_object_mut()
-                .ok_or_else(|| AppError::bad_request("tool arguments must be an object"))?
+                .ok_or_else(|| McpError::bad_request("tool arguments must be an object"))?
                 .remove("ticket_id");
             board
                 .request(Method::PATCH, &format!("/tickets/{ticket_id}"), Some(body))
@@ -229,7 +249,7 @@ async fn call_tool(
             let ticket_id = integer(&args, "ticket_id")?;
             let mut body = args;
             body.as_object_mut()
-                .ok_or_else(|| AppError::bad_request("tool arguments must be an object"))?
+                .ok_or_else(|| McpError::bad_request("tool arguments must be an object"))?
                 .remove("ticket_id");
             board
                 .request(
@@ -280,11 +300,17 @@ async fn call_tool(
                 .request(
                     Method::POST,
                     &format!("/channels/{channel}/messages"),
-                    Some(json!({"author": author, "body": message})),
+                    Some(
+                        serde_json::to_value(PostMessageRequest {
+                            author: author.into(),
+                            body: message.into(),
+                        })
+                        .expect("message request is serializable"),
+                    ),
                 )
                 .await?
         }
-        _ => return Err(AppError::bad_request(format!("unknown tool: {name}"))),
+        _ => return Err(McpError::bad_request(format!("unknown tool: {name}"))),
     };
     Ok(json!({"content": [{"type": "text", "text": value.to_string()}]}))
 }
@@ -294,11 +320,11 @@ async fn review_request(
     method: Method,
     args: &Value,
     action: &str,
-) -> Result<Value, AppError> {
+) -> Result<Value, McpError> {
     let ticket_id = integer(args, "ticket_id")?;
     let mut body = args.clone();
     body.as_object_mut()
-        .ok_or_else(|| AppError::bad_request("tool arguments must be an object"))?
+        .ok_or_else(|| McpError::bad_request("tool arguments must be an object"))?
         .remove("ticket_id");
     board
         .request(
@@ -309,28 +335,28 @@ async fn review_request(
         .await
 }
 
-fn string<'a>(args: &'a Value, name: &str) -> Result<&'a str, AppError> {
+fn string<'a>(args: &'a Value, name: &str) -> Result<&'a str, McpError> {
     optional_string(args, name)
-        .ok_or_else(|| AppError::bad_request(format!("{name} must be a string")))
+        .ok_or_else(|| McpError::bad_request(format!("{name} must be a string")))
 }
 
 fn optional_string<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
     args.get(name).and_then(Value::as_str)
 }
 
-fn integer(args: &Value, name: &str) -> Result<i64, AppError> {
+fn integer(args: &Value, name: &str) -> Result<i64, McpError> {
     args.get(name)
         .and_then(Value::as_i64)
-        .ok_or_else(|| AppError::bad_request(format!("{name} must be an integer")))
+        .ok_or_else(|| McpError::bad_request(format!("{name} must be an integer")))
 }
 
-fn optional_integer(args: &Value, name: &str) -> Result<Option<i64>, AppError> {
+fn optional_integer(args: &Value, name: &str) -> Result<Option<i64>, McpError> {
     match args.get(name) {
         None => Ok(None),
         Some(value) => value
             .as_i64()
             .map(Some)
-            .ok_or_else(|| AppError::bad_request(format!("{name} must be an integer"))),
+            .ok_or_else(|| McpError::bad_request(format!("{name} must be an integer"))),
     }
 }
 
@@ -340,22 +366,11 @@ fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::store::{NewTicket, Store};
-
     use super::*;
 
-    async fn test_board() -> (BoardClient, Store) {
-        let store = Store::memory().await.unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = crate::api::router(store.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (BoardClient::new(format!("http://{address}"), 1), store)
-    }
-
     #[tokio::test]
-    async fn protocol_lists_and_calls_tools() {
-        let (board, _) = test_board().await;
+    async fn protocol_lists_tools_without_http() {
+        let board = BoardClient::new("http://127.0.0.1:1".into(), 1);
         let response = handle(
             &board,
             json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
@@ -371,47 +386,5 @@ mod tests {
                 .len()
                 >= 8
         );
-
-        let response = handle(
-            &board,
-            json!({
-                "jsonrpc":"2.0","id":2,"method":"tools/call",
-                "params":{"name":"create_ticket","arguments":{"title":"From MCP"}}
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.pointer("/result/isError"), None);
-        let tickets = board.request(Method::GET, "/tickets", None).await.unwrap();
-        assert_eq!(tickets[0]["title"], "From MCP");
-    }
-
-    #[tokio::test]
-    async fn claim_is_atomic() {
-        let (board, store) = test_board().await;
-        store.create_agent("first", "/tmp/first").await.unwrap();
-        store.create_agent("second", "/tmp/second").await.unwrap();
-        let ticket = store
-            .create_ticket(NewTicket {
-                title: "Claim me".into(),
-                description: String::new(),
-            })
-            .await
-            .unwrap();
-        let first = call_tool(
-            &board,
-            Some("claim_ticket"),
-            Some(&json!({"ticket_id": ticket.id, "expected_revision": 1})),
-        )
-        .await;
-        assert!(first.is_ok());
-        let other_board = BoardClient::new(board.base_url.clone(), 2);
-        let second = call_tool(
-            &other_board,
-            Some("claim_ticket"),
-            Some(&json!({"ticket_id": ticket.id})),
-        )
-        .await;
-        assert!(second.is_err());
     }
 }

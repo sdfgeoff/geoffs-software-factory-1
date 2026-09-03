@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         let board_url = std::env::var("MULTI_AGENT_BOARD_URL")?;
         let agent_id = std::env::var("MULTI_AGENT_BOARD_AGENT_ID")?.parse()?;
-        return Ok(multi_agent_board::mcp::run(
+        return Ok(multi_agent_board_mcp::run(
             tokio::io::BufReader::new(tokio::io::stdin()),
             tokio::io::stdout(),
             board_url,

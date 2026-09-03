@@ -898,14 +898,24 @@ dependencies = [
  "axum",
  "futures-core",
  "mime_guess",
+ "multi-agent-board-mcp",
  "multi-agent-board-protocol",
- "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
  "sqlx",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "multi-agent-board-mcp"
+version = "0.1.0"
+dependencies = [
+ "multi-agent-board-protocol",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
