@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { Agent } from "../types";
 import { AgentWorkspace } from "./AgentWorkspace";
@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   api: {
     agentMessages: vi.fn(),
     agentScopes: vi.fn(),
+    renameAgent: vi.fn(),
     setAgentScopes: vi.fn(),
   },
 }));
@@ -25,9 +26,12 @@ const agent: Agent = {
 };
 
 describe("AgentWorkspace", () => {
+  afterEach(cleanup);
+
   beforeEach(() => {
     vi.mocked(api.agentMessages).mockResolvedValue([]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
+    vi.mocked(api.renameAgent).mockResolvedValue(agent);
     vi.mocked(api.setAgentScopes).mockResolvedValue(["approve_review"]);
   });
 
@@ -50,5 +54,30 @@ describe("AgentWorkspace", () => {
     await waitFor(() =>
       expect(api.setAgentScopes).toHaveBeenCalledWith(1, ["approve_review"]),
     );
+  });
+
+  it("renames the selected agent", async () => {
+    const onChanged = vi.fn();
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        selectedAgentId={agent.id}
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onChanged={onChanged}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Agent name" }), {
+      target: { value: "architect" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+
+    await waitFor(() =>
+      expect(api.renameAgent).toHaveBeenCalledWith(agent.id, "architect"),
+    );
+    expect(onChanged).toHaveBeenCalled();
   });
 });

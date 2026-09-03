@@ -59,6 +59,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
+  renameAgent: (id: number, name: string) =>
+    request<Agent>(`/agents/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
   agentScopes: (id: number) => request<string[]>(`/agents/${id}/scopes`),
   setAgentScopes: (id: number, scopes: string[]) =>
     request<string[]>(`/agents/${id}/scopes`, {

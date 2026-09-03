@@ -22,6 +22,7 @@ export function AgentWorkspace({
 }: Props) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [name, setName] = useState("");
+  const [renamedName, setRenamedName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
   const selected =
@@ -29,6 +30,7 @@ export function AgentWorkspace({
   useEffect(() => {
     if (!selectedAgentId && agents[0]) onSelectAgent(agents[0].id);
   }, [agents, selectedAgentId, onSelectAgent]);
+  useEffect(() => setRenamedName(selected?.name ?? ""), [selected?.name]);
   useEffect(() => {
     if (selectedAgentId)
       void api.agentMessages(selectedAgentId).then(setMessages).catch(onError);
@@ -54,6 +56,16 @@ export function AgentWorkspace({
     try {
       await api.sendAgentMessage(selected.id, prompt);
       setPrompt("");
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function rename(event: FormEvent) {
+    event.preventDefault();
+    if (!selected) return;
+    try {
+      await api.renameAgent(selected.id, renamedName);
       await onChanged();
     } catch (error) {
       onError(error);
@@ -131,6 +143,21 @@ export function AgentWorkspace({
             {selected.last_error && (
               <p className="inline-error">{selected.last_error}</p>
             )}
+            <form className="rename-agent" onSubmit={rename}>
+              <label>
+                Agent name
+                <input
+                  value={renamedName}
+                  onChange={(event) => setRenamedName(event.target.value)}
+                  pattern="[A-Za-z0-9_-]+"
+                  maxLength={50}
+                  required
+                />
+              </label>
+              <button type="submit" disabled={renamedName === selected.name}>
+                Rename
+              </button>
+            </form>
             <fieldset className="capabilities">
               <legend>Capabilities</legend>
               <label>
