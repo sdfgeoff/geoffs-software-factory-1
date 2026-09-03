@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration};
 
 use sqlx::{
-    SqlitePool,
+    Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
@@ -48,6 +48,21 @@ struct WakeEventRow {
     updated_at: i64,
 }
 
+struct MessageWrite<'a> {
+    channel: &'a str,
+    agent_id: Option<i64>,
+    author: &'a str,
+    body: &'a str,
+    deduplication_key: Option<&'a str>,
+}
+
+pub(crate) struct MergeNotification<'a> {
+    pub channel: &'a str,
+    pub author: &'a str,
+    pub body: &'a str,
+    pub deduplication_key: &'a str,
+}
+
 impl Store {
     pub async fn open(path: &Path) -> Result<Self, sqlx::Error> {
         let options = SqliteConnectOptions::new()
@@ -77,6 +92,12 @@ impl Store {
 
     pub async fn close(self) {
         self.pool.close().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_test_sql(&self, statement: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(statement).execute(&self.pool).await?;
+        Ok(())
     }
 
     async fn migrate(&self) -> Result<(), sqlx::Error> {
@@ -300,9 +321,50 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        Ok(self
+            .complete_review_with_message(id, reviewer_id, commit, expected_revision, None)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn complete_review_and_post_message(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+        notification: MergeNotification<'_>,
+    ) -> Result<(Ticket, Message), AppError> {
+        let (ticket, message) = self
+            .complete_review_with_message(
+                id,
+                reviewer_id,
+                commit,
+                expected_revision,
+                Some(MessageWrite {
+                    channel: notification.channel,
+                    agent_id: None,
+                    author: notification.author,
+                    body: notification.body,
+                    deduplication_key: Some(notification.deduplication_key),
+                }),
+            )
+            .await?;
+        Ok((ticket, message.expect("notification was requested")))
+    }
+
+    async fn complete_review_with_message(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+        message: Option<MessageWrite<'_>>,
+    ) -> Result<(Ticket, Option<Message>), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
+        let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
             "UPDATE tickets SET state = 'done', revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND reviewer_id = ? AND review_commit = ? \
@@ -314,11 +376,17 @@ impl Store {
         .bind(commit)
         .bind(expected_revision)
         .bind(expected_revision)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        ticket.ok_or_else(|| {
+        let ticket = ticket.ok_or_else(|| {
             AppError::conflict("review is not assigned to this agent or has changed")
-        })
+        })?;
+        let message = match message {
+            Some(message) => Some(insert_message(&mut transaction, message).await?),
+            None => None,
+        };
+        transaction.commit().await?;
+        Ok((ticket, message))
     }
 
     pub async fn agent_scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
@@ -605,28 +673,46 @@ impl Store {
         author: &str,
         body: &str,
     ) -> Result<Message, AppError> {
-        validate_channel(channel)?;
-        validate_message(author, body)?;
+        self.post_message_with_key(channel, agent_id, author, body, None)
+            .await
+    }
+
+    pub async fn post_message_once(
+        &self,
+        channel: &str,
+        agent_id: Option<i64>,
+        author: &str,
+        body: &str,
+        deduplication_key: &str,
+    ) -> Result<Message, AppError> {
+        if deduplication_key.is_empty() || deduplication_key.len() > 500 {
+            return Err(AppError::bad_request(
+                "message deduplication key must contain between 1 and 500 characters",
+            ));
+        }
+        self.post_message_with_key(channel, agent_id, author, body, Some(deduplication_key))
+            .await
+    }
+
+    async fn post_message_with_key(
+        &self,
+        channel: &str,
+        agent_id: Option<i64>,
+        author: &str,
+        body: &str,
+        deduplication_key: Option<&str>,
+    ) -> Result<Message, AppError> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("INSERT OR IGNORE INTO channels (name) VALUES (?)")
-            .bind(channel)
-            .execute(&mut *transaction)
-            .await?;
-        let result = sqlx::query(
-            "INSERT INTO messages (channel_name, agent_id, author, body) VALUES (?, ?, ?, ?)",
+        let message = insert_message(
+            &mut transaction,
+            MessageWrite {
+                channel,
+                agent_id,
+                author,
+                body,
+                deduplication_key,
+            },
         )
-        .bind(channel)
-        .bind(agent_id)
-        .bind(author.trim())
-        .bind(body.trim())
-        .execute(&mut *transaction)
-        .await?;
-        let id = result.last_insert_rowid();
-        let message = sqlx::query_as(
-            "SELECT id, channel_name, agent_id, author, body, created_at FROM messages WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
         Ok(message)
@@ -874,6 +960,51 @@ impl Store {
     }
 }
 
+async fn insert_message(
+    transaction: &mut Transaction<'_, Sqlite>,
+    message: MessageWrite<'_>,
+) -> Result<Message, AppError> {
+    validate_channel(message.channel)?;
+    validate_message(message.author, message.body)?;
+    if message
+        .deduplication_key
+        .is_some_and(|key| key.is_empty() || key.len() > 500)
+    {
+        return Err(AppError::bad_request(
+            "message deduplication key must contain between 1 and 500 characters",
+        ));
+    }
+    sqlx::query("INSERT OR IGNORE INTO channels (name) VALUES (?)")
+        .bind(message.channel)
+        .execute(&mut **transaction)
+        .await?;
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO messages \
+         (channel_name, agent_id, author, body, deduplication_key) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(message.channel)
+    .bind(message.agent_id)
+    .bind(message.author.trim())
+    .bind(message.body.trim())
+    .bind(message.deduplication_key)
+    .execute(&mut **transaction)
+    .await?;
+    let id = if result.rows_affected() == 1 {
+        result.last_insert_rowid()
+    } else {
+        sqlx::query_scalar("SELECT id FROM messages WHERE deduplication_key = ?")
+            .bind(message.deduplication_key)
+            .fetch_one(&mut **transaction)
+            .await?
+    };
+    Ok(sqlx::query_as(
+        "SELECT id, channel_name, agent_id, author, body, created_at FROM messages WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?)
+}
+
 fn validate_title(title: &str) -> Result<(), AppError> {
     if title.trim().is_empty() || title.chars().count() > 200 {
         return Err(AppError::bad_request(
@@ -883,7 +1014,7 @@ fn validate_title(title: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_channel(channel: &str) -> Result<(), AppError> {
+pub(crate) fn validate_channel(channel: &str) -> Result<(), AppError> {
     if channel.is_empty()
         || channel.len() > 64
         || !channel
@@ -1020,6 +1151,23 @@ mod tests {
                 .body,
             "Schema is ready"
         );
+    }
+
+    #[tokio::test]
+    async fn idempotent_messages_are_inserted_once() {
+        let store = Store::memory().await.unwrap();
+
+        let first = store
+            .post_message_once("merges", None, "board", "Merged", "merge:1")
+            .await
+            .unwrap();
+        let retry = store
+            .post_message_once("merges", None, "board", "Merged", "merge:1")
+            .await
+            .unwrap();
+
+        assert_eq!(retry.id, first.id);
+        assert_eq!(store.messages("merges", None, None).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

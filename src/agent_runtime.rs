@@ -22,7 +22,7 @@ use tokio::{
 use crate::{
     domain::{Agent, AgentState, WakeEvent},
     error::AppError,
-    store::Store,
+    store::{MergeNotification, Store, validate_channel},
 };
 
 const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it, commit cohesive changes, and submit it for review when ready. If you have approve_review scope, claim reviews before reviewing them. Keep ticket state accurate. Do not modify another agent's worktree or the primary worktree.";
@@ -40,6 +40,7 @@ pub struct AgentManager {
     codex_path: PathBuf,
     executable_path: PathBuf,
     board_url: String,
+    merge_notification_channel: Option<String>,
     processes: Arc<Mutex<HashMap<i64, Arc<RunningAgent>>>>,
     // ponytail: a global operation lock is enough for a local MVP; use per-agent locks if contention appears.
     operations: Arc<Mutex<()>>,
@@ -154,10 +155,22 @@ impl AgentManager {
             codex_path,
             executable_path,
             board_url,
+            merge_notification_channel: None,
             processes: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(())),
             events,
         }
+    }
+
+    pub fn with_merge_notification_channel(
+        mut self,
+        channel: Option<String>,
+    ) -> Result<Self, AppError> {
+        if let Some(channel) = channel.as_deref() {
+            validate_channel(channel)?;
+        }
+        self.merge_notification_channel = channel;
+        Ok(self)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -450,10 +463,39 @@ impl AgentManager {
             };
             return Err(AppError::conflict(format!("review merge failed: {detail}")));
         }
-        let ticket = self
+        let resulting_commit = git_text(&project.path, &["rev-parse", "HEAD"]).await?;
+        let reviewer = self
             .store
-            .complete_review(ticket_id, reviewer_id, commit, expected_revision)
-            .await?;
+            .agent(reviewer_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("reviewer not found"))?;
+        let ticket = if let Some(channel) = self.merge_notification_channel.as_deref() {
+            let source_branch = ticket.implementation_branch.as_deref().unwrap_or("unknown");
+            let body = format!(
+                "Ticket #{} “{}” was merged.\n\n1. Source branch: `{source_branch}`\n2. Target branch: `{target_branch}`\n3. Merge commit: `{resulting_commit}`\n4. Approved by: @{}",
+                ticket.id, ticket.title, reviewer.name
+            );
+            let key = format!("ticket-merge:{}:{commit}", ticket.id);
+            self.store
+                .complete_review_and_post_message(
+                    ticket_id,
+                    reviewer_id,
+                    commit,
+                    expected_revision,
+                    MergeNotification {
+                        channel,
+                        author: "Multi-agent Board",
+                        body: &body,
+                        deduplication_key: &key,
+                    },
+                )
+                .await?
+                .0
+        } else {
+            self.store
+                .complete_review(ticket_id, reviewer_id, commit, expected_revision)
+                .await?
+        };
         self.emit(reviewer_id, "ticket_updated", json!(ticket));
         Ok(ticket)
     }
@@ -1357,7 +1399,9 @@ mod tests {
             "codex".into(),
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
-        );
+        )
+        .with_merge_notification_channel(Some("merges".into()))
+        .unwrap();
         let worker = manager.create("worker").await.unwrap();
         let reviewer = manager.create("reviewer").await.unwrap();
         store
@@ -1420,15 +1464,60 @@ mod tests {
                 .is_err()
         );
         std::fs::remove_file(repository.join("dirty.txt")).unwrap();
+        store
+            .execute_test_sql(
+                "CREATE TRIGGER fail_merge_notification BEFORE INSERT ON messages \
+                 WHEN NEW.deduplication_key LIKE 'ticket-merge:%' \
+                 BEGIN SELECT RAISE(ABORT, 'simulated notification failure'); END",
+            )
+            .await
+            .unwrap();
+        let mut events = manager.subscribe();
+        let error = manager
+            .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("simulated notification failure"));
+        let unchanged = store.ticket(ticket.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.state, TicketState::Review);
+        assert_eq!(unchanged.revision, ticket.revision);
+        assert!(
+            !store
+                .channels()
+                .await
+                .unwrap()
+                .iter()
+                .any(|channel| channel.name == "merges")
+        );
+        assert!(events.try_recv().is_err());
+        store
+            .execute_test_sql("DROP TRIGGER fail_merge_notification")
+            .await
+            .unwrap();
         let ticket = manager
             .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
             .await
             .unwrap();
+        assert_eq!(events.recv().await.unwrap().kind, "ticket_updated");
         assert_eq!(ticket.state, TicketState::Done);
         assert_eq!(
             std::fs::read_to_string(repository.join("work.txt")).unwrap(),
             "ready"
         );
+        let resulting_commit = git_text(repository.to_str().unwrap(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        let messages = store.messages("merges", None, None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        for expected in [
+            "Ticket #1 “Merge me”",
+            "Source branch: `agents/worker`",
+            "Target branch: `main`",
+            &format!("Merge commit: `{resulting_commit}`"),
+            "Approved by: @reviewer",
+        ] {
+            assert!(messages[0].body.contains(expected));
+        }
 
         let second = store
             .create_ticket(NewTicket {
@@ -1689,6 +1778,13 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(repository.join("legacy.txt")).unwrap(),
             "legacy"
+        );
+        assert!(
+            store
+                .messages("general", None, None)
+                .await
+                .unwrap()
+                .is_empty()
         );
         std::fs::remove_dir_all(base).unwrap();
     }
