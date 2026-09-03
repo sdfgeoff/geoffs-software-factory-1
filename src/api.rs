@@ -18,6 +18,7 @@ pub fn router(store: Store) -> Router {
         .route("/project", get(get_project).put(set_project))
         .route("/tickets", get(list_tickets).post(create_ticket))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
+        .route("/tickets/{id}/claim", axum::routing::post(claim_ticket))
         .route("/channels", get(list_channels))
         .route(
             "/channels/{name}/messages",
@@ -135,6 +136,24 @@ async fn update_ticket(
     ))
 }
 
+#[derive(Deserialize)]
+struct ClaimTicket {
+    agent_id: i64,
+    expected_revision: Option<i64>,
+}
+
+async fn claim_ticket(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+    Json(input): Json<ClaimTicket>,
+) -> Result<Json<Ticket>, AppError> {
+    Ok(Json(
+        store
+            .claim_ticket(id, input.agent_id, input.expected_revision)
+            .await?,
+    ))
+}
+
 async fn list_channels(State(store): State<Store>) -> Result<Json<Vec<Channel>>, AppError> {
     Ok(Json(store.channels().await?))
 }
@@ -242,5 +261,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn tickets_can_be_claimed_once_over_http() {
+        let store = Store::memory().await.unwrap();
+        store.create_agent("first", "/tmp/first").await.unwrap();
+        store.create_agent("second", "/tmp/second").await.unwrap();
+        store
+            .create_ticket(NewTicket {
+                title: "Claim me".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let app = router(store);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets/1/claim")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"agent_id":1,"expected_revision":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::post("/tickets/1/claim")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"agent_id":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }
