@@ -328,6 +328,10 @@ impl AgentManager {
                 "mcp_servers.multi_agent_board.command={command_value}"
             ))
             .args(["-c", "mcp_servers.multi_agent_board.args=[\"mcp\"]"])
+            .args([
+                "-c",
+                "mcp_servers.multi_agent_board.default_tools_approval_mode=\"approve\"",
+            ])
             .env("MULTI_AGENT_BOARD_DATA", &self.data_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
