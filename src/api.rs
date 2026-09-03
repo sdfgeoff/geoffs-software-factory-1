@@ -95,6 +95,7 @@ struct UpdateTicket {
     title: Option<String>,
     description: Option<String>,
     state: Option<TicketState>,
+    assignee_id: Option<serde_json::Value>,
     expected_revision: Option<i64>,
 }
 
@@ -103,6 +104,13 @@ async fn update_ticket(
     Path(id): Path<i64>,
     Json(input): Json<UpdateTicket>,
 ) -> Result<Json<Ticket>, AppError> {
+    let assignee_id = match input.assignee_id {
+        None => None,
+        Some(value) if value.is_null() => Some(None),
+        Some(value) => Some(Some(value.as_i64().ok_or_else(|| {
+            AppError::bad_request("assignee_id must be an integer or null")
+        })?)),
+    };
     Ok(Json(
         store
             .update_ticket(
@@ -111,7 +119,7 @@ async fn update_ticket(
                     title: input.title,
                     description: input.description,
                     state: input.state,
-                    assignee_id: None,
+                    assignee_id,
                     expected_revision: input.expected_revision,
                 },
             )

@@ -1,9 +1,11 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
 use serde::Deserialize;
+use std::{convert::Infallible, time::Duration};
 
 use crate::{
     agent_runtime::AgentManager,
@@ -20,6 +22,7 @@ pub fn router(manager: AgentManager) -> Router {
         )
         .route("/agents/{id}/pause", post(pause_agent))
         .route("/agents/{id}/resume", post(resume_agent))
+        .route("/events", get(events))
         .with_state(manager)
 }
 
@@ -71,4 +74,26 @@ async fn resume_agent(
     Path(id): Path<i64>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(manager.resume(id).await?))
+}
+
+async fn events(
+    State(manager): State<AgentManager>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    let mut receiver = manager.subscribe();
+    let stream = async_stream::stream! {
+        let mut refresh = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                event = receiver.recv() => match event {
+                    Ok(event) => yield Ok(Event::default().json_data(event).unwrap()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        yield Ok(Event::default().data(r#"{"kind":"refresh"}"#));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                _ = refresh.tick() => yield Ok(Event::default().data(r#"{"kind":"refresh"}"#)),
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

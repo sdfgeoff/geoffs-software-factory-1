@@ -5,7 +5,9 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+async-stream = "0.3"
 axum = "0.8"
+futures-core = "0.3"
 mime_guess = "2"
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
