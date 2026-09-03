@@ -352,16 +352,20 @@ impl AgentManager {
         .await?;
         rpc.notify("initialized", json!({})).await?;
 
+        let instructions = format!(
+            "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
+            agent.id, agent.name
+        );
         let params = if let Some(thread_id) = &agent.thread_id {
             json!({
                 "threadId": thread_id, "cwd": agent.worktree_path,
                 "approvalPolicy": "never", "sandbox": "workspace-write",
-                "developerInstructions": COORDINATION_INSTRUCTIONS
+                "developerInstructions": instructions
             })
         } else {
             json!({
                 "cwd": agent.worktree_path, "approvalPolicy": "never", "sandbox": "workspace-write",
-                "developerInstructions": COORDINATION_INSTRUCTIONS, "serviceName": "multi_agent_board"
+                "developerInstructions": instructions, "serviceName": "multi_agent_board"
             })
         };
         let method = if agent.thread_id.is_some() {
