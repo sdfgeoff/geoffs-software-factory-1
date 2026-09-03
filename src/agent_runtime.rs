@@ -208,6 +208,22 @@ impl AgentManager {
             )
             .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
+        if let Some(reviewer) = self
+            .store
+            .agents_with_scope("approve_review", agent_id)
+            .await?
+            .into_iter()
+            .next()
+        {
+            self.notify_agent(
+                reviewer.id,
+                &format!(
+                    "Ticket #{} '{}' is ready for review. Claim its review before inspecting it.",
+                    ticket.id, ticket.title
+                ),
+            )
+            .await?;
+        }
         Ok(ticket)
     }
 
@@ -237,6 +253,16 @@ impl AgentManager {
             .request_changes(ticket_id, agent_id, feedback, expected_revision)
             .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
+        if let Some(worker_id) = ticket.assignee_id {
+            self.notify_agent(
+                worker_id,
+                &format!(
+                    "Changes were requested on ticket #{} '{}': {}",
+                    ticket.id, ticket.title, feedback
+                ),
+            )
+            .await?;
+        }
         Ok(ticket)
     }
 
@@ -381,6 +407,15 @@ impl AgentManager {
 
     pub async fn send_message(&self, agent_id: i64, message: &str) -> Result<Agent, AppError> {
         let _operation = self.operations.lock().await;
+        self.start_message(agent_id, "user", message).await
+    }
+
+    async fn start_message(
+        &self,
+        agent_id: i64,
+        role: &str,
+        message: &str,
+    ) -> Result<Agent, AppError> {
         let agent = self
             .store
             .agent(agent_id)
@@ -397,7 +432,7 @@ impl AgentManager {
         }
         let user_message = self
             .store
-            .add_agent_message(agent_id, "user", message)
+            .add_agent_message(agent_id, role, message)
             .await?;
         self.emit(agent_id, "message", json!(user_message));
         self.store
@@ -440,6 +475,33 @@ impl AgentManager {
         }
     }
 
+    async fn notify_agent(&self, agent_id: i64, message: &str) -> Result<(), AppError> {
+        self.store.enqueue_notification(agent_id, message).await?;
+        self.deliver_pending(agent_id).await;
+        Ok(())
+    }
+
+    async fn deliver_pending(&self, agent_id: i64) {
+        let _operation = self.operations.lock().await;
+        let Ok(Some(agent)) = self.store.agent(agent_id).await else {
+            return;
+        };
+        if !matches!(agent.state, AgentState::Idle | AgentState::Error) {
+            return;
+        }
+        let Ok(Some((notification_id, message))) = self.store.pending_notification(agent_id).await
+        else {
+            return;
+        };
+        if self
+            .start_message(agent_id, "system", &message)
+            .await
+            .is_ok()
+        {
+            let _ = self.store.delete_notification(notification_id).await;
+        }
+    }
+
     pub async fn pause(&self, agent_id: i64) -> Result<Agent, AppError> {
         let _operation = self.operations.lock().await;
         let agent = self
@@ -470,12 +532,15 @@ impl AgentManager {
     }
 
     pub async fn resume(&self, agent_id: i64) -> Result<Agent, AppError> {
-        let _operation = self.operations.lock().await;
+        let operation = self.operations.lock().await;
         let agent = self
             .store
             .update_agent_runtime(agent_id, AgentState::Idle, None, None, None)
             .await?;
         self.emit(agent_id, "agent_updated", json!(agent));
+        drop(operation);
+        let manager = self.clone();
+        tokio::spawn(async move { manager.deliver_pending(agent_id).await });
         Ok(agent)
     }
 
@@ -635,6 +700,8 @@ impl AgentManager {
                 {
                     self.emit(agent_id, "agent_updated", json!(agent));
                 }
+                let manager = self.clone();
+                tokio::spawn(async move { manager.deliver_pending(agent_id).await });
             }
             "error" => {
                 let message = event
@@ -852,6 +919,12 @@ mod tests {
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
             .unwrap();
+        for agent_id in [worker.id, reviewer.id] {
+            store
+                .update_agent_runtime(agent_id, AgentState::Running, None, None, None)
+                .await
+                .unwrap();
+        }
 
         std::fs::write(Path::new(&worker.worktree_path).join("work.txt"), "ready").unwrap();
         run_git(Path::new(&worker.worktree_path), &["add", "work.txt"]);
@@ -874,6 +947,13 @@ mod tests {
             .submit_review(ticket.id, worker.id, Some(ticket.revision))
             .await
             .unwrap();
+        assert!(
+            store
+                .pending_notification(reviewer.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let ticket = manager
             .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
             .await
@@ -938,6 +1018,13 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            store
+                .pending_notification(worker.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let second = manager
             .submit_review(second.id, worker.id, Some(second.revision))
             .await

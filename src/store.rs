@@ -350,6 +350,59 @@ impl Store {
         .await
     }
 
+    pub async fn agents_with_scope(
+        &self,
+        scope: &str,
+        exclude_agent_id: i64,
+    ) -> Result<Vec<Agent>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT a.id, a.name, a.state, a.thread_id, a.worktree_path, a.active_turn_id, \
+             a.last_error, a.created_at, a.updated_at FROM agents a \
+             JOIN agent_scopes s ON s.agent_id = a.id \
+             WHERE s.scope = ? AND a.id != ? AND a.state != 'paused' \
+             ORDER BY CASE a.state WHEN 'idle' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, a.id",
+        )
+        .bind(scope)
+        .bind(exclude_agent_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn enqueue_notification(&self, agent_id: i64, body: &str) -> Result<(), AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        if body.trim().is_empty() || body.chars().count() > 50_000 {
+            return Err(AppError::bad_request("invalid agent notification"));
+        }
+        sqlx::query("INSERT INTO pending_agent_notifications (agent_id, body) VALUES (?, ?)")
+            .bind(agent_id)
+            .bind(body.trim())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn pending_notification(
+        &self,
+        agent_id: i64,
+    ) -> Result<Option<(i64, String)>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, body FROM pending_agent_notifications WHERE agent_id = ? ORDER BY id LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn delete_notification(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM pending_agent_notifications WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn channels(&self) -> Result<Vec<Channel>, sqlx::Error> {
         sqlx::query_as(
             "SELECT c.name, MAX(m.created_at) AS most_recent_message_at FROM channels c \
@@ -716,6 +769,53 @@ mod tests {
         assert_eq!(ticket.state, TicketState::InProgress);
         assert_eq!(ticket.assignee_id, Some(worker.id));
         assert_eq!(ticket.review_feedback.as_deref(), Some("Please add a test"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_notifications_are_selected_and_queued_in_order() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .agents_with_scope("approve_review", worker.id)
+                .await
+                .unwrap()[0]
+                .id,
+            reviewer.id
+        );
+        store
+            .enqueue_notification(reviewer.id, "first")
+            .await
+            .unwrap();
+        store
+            .enqueue_notification(reviewer.id, "second")
+            .await
+            .unwrap();
+        let first = store
+            .pending_notification(reviewer.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.1, "first");
+        store.delete_notification(first.0).await.unwrap();
+        assert_eq!(
+            store
+                .pending_notification(reviewer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            "second"
+        );
     }
 
     #[tokio::test]
