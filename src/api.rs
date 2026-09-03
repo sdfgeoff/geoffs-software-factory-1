@@ -51,6 +51,14 @@ async fn set_project(
     let path = canonical
         .to_str()
         .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
+    if let Some(current) = store.project().await?
+        && current.path != path
+        && !store.agents().await?.is_empty()
+    {
+        return Err(AppError::conflict(
+            "cannot change projects while agents exist",
+        ));
+    }
     Ok(Json(store.set_project(path).await?))
 }
 

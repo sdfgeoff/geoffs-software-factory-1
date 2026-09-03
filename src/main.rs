@@ -5,7 +5,15 @@ use multi_agent_board::{agent_runtime::AgentManager, server, store::Store};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let address = SocketAddr::from(([127, 0, 0, 1], 3000));
+    if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
+        println!(
+            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR  Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA  SQLite database path\n  CODEX_BIN               Codex CLI path (default codex)"
+        );
+        return Ok(());
+    }
+    let address: SocketAddr = std::env::var("MULTI_AGENT_BOARD_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:3000".into())
+        .parse()?;
     let data_path = std::env::var_os("MULTI_AGENT_BOARD_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".multi-agent-board.sqlite3"));
@@ -22,6 +30,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             store,
         )
         .await?);
+    }
+    let recovered = store.recover_agents_after_restart().await?;
+    if recovered > 0 {
+        eprintln!("Recovered {recovered} interrupted agent(s)");
     }
     let agents = AgentManager::new(
         store.clone(),

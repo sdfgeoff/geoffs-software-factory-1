@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use sqlx::{
     SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
 use crate::{
@@ -35,7 +35,9 @@ impl Store {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -124,6 +126,11 @@ impl Store {
         let description = changes.description.unwrap_or(current.description);
         let state = changes.state.unwrap_or(current.state);
         let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
+        if let Some(agent_id) = assignee_id
+            && self.agent(agent_id).await?.is_none()
+        {
+            return Err(AppError::bad_request("assignee agent does not exist"));
+        }
         let result = sqlx::query(
             "UPDATE tickets SET title = ?, description = ?, state = ?, assignee_id = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND revision = ?",
@@ -148,6 +155,9 @@ impl Store {
         agent_id: i64,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::bad_request("claiming agent does not exist"));
+        }
         let claimed = sqlx::query_as(
             "UPDATE tickets SET assignee_id = ?, state = 'in_progress', revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
@@ -344,6 +354,17 @@ impl Store {
         .fetch_one(&self.pool)
         .await?)
     }
+
+    pub async fn recover_agents_after_restart(&self) -> Result<u64, sqlx::Error> {
+        Ok(sqlx::query(
+            "UPDATE agents SET state = 'error', active_turn_id = NULL, \
+             last_error = 'The board restarted during an active turn; send a message to retry.', \
+             updated_at = unixepoch() WHERE state IN ('running', 'awaiting_approval')",
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
 }
 
 fn validate_title(title: &str) -> Result<(), AppError> {
@@ -469,5 +490,27 @@ mod tests {
         assert_eq!(reopened.tickets().await.unwrap().len(), 1);
         reopened.close().await;
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_agents_are_recovered_as_errors() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Running,
+                Some("thread-1"),
+                Some("turn-1"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.recover_agents_after_restart().await.unwrap(), 1);
+        let recovered = store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(recovered.state, AgentState::Error);
+        assert!(recovered.active_turn_id.is_none());
+        assert!(recovered.thread_id.is_some());
     }
 }

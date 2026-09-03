@@ -290,9 +290,14 @@ impl AgentManager {
             .agent(agent_id)
             .await?
             .ok_or_else(|| AppError::not_found("agent not found"))?;
+        let active_turn = (agent.thread_id.clone(), agent.active_turn_id.clone());
+        let agent = self
+            .store
+            .update_agent_runtime(agent_id, AgentState::Paused, None, None, None)
+            .await?;
         let running = self.processes.lock().await.remove(&agent_id);
         if let Some(running) = running {
-            if let (Some(thread_id), Some(turn_id)) = (&agent.thread_id, &agent.active_turn_id) {
+            if let (Some(thread_id), Some(turn_id)) = active_turn {
                 let _ = running
                     .rpc
                     .request(
@@ -303,10 +308,6 @@ impl AgentManager {
             }
             let _ = running.child.lock().await.kill().await;
         }
-        let agent = self
-            .store
-            .update_agent_runtime(agent_id, AgentState::Paused, None, None, None)
-            .await?;
         self.emit(agent_id, "agent_updated", json!(agent));
         Ok(agent)
     }
@@ -400,6 +401,17 @@ impl AgentManager {
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
                 manager.handle_event(agent_id, &rpc, event).await;
+            }
+            manager.processes.lock().await.remove(&agent_id);
+            if let Ok(Some(agent)) = manager.store.agent(agent_id).await
+                && matches!(
+                    agent.state,
+                    AgentState::Running | AgentState::AwaitingApproval
+                )
+            {
+                manager
+                    .fail_agent(agent_id, "Codex process exited unexpectedly")
+                    .await;
             }
         });
     }

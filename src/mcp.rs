@@ -292,6 +292,8 @@ mod tests {
     #[tokio::test]
     async fn claim_is_atomic() {
         let store = Store::memory().await.unwrap();
+        store.create_agent("first", "/tmp/first").await.unwrap();
+        store.create_agent("second", "/tmp/second").await.unwrap();
         let ticket = store
             .create_ticket(NewTicket {
                 title: "Claim me".into(),
