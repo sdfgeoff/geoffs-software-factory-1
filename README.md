@@ -14,11 +14,12 @@ A local browser interface for coordinating persistent Codex coding agents. It pr
 From a clean checkout:
 
 ```sh
+npm ci --prefix frontend
 cargo build --release
 ./target/release/multi-agent-board
 ```
 
-The Cargo build installs locked frontend dependencies when necessary, builds the React application, and embeds its output in the Rust executable. The resulting executable does not need Node.js or separate web assets at runtime. Open <http://127.0.0.1:3000> and enter the absolute path of a Git working tree.
+`npm ci` installs the exact frontend dependency versions in `frontend/package-lock.json`. The Cargo build also runs this installation when `frontend/node_modules` is absent, builds the React application, and embeds its output in the Rust executable. The resulting executable does not need Node.js or separate web assets at runtime. Open <http://127.0.0.1:3000> and enter the absolute path of a Git working tree.
 
 The Cargo workspace keeps the HTTP wire types in `crates/protocol` and the HTTP-only MCP implementation in `crates/mcp`. Database and server code remain in the root crate.
 
