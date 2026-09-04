@@ -8,7 +8,7 @@ use axum::{
 };
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateTicketRequest, CreateWakeEventRequest,
-    MessageRangeQuery, PostMessageRequest, SetProjectRequest,
+    MessageRangeQuery, PostMessageRequest, SetAgentChannelSubscriptionsRequest, SetProjectRequest,
 };
 use serde::Deserialize;
 
@@ -28,6 +28,18 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         .route(
             "/agents/{id}/wake-events",
             get(list_wake_events).post(create_wake_event),
+        )
+        .route(
+            "/agent/channel-subscriptions",
+            get(my_channel_subscriptions).put(replace_my_channel_subscriptions),
+        )
+        .route(
+            "/agent/channel-subscriptions/add",
+            axum::routing::post(add_my_channel_subscriptions),
+        )
+        .route(
+            "/agent/channel-subscriptions/remove",
+            axum::routing::post(remove_my_channel_subscriptions),
         )
         .route("/channels", get(list_channels))
         .route(
@@ -190,6 +202,57 @@ async fn create_wake_event(
             )
             .await?,
     ))
+}
+
+async fn my_channel_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(
+        agents
+            .channel_subscriptions(calling_agent(&headers)?)
+            .await?,
+    ))
+}
+
+async fn replace_my_channel_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+    Json(input): Json<SetAgentChannelSubscriptionsRequest>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(
+        agents
+            .set_channel_subscriptions(calling_agent(&headers)?, &input.channels)
+            .await?,
+    ))
+}
+
+async fn add_my_channel_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+    Json(input): Json<SetAgentChannelSubscriptionsRequest>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(
+        agents
+            .add_channel_subscriptions(calling_agent(&headers)?, &input.channels)
+            .await?,
+    ))
+}
+
+async fn remove_my_channel_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+    Json(input): Json<SetAgentChannelSubscriptionsRequest>,
+) -> Result<Json<Vec<String>>, AppError> {
+    Ok(Json(
+        agents
+            .remove_channel_subscriptions(calling_agent(&headers)?, &input.channels)
+            .await?,
+    ))
+}
+
+fn calling_agent(headers: &HeaderMap) -> Result<i64, AppError> {
+    agent_header(headers)?.ok_or_else(|| AppError::forbidden("agent identity is required"))
 }
 
 fn agent_header(headers: &HeaderMap) -> Result<Option<i64>, AppError> {

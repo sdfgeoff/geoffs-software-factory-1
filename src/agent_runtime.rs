@@ -264,6 +264,32 @@ impl AgentManager {
         Ok(channels)
     }
 
+    pub async fn add_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let channels = self
+            .store
+            .add_agent_channel_subscriptions(agent_id, channels)
+            .await?;
+        self.emit(agent_id, "channel_subscriptions", json!(channels));
+        Ok(channels)
+    }
+
+    pub async fn remove_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let channels = self
+            .store
+            .remove_agent_channel_subscriptions(agent_id, channels)
+            .await?;
+        self.emit(agent_id, "channel_subscriptions", json!(channels));
+        Ok(channels)
+    }
+
     pub async fn set_wake_settings(
         &self,
         agent_id: i64,

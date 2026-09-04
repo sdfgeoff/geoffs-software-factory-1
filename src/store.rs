@@ -875,20 +875,7 @@ impl Store {
         agent_id: i64,
         channels: &[String],
     ) -> Result<Vec<String>, AppError> {
-        if self.agent(agent_id).await?.is_none() {
-            return Err(AppError::not_found("agent not found"));
-        }
-        let mut channels = channels.to_vec();
-        channels.sort();
-        channels.dedup();
-        for channel in &channels {
-            validate_channel(channel)?;
-            if !self.channel_exists(channel).await? {
-                return Err(AppError::bad_request(format!(
-                    "channel #{channel} does not exist"
-                )));
-            }
-        }
+        let channels = self.valid_agent_channels(agent_id, channels).await?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query("DELETE FROM agent_channel_subscriptions WHERE agent_id = ?")
             .bind(agent_id)
@@ -904,6 +891,69 @@ impl Store {
             .await?;
         }
         transaction.commit().await?;
+        Ok(channels)
+    }
+
+    pub async fn add_agent_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let channels = self.valid_agent_channels(agent_id, channels).await?;
+        let mut transaction = self.pool.begin().await?;
+        for channel in channels {
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_channel_subscriptions (agent_id, channel_name) \
+                 VALUES (?, ?)",
+            )
+            .bind(agent_id)
+            .bind(channel)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.agent_channel_subscriptions(agent_id).await
+    }
+
+    pub async fn remove_agent_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let channels = self.valid_agent_channels(agent_id, channels).await?;
+        let mut transaction = self.pool.begin().await?;
+        for channel in channels {
+            sqlx::query(
+                "DELETE FROM agent_channel_subscriptions WHERE agent_id = ? AND channel_name = ?",
+            )
+            .bind(agent_id)
+            .bind(channel)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.agent_channel_subscriptions(agent_id).await
+    }
+
+    async fn valid_agent_channels(
+        &self,
+        agent_id: i64,
+        channels: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        let mut channels = channels.to_vec();
+        channels.sort();
+        channels.dedup();
+        for channel in &channels {
+            validate_channel(channel)?;
+            if !self.channel_exists(channel).await? {
+                return Err(AppError::bad_request(format!(
+                    "channel #{channel} does not exist"
+                )));
+            }
+        }
         Ok(channels)
     }
 

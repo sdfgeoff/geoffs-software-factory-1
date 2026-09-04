@@ -200,6 +200,26 @@ fn tools() -> Value {
             json!({"type":"object","properties":{}})
         ),
         tool(
+            "list_my_channel_subscriptions",
+            "List this agent's message-board channel subscriptions",
+            json!({"type":"object","properties":{}})
+        ),
+        tool(
+            "add_my_channel_subscriptions",
+            "Add message-board channel subscriptions for this agent",
+            channel_list_schema()
+        ),
+        tool(
+            "remove_my_channel_subscriptions",
+            "Remove message-board channel subscriptions for this agent",
+            channel_list_schema()
+        ),
+        tool(
+            "replace_my_channel_subscriptions",
+            "Replace all message-board channel subscriptions for this agent",
+            channel_list_schema()
+        ),
+        tool(
             "read_message_board_channel",
             "Read messages in an optional inclusive time range",
             json!({"type":"object","properties":{"channel_name":{"type":"string"},"start_time":{"type":"integer"},"end_time":{"type":"integer"}},"required":["channel_name"]})
@@ -214,6 +234,10 @@ fn tools() -> Value {
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({"name": name, "description": description, "inputSchema": input_schema})
+}
+
+fn channel_list_schema() -> Value {
+    json!({"type":"object","properties":{"channels":{"type":"array","items":{"type":"string"}}},"required":["channels"]})
 }
 
 async fn call_tool(
@@ -270,6 +294,38 @@ async fn call_tool(
             review_request(board, Method::POST, &args, "approve-review").await?
         }
         "list_message_board_channels" => board.request(Method::GET, "/channels", None).await?,
+        "list_my_channel_subscriptions" => {
+            board
+                .request(Method::GET, "/agent/channel-subscriptions", None)
+                .await?
+        }
+        "add_my_channel_subscriptions" => {
+            board
+                .request(
+                    Method::POST,
+                    "/agent/channel-subscriptions/add",
+                    Some(channel_list_request(&args)?),
+                )
+                .await?
+        }
+        "remove_my_channel_subscriptions" => {
+            board
+                .request(
+                    Method::POST,
+                    "/agent/channel-subscriptions/remove",
+                    Some(channel_list_request(&args)?),
+                )
+                .await?
+        }
+        "replace_my_channel_subscriptions" => {
+            board
+                .request(
+                    Method::PUT,
+                    "/agent/channel-subscriptions",
+                    Some(channel_list_request(&args)?),
+                )
+                .await?
+        }
         "read_message_board_channel" => {
             let channel = string(&args, "channel_name")?;
             let mut query = Vec::new();
@@ -358,6 +414,15 @@ fn optional_integer(args: &Value, name: &str) -> Result<Option<i64>, McpError> {
             .map(Some)
             .ok_or_else(|| McpError::bad_request(format!("{name} must be an integer"))),
     }
+}
+
+fn channel_list_request(args: &Value) -> Result<Value, McpError> {
+    let channels = args
+        .get("channels")
+        .and_then(Value::as_array)
+        .filter(|channels| channels.iter().all(Value::is_string))
+        .ok_or_else(|| McpError::bad_request("channels must be an array of strings"))?;
+    Ok(json!({"channels": channels}))
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
