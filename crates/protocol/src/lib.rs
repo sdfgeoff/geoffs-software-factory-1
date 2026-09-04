@@ -61,7 +61,8 @@ pub struct SetAgentScopesRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SetAgentWakeSettingsRequest {
-    pub wake_on_pending_task: bool,
+    pub wake_on_pending_work: bool,
+    pub wake_on_pending_review: bool,
     pub idle_heartbeat_minutes: Option<i64>,
 }
 

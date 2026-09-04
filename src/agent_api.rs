@@ -118,7 +118,12 @@ async fn set_agent_wake_settings(
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(
         manager
-            .set_wake_settings(id, input.wake_on_pending_task, input.idle_heartbeat_minutes)
+            .set_wake_settings(
+                id,
+                input.wake_on_pending_work,
+                input.wake_on_pending_review,
+                input.idle_heartbeat_minutes,
+            )
             .await?,
     ))
 }
@@ -310,7 +315,8 @@ mod tests {
     async fn wake_settings_are_validated_and_exposed_over_http() {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
-        assert!(!agent.wake_on_pending_task);
+        assert!(!agent.wake_on_pending_work);
+        assert!(!agent.wake_on_pending_review);
         assert_eq!(agent.idle_heartbeat_minutes, None);
         let manager = AgentManager::new(
             store,
@@ -326,7 +332,7 @@ mod tests {
                 Request::put(format!("/agents/{}/wake-settings", agent.id))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"wake_on_pending_task":true,"idle_heartbeat_minutes":20}"#,
+                        r#"{"wake_on_pending_work":true,"wake_on_pending_review":false,"idle_heartbeat_minutes":20}"#,
                     ))
                     .unwrap(),
             )
@@ -336,7 +342,8 @@ mod tests {
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(body["wake_on_pending_task"], true);
+        assert_eq!(body["wake_on_pending_work"], true);
+        assert_eq!(body["wake_on_pending_review"], false);
         assert_eq!(body["idle_heartbeat_minutes"], 20);
 
         let response = app
@@ -345,7 +352,7 @@ mod tests {
                 Request::put(format!("/agents/{}/wake-settings", agent.id))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"wake_on_pending_task":false,"idle_heartbeat_minutes":null}"#,
+                        r#"{"wake_on_pending_work":false,"wake_on_pending_review":true,"idle_heartbeat_minutes":null}"#,
                     ))
                     .unwrap(),
             )
@@ -356,13 +363,15 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(body["idle_heartbeat_minutes"], Value::Null);
+        assert_eq!(body["wake_on_pending_work"], false);
+        assert_eq!(body["wake_on_pending_review"], true);
 
         let response = app
             .oneshot(
                 Request::put(format!("/agents/{}/wake-settings", agent.id))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"wake_on_pending_task":false,"idle_heartbeat_minutes":0}"#,
+                        r#"{"wake_on_pending_work":false,"wake_on_pending_review":false,"idle_heartbeat_minutes":0}"#,
                     ))
                     .unwrap(),
             )

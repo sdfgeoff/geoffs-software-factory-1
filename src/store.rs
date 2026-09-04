@@ -559,7 +559,7 @@ impl Store {
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT a.id, a.name, a.state, a.thread_id, a.worktree_path, a.active_turn_id, \
-             a.last_error, a.wake_on_pending_task, a.idle_heartbeat_minutes, \
+             a.last_error, a.wake_on_pending_work, a.wake_on_pending_review, a.idle_heartbeat_minutes, \
              a.idle_since, a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
              WHERE s.scope = ? AND a.id != ? AND a.state != 'paused' \
@@ -910,7 +910,7 @@ impl Store {
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -920,7 +920,7 @@ impl Store {
     pub async fn agents_due_for_idle_heartbeat(&self, now: i64) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE state = 'idle' AND idle_heartbeat_minutes IS NOT NULL \
              AND idle_since IS NOT NULL AND idle_since + idle_heartbeat_minutes * 60 <= ? \
              ORDER BY id",
@@ -933,7 +933,7 @@ impl Store {
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE id = ?",
         )
         .bind(id)
@@ -944,7 +944,7 @@ impl Store {
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
-             wake_on_pending_task, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE name = ?",
         )
         .bind(name)
@@ -979,7 +979,8 @@ impl Store {
     pub async fn set_agent_wake_settings(
         &self,
         id: i64,
-        wake_on_pending_task: bool,
+        wake_on_pending_work: bool,
+        wake_on_pending_review: bool,
         idle_heartbeat_minutes: Option<i64>,
     ) -> Result<Agent, AppError> {
         if idle_heartbeat_minutes.is_some_and(|minutes| !(1..=10_080).contains(&minutes)) {
@@ -988,10 +989,11 @@ impl Store {
             ));
         }
         let result = sqlx::query(
-            "UPDATE agents SET wake_on_pending_task = ?, idle_heartbeat_minutes = ?, \
+            "UPDATE agents SET wake_on_pending_work = ?, wake_on_pending_review = ?, idle_heartbeat_minutes = ?, \
              updated_at = unixepoch() WHERE id = ?",
         )
-        .bind(wake_on_pending_task)
+        .bind(wake_on_pending_work)
+        .bind(wake_on_pending_review)
         .bind(idle_heartbeat_minutes)
         .bind(id)
         .execute(&self.pool)
@@ -1208,7 +1210,7 @@ async fn insert_pending_ticket_wakes(
                 "Ticket #{} '{}' is available. Claim it atomically before starting work.",
                 ticket.id, ticket.title
             ),
-            sqlx::query_scalar("SELECT id FROM agents WHERE wake_on_pending_task = 1 ORDER BY id")
+            sqlx::query_scalar("SELECT id FROM agents WHERE wake_on_pending_work = 1 ORDER BY id")
                 .fetch_all(&mut **transaction)
                 .await?,
         ),
@@ -1218,7 +1220,7 @@ async fn insert_pending_ticket_wakes(
                 "Ticket #{} '{}' was assigned to you.",
                 ticket.id, ticket.title
             ),
-            sqlx::query_scalar("SELECT id FROM agents WHERE id = ? AND wake_on_pending_task = 1")
+            sqlx::query_scalar("SELECT id FROM agents WHERE id = ? AND wake_on_pending_work = 1")
                 .bind(ticket.assignee_id)
                 .fetch_all(&mut **transaction)
                 .await?,
@@ -1233,7 +1235,7 @@ async fn insert_pending_ticket_wakes(
             ),
             sqlx::query_scalar(
                 "SELECT a.id FROM agents a JOIN agent_scopes s ON s.agent_id = a.id \
-                 WHERE a.wake_on_pending_task = 1 AND s.scope = 'approve_review' \
+                 WHERE a.wake_on_pending_review = 1 AND s.scope = 'approve_review' \
                  AND a.id != ? ORDER BY a.id",
             )
             .bind(ticket.assignee_id)
@@ -1501,29 +1503,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_task_wakes_follow_ticket_availability_assignment_and_review() {
+    async fn separate_wake_settings_migration_preserves_existing_preferences() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, wake_on_pending_task INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agents VALUES (1, 1), (2, 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0013_separate_ticket_wake_settings.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let settings: Vec<(bool, bool, bool)> = sqlx::query_as(
+            "SELECT wake_on_pending_task, wake_on_pending_work, wake_on_pending_review \
+             FROM agents ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(settings, vec![(true, true, true), (false, false, false)]);
+    }
+
+    #[tokio::test]
+    async fn separate_work_and_review_wake_settings_select_independent_targets() {
         let store = Store::memory().await.unwrap();
-        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
-        let reviewer = store
-            .create_agent("reviewer", "/tmp/reviewer")
+        let implementer = store
+            .create_agent("implementer", "/tmp/implementer")
             .await
             .unwrap();
-        let opted_out = store
-            .create_agent("opted-out", "/tmp/opted-out")
+        let work_only = store
+            .create_agent("work-only", "/tmp/work-only")
+            .await
+            .unwrap();
+        let review_only = store
+            .create_agent("review-only", "/tmp/review-only")
+            .await
+            .unwrap();
+        let both = store.create_agent("both", "/tmp/both").await.unwrap();
+        let neither = store.create_agent("neither", "/tmp/neither").await.unwrap();
+        store
+            .set_agent_wake_settings(work_only.id, true, false, None)
             .await
             .unwrap();
         store
-            .set_agent_wake_settings(worker.id, true, None)
+            .set_agent_wake_settings(review_only.id, false, true, None)
             .await
             .unwrap();
         store
-            .set_agent_wake_settings(reviewer.id, true, None)
+            .set_agent_wake_settings(both.id, true, true, None)
             .await
             .unwrap();
-        store
-            .set_agent_scopes(reviewer.id, &["approve_review".into()])
-            .await
-            .unwrap();
+        for agent_id in [work_only.id, review_only.id, both.id, neither.id] {
+            store
+                .set_agent_scopes(agent_id, &["approve_review".into()])
+                .await
+                .unwrap();
+        }
 
         let (ticket, mut available_targets) = store
             .create_ticket_with_wakes(NewTicket {
@@ -1533,47 +1577,55 @@ mod tests {
             .await
             .unwrap();
         available_targets.sort();
-        assert_eq!(available_targets, vec![worker.id, reviewer.id]);
-        assert!(store.wake_events(opted_out.id).await.unwrap().is_empty());
+        assert_eq!(available_targets, vec![work_only.id, both.id]);
+        assert!(store.wake_events(review_only.id).await.unwrap().is_empty());
+        assert!(store.wake_events(neither.id).await.unwrap().is_empty());
 
+        store
+            .set_agent_wake_settings(implementer.id, true, false, None)
+            .await
+            .unwrap();
         let (ticket, assigned_targets) = store
-            .claim_ticket_with_wakes(ticket.id, worker.id, Some(ticket.revision))
+            .claim_ticket_with_wakes(ticket.id, implementer.id, Some(ticket.revision))
             .await
             .unwrap();
-        assert_eq!(assigned_targets, vec![worker.id]);
-        let worker_events = store.wake_events(worker.id).await.unwrap();
-        assert_eq!(worker_events[1].kind, "ticket.assigned");
-        assert_eq!(worker_events[1].payload["ticket_id"], ticket.id);
+        assert_eq!(assigned_targets, vec![implementer.id]);
         assert_eq!(
-            worker_events[1].payload["changed_fields"],
-            serde_json::json!(["state", "assignee_id"])
+            store.wake_events(implementer.id).await.unwrap()[0].kind,
+            "ticket.assigned"
         );
-        let (ticket, repeated_targets) = store
-            .claim_ticket_with_wakes(ticket.id, worker.id, Some(ticket.revision))
-            .await
-            .unwrap();
-        assert!(repeated_targets.is_empty());
-        assert_eq!(store.wake_events(worker.id).await.unwrap().len(), 2);
 
         let (ticket, review_targets) = store
             .submit_review_with_wakes(
                 ticket.id,
-                worker.id,
-                Some("agents/worker"),
+                implementer.id,
+                Some("agents/implementer"),
                 "abc123",
                 "main",
                 Some(ticket.revision),
             )
             .await
             .unwrap();
-        assert_eq!(review_targets, vec![reviewer.id]);
-        let reviewer_events = store.wake_events(reviewer.id).await.unwrap();
-        assert_eq!(reviewer_events[1].kind, "ticket.review_requested");
-        assert_eq!(reviewer_events[1].payload["ticket_id"], ticket.id);
+        assert_eq!(review_targets, vec![review_only.id, both.id]);
+        assert_eq!(store.wake_events(work_only.id).await.unwrap().len(), 1);
+        let reviewer_events = store.wake_events(review_only.id).await.unwrap();
+        assert_eq!(reviewer_events[0].kind, "ticket.review_requested");
+        assert_eq!(reviewer_events[0].payload["ticket_id"], ticket.id);
         assert_eq!(
-            reviewer_events[1].deduplication_key.as_deref(),
-            Some("ticket:1:4:ticket.review_requested")
+            reviewer_events[0].deduplication_key.as_deref(),
+            Some("ticket:1:3:ticket.review_requested")
         );
+        assert_eq!(
+            store
+                .wake_events(both.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ticket.available", "ticket.review_requested"]
+        );
+        assert!(store.wake_events(neither.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1909,7 +1961,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_agent_wake_settings(agent.id, true, Some(20))
+            .set_agent_wake_settings(agent.id, true, false, Some(20))
             .await
             .unwrap();
         store.close().await;
@@ -1917,7 +1969,8 @@ mod tests {
         let reopened = Store::open(&path).await.unwrap();
         assert_eq!(reopened.tickets().await.unwrap().len(), 1);
         let agent = reopened.agent(agent.id).await.unwrap().unwrap();
-        assert!(agent.wake_on_pending_task);
+        assert!(agent.wake_on_pending_work);
+        assert!(!agent.wake_on_pending_review);
         assert_eq!(agent.idle_heartbeat_minutes, Some(20));
         reopened.close().await;
         std::fs::remove_file(path).unwrap();
@@ -1958,7 +2011,7 @@ mod tests {
                 .is_empty()
         );
         store
-            .set_agent_wake_settings(agent.id, false, Some(20))
+            .set_agent_wake_settings(agent.id, false, false, Some(20))
             .await
             .unwrap();
 

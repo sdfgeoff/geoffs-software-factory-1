@@ -29,7 +29,8 @@ export function AgentWorkspace({
   const [prompt, setPrompt] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
-  const [wakeOnPendingTask, setWakeOnPendingTask] = useState(false);
+  const [wakeOnPendingWork, setWakeOnPendingWork] = useState(false);
+  const [wakeOnPendingReview, setWakeOnPendingReview] = useState(false);
   const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
   const [heartbeatMinutes, setHeartbeatMinutes] = useState("20");
   const selected =
@@ -39,13 +40,15 @@ export function AgentWorkspace({
   }, [agents, selectedAgentId, onSelectAgent]);
   useEffect(() => setRenamedName(selected?.name ?? ""), [selected?.name]);
   useEffect(() => {
-    setWakeOnPendingTask(selected?.wake_on_pending_task ?? false);
+    setWakeOnPendingWork(selected?.wake_on_pending_work ?? false);
+    setWakeOnPendingReview(selected?.wake_on_pending_review ?? false);
     setHeartbeatEnabled(selected?.idle_heartbeat_minutes !== null);
     setHeartbeatMinutes(String(selected?.idle_heartbeat_minutes ?? 20));
   }, [
     selected?.id,
     selected?.idle_heartbeat_minutes,
-    selected?.wake_on_pending_task,
+    selected?.wake_on_pending_work,
+    selected?.wake_on_pending_review,
   ]);
   useEffect(() => {
     if (selectedAgentId)
@@ -137,7 +140,8 @@ export function AgentWorkspace({
     try {
       await api.setAgentWakeSettings(
         selected.id,
-        wakeOnPendingTask,
+        wakeOnPendingWork,
+        wakeOnPendingReview,
         heartbeatEnabled ? Number(heartbeatMinutes) : null,
       );
       await onChanged();
@@ -240,14 +244,27 @@ export function AgentWorkspace({
                 <label>
                   <input
                     type="checkbox"
-                    checked={wakeOnPendingTask}
+                    checked={wakeOnPendingWork}
                     onChange={(event) =>
-                      setWakeOnPendingTask(event.target.checked)
+                      setWakeOnPendingWork(event.target.checked)
                     }
                   />
                   <span>
-                    <strong>Pending tasks</strong>
-                    Wake for available work and reviews
+                    <strong>Pending work</strong>
+                    Wake for available implementation work
+                  </span>
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={wakeOnPendingReview}
+                    onChange={(event) =>
+                      setWakeOnPendingReview(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <strong>Pending reviews</strong>
+                    Wake when eligible to review
                   </span>
                 </label>
                 <label>

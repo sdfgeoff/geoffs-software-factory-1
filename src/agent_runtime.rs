@@ -267,13 +267,19 @@ impl AgentManager {
     pub async fn set_wake_settings(
         &self,
         agent_id: i64,
-        wake_on_pending_task: bool,
+        wake_on_pending_work: bool,
+        wake_on_pending_review: bool,
         idle_heartbeat_minutes: Option<i64>,
     ) -> Result<Agent, AppError> {
         let _operation = self.operations.lock().await;
         let agent = self
             .store
-            .set_agent_wake_settings(agent_id, wake_on_pending_task, idle_heartbeat_minutes)
+            .set_agent_wake_settings(
+                agent_id,
+                wake_on_pending_work,
+                wake_on_pending_review,
+                idle_heartbeat_minutes,
+            )
             .await?;
         self.emit(agent_id, "agent_updated", json!(agent));
         Ok(agent)
@@ -1231,7 +1237,7 @@ mod tests {
     async fn due_heartbeat_starts_a_normal_turn() {
         let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
         let agent = manager
-            .set_wake_settings(agent.id, false, Some(20))
+            .set_wake_settings(agent.id, false, false, Some(20))
             .await
             .unwrap();
         let now = Timestamp::from_second(agent.idle_since.unwrap() + 1_200).unwrap();
@@ -1493,7 +1499,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_agent_wake_settings(reviewer.id, true, None)
+            .set_agent_wake_settings(reviewer.id, false, true, None)
             .await
             .unwrap();
         let ticket = manager

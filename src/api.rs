@@ -308,7 +308,7 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
         store
-            .set_agent_wake_settings(agent.id, true, None)
+            .set_agent_wake_settings(agent.id, true, false, None)
             .await
             .unwrap();
         store

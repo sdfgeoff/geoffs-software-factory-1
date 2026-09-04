@@ -27,7 +27,8 @@ const agent: Agent = {
   worktree_path: "/repo/reviewer",
   active_turn_id: null,
   last_error: null,
-  wake_on_pending_task: false,
+  wake_on_pending_work: false,
+  wake_on_pending_review: false,
   idle_heartbeat_minutes: null,
   idle_since: 0,
   created_at: 0,
@@ -96,7 +97,7 @@ describe("AgentWorkspace", () => {
     );
   });
 
-  it("saves pending-task and heartbeat settings", async () => {
+  it("saves independent work, review, and heartbeat settings", async () => {
     render(
       <AgentWorkspace
         agents={[agent]}
@@ -110,7 +111,7 @@ describe("AgentWorkspace", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /pending tasks/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /pending work/i }));
     fireEvent.click(screen.getByRole("checkbox", { name: /idle heartbeat/i }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Minutes" }), {
       target: { value: "30" },
@@ -118,7 +119,26 @@ describe("AgentWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save wake settings" }));
 
     await waitFor(() =>
-      expect(api.setAgentWakeSettings).toHaveBeenCalledWith(agent.id, true, 30),
+      expect(api.setAgentWakeSettings).toHaveBeenCalledWith(
+        agent.id,
+        true,
+        false,
+        30,
+      ),
+    );
+
+    vi.mocked(api.setAgentWakeSettings).mockClear();
+    fireEvent.click(screen.getByRole("checkbox", { name: /pending work/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /pending reviews/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Save wake settings" }));
+
+    await waitFor(() =>
+      expect(api.setAgentWakeSettings).toHaveBeenCalledWith(
+        agent.id,
+        false,
+        true,
+        30,
+      ),
     );
   });
 

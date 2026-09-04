@@ -72,13 +72,15 @@ export const api = {
     }),
   setAgentWakeSettings: (
     id: number,
-    wakeOnPendingTask: boolean,
+    wakeOnPendingWork: boolean,
+    wakeOnPendingReview: boolean,
     idleHeartbeatMinutes: number | null,
   ) =>
     request<Agent>(`/agents/${id}/wake-settings`, {
       method: "PUT",
       body: JSON.stringify({
-        wake_on_pending_task: wakeOnPendingTask,
+        wake_on_pending_work: wakeOnPendingWork,
+        wake_on_pending_review: wakeOnPendingReview,
         idle_heartbeat_minutes: idleHeartbeatMinutes,
       }),
     }),
