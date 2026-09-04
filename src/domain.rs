@@ -94,12 +94,21 @@ pub struct WakeEvent {
     pub kind: String,
     pub payload: serde_json::Value,
     pub deduplication_key: Option<String>,
+    pub delivery_policy: WakeDeliveryPolicy,
     pub delivery_state: WakeEventState,
     pub delivery_attempts: i64,
     pub last_attempt_at: Option<i64>,
     pub delivered_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum WakeDeliveryPolicy {
+    IdleOnly,
+    Immediate,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]

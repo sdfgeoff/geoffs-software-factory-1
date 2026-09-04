@@ -6,7 +6,10 @@ use sqlx::{
 };
 
 use crate::{
-    domain::{Agent, AgentMessage, AgentState, Channel, Message, WakeEvent, WakeEventState},
+    domain::{
+        Agent, AgentMessage, AgentState, Channel, Message, WakeDeliveryPolicy, WakeEvent,
+        WakeEventState,
+    },
     error::AppError,
 };
 
@@ -27,6 +30,7 @@ struct WakeEventRow {
     kind: String,
     payload: String,
     deduplication_key: Option<String>,
+    delivery_policy: WakeDeliveryPolicy,
     delivery_state: WakeEventState,
     delivery_attempts: i64,
     last_attempt_at: Option<i64>,
@@ -158,6 +162,7 @@ impl Store {
         kind: &str,
         payload: serde_json::Value,
         deduplication_key: Option<&str>,
+        delivery_policy: WakeDeliveryPolicy,
     ) -> Result<WakeEvent, AppError> {
         if self.agent(agent_id).await?.is_none() {
             return Err(AppError::not_found("agent not found"));
@@ -171,12 +176,13 @@ impl Store {
         }
         let result = sqlx::query(
             "INSERT OR IGNORE INTO agent_wake_events \
-             (agent_id, kind, payload, deduplication_key) VALUES (?, ?, ?, ?)",
+             (agent_id, kind, payload, deduplication_key, delivery_policy) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(agent_id)
         .bind(kind)
         .bind(payload)
         .bind(deduplication_key)
+        .bind(delivery_policy)
         .execute(&self.pool)
         .await?;
         let id = if result.rows_affected() == 1 {
@@ -201,7 +207,7 @@ impl Store {
             return Err(AppError::not_found("agent not found"));
         }
         let rows: Vec<WakeEventRow> = sqlx::query_as(
-            "SELECT id, agent_id, kind, payload, deduplication_key, delivery_state, \
+            "SELECT id, agent_id, kind, payload, deduplication_key, delivery_policy, delivery_state, \
              delivery_attempts, last_attempt_at, delivered_at, created_at, updated_at \
              FROM agent_wake_events WHERE agent_id = ? ORDER BY id",
         )
@@ -214,16 +220,19 @@ impl Store {
     pub async fn claim_pending_wake_event(
         &self,
         agent_id: i64,
+        include_idle_only: bool,
     ) -> Result<Option<WakeEvent>, AppError> {
         let row: Option<WakeEventRow> = sqlx::query_as(
             "UPDATE agent_wake_events SET delivery_state = 'delivering', \
              delivery_attempts = delivery_attempts + 1, last_attempt_at = unixepoch(), \
              updated_at = unixepoch() WHERE id = (SELECT id FROM agent_wake_events \
-             WHERE agent_id = ? AND delivery_state = 'pending' ORDER BY id LIMIT 1) \
-             RETURNING id, agent_id, kind, payload, deduplication_key, delivery_state, \
+             WHERE agent_id = ? AND delivery_state = 'pending' \
+             AND (? OR delivery_policy = 'immediate') ORDER BY id LIMIT 1) \
+             RETURNING id, agent_id, kind, payload, deduplication_key, delivery_policy, delivery_state, \
              delivery_attempts, last_attempt_at, delivered_at, created_at, updated_at",
         )
         .bind(agent_id)
+        .bind(include_idle_only)
         .fetch_optional(&self.pool)
         .await?;
         row.map(wake_event_from_row).transpose()
@@ -270,7 +279,7 @@ impl Store {
 
     async fn wake_event(&self, id: i64) -> Result<Option<WakeEvent>, AppError> {
         let row: Option<WakeEventRow> = sqlx::query_as(
-            "SELECT id, agent_id, kind, payload, deduplication_key, delivery_state, \
+            "SELECT id, agent_id, kind, payload, deduplication_key, delivery_policy, delivery_state, \
              delivery_attempts, last_attempt_at, delivered_at, created_at, updated_at \
              FROM agent_wake_events WHERE id = ?",
         )
@@ -289,6 +298,7 @@ impl Store {
             "notification",
             serde_json::json!({"message": body.trim()}),
             None,
+            WakeDeliveryPolicy::Immediate,
         )
         .await?;
         Ok(())
@@ -304,7 +314,7 @@ impl Store {
              updated_at = unixepoch() WHERE id = (SELECT id FROM agent_wake_events \
              WHERE agent_id = ? AND kind = 'notification' AND delivery_state = 'pending' \
              AND json_type(payload, '$.message') = 'text' ORDER BY id LIMIT 1) \
-             RETURNING id, agent_id, kind, payload, deduplication_key, delivery_state, \
+             RETURNING id, agent_id, kind, payload, deduplication_key, delivery_policy, delivery_state, \
              delivery_attempts, last_attempt_at, delivered_at, created_at, updated_at",
         )
         .bind(agent_id)
@@ -753,7 +763,8 @@ impl Store {
         .await?;
         let payload = serde_json::json!({"message": &message.body, "message_id": message.id});
         sqlx::query(
-            "INSERT INTO agent_wake_events (agent_id, kind, payload) VALUES (?, 'message', ?)",
+            "INSERT INTO agent_wake_events (agent_id, kind, payload, delivery_policy) \
+             VALUES (?, 'message', ?, 'immediate')",
         )
         .bind(agent_id)
         .bind(payload.to_string())
@@ -850,8 +861,8 @@ async fn insert_message(
         .map_err(|error| AppError::internal(format!("failed to encode wake event: {error}")))?;
         sqlx::query(
             "INSERT OR IGNORE INTO agent_wake_events \
-             (agent_id, kind, payload, deduplication_key) \
-             VALUES (?, 'channel.message', ?, ?)",
+             (agent_id, kind, payload, deduplication_key, delivery_policy) \
+             VALUES (?, 'channel.message', ?, ?, 'immediate')",
         )
         .bind(target_id)
         .bind(payload)
@@ -936,6 +947,7 @@ fn wake_event_from_row(row: WakeEventRow) -> Result<WakeEvent, AppError> {
         payload: serde_json::from_str(&row.payload)
             .map_err(|error| AppError::internal(format!("invalid stored wake event: {error}")))?,
         deduplication_key: row.deduplication_key,
+        delivery_policy: row.delivery_policy,
         delivery_state: row.delivery_state,
         delivery_attempts: row.delivery_attempts,
         last_attempt_at: row.last_attempt_at,
@@ -1137,6 +1149,7 @@ mod tests {
                 "channel.message",
                 serde_json::json!({"message_id": 1}),
                 None,
+                WakeDeliveryPolicy::Immediate,
             )
             .await
             .unwrap();
@@ -1146,6 +1159,7 @@ mod tests {
                 "notification",
                 serde_json::json!({"unexpected": true}),
                 None,
+                WakeDeliveryPolicy::Immediate,
             )
             .await
             .unwrap();
@@ -1175,6 +1189,7 @@ mod tests {
                 "ticket.available",
                 serde_json::json!({"ticket_id": 3}),
                 Some("ticket:3:available"),
+                WakeDeliveryPolicy::IdleOnly,
             )
             .await
             .unwrap();
@@ -1184,6 +1199,7 @@ mod tests {
                 "ticket.available",
                 serde_json::json!({"ticket_id": 3, "ignored": true}),
                 Some("ticket:3:available"),
+                WakeDeliveryPolicy::IdleOnly,
             )
             .await
             .unwrap();
@@ -1191,7 +1207,7 @@ mod tests {
         assert_eq!(duplicate.payload, first.payload);
 
         let delivering = store
-            .claim_pending_wake_event(agent.id)
+            .claim_pending_wake_event(agent.id, true)
             .await
             .unwrap()
             .unwrap();
@@ -1200,7 +1216,7 @@ mod tests {
         assert_eq!(store.recover_wake_events_after_restart().await.unwrap(), 1);
 
         let retry = store
-            .claim_pending_wake_event(agent.id)
+            .claim_pending_wake_event(agent.id, true)
             .await
             .unwrap()
             .unwrap();
@@ -1213,7 +1229,7 @@ mod tests {
         assert!(events[0].delivered_at.is_some());
         assert!(
             store
-                .claim_pending_wake_event(agent.id)
+                .claim_pending_wake_event(agent.id, true)
                 .await
                 .unwrap()
                 .is_none()

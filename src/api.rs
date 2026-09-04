@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::{
     agent_runtime::AgentManager,
-    domain::{Channel, Message, Project, Ticket, TicketState, WakeEvent},
+    domain::{Channel, Message, Project, Ticket, TicketState, WakeDeliveryPolicy, WakeEvent},
     error::AppError,
     store::{NewTicket, Store, TicketChanges},
 };
@@ -199,6 +199,7 @@ async fn create_wake_event(
                 &input.kind,
                 input.payload,
                 input.deduplication_key.as_deref(),
+                WakeDeliveryPolicy::Immediate,
             )
             .await?,
     ))

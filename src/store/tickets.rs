@@ -1,7 +1,7 @@
 use sqlx::{Sqlite, Transaction};
 
 use crate::{
-    domain::{Message, Project, Ticket, TicketState},
+    domain::{Message, Project, Ticket, TicketState, WakeDeliveryPolicy},
     error::AppError,
 };
 
@@ -550,12 +550,13 @@ async fn insert_pending_ticket_wakes(
     for agent_id in agent_ids {
         let result = sqlx::query(
             "INSERT OR IGNORE INTO agent_wake_events \
-             (agent_id, kind, payload, deduplication_key) VALUES (?, ?, ?, ?)",
+             (agent_id, kind, payload, deduplication_key, delivery_policy) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(agent_id)
         .bind(kind)
         .bind(&payload)
         .bind(&deduplication_key)
+        .bind(WakeDeliveryPolicy::IdleOnly)
         .execute(&mut **transaction)
         .await?;
         if result.rows_affected() == 1 {
@@ -693,6 +694,10 @@ mod tests {
         assert_eq!(store.wake_events(work_only.id).await.unwrap().len(), 1);
         let reviewer_events = store.wake_events(review_only.id).await.unwrap();
         assert_eq!(reviewer_events[0].kind, "ticket.review_requested");
+        assert_eq!(
+            reviewer_events[0].delivery_policy,
+            WakeDeliveryPolicy::IdleOnly
+        );
         assert_eq!(reviewer_events[0].payload["ticket_id"], ticket.id);
         assert_eq!(
             reviewer_events[0].deduplication_key.as_deref(),
