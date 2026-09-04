@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Agent } from "../types";
+import type { Agent, Ticket } from "../types";
 import { AgentWorkspace } from "./AgentWorkspace";
 
 vi.mock("../api", () => ({
@@ -34,6 +34,22 @@ const agent: Agent = {
   updated_at: 0,
 };
 
+const ticket: Ticket = {
+  id: 17,
+  title: "Move agent settings",
+  description: "",
+  state: "in_progress",
+  assignee_id: agent.id,
+  implementation_branch: null,
+  review_commit: null,
+  review_target_branch: null,
+  reviewer_id: null,
+  review_feedback: null,
+  revision: 1,
+  created_at: 0,
+  updated_at: 0,
+};
+
 describe("AgentWorkspace", () => {
   afterEach(cleanup);
 
@@ -55,10 +71,13 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         agents={[agent]}
         channels={[{ name: "general", most_recent_message_at: 0 }]}
+        tickets={[]}
         selectedAgentId={agent.id}
+        view="settings"
         refresh={0}
         deltas={{}}
         onSelectAgent={() => {}}
+        onViewChange={() => {}}
         onChanged={async () => {}}
         onError={() => {}}
       />,
@@ -77,10 +96,13 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         agents={[agent]}
         channels={[{ name: "general", most_recent_message_at: 0 }]}
+        tickets={[]}
         selectedAgentId={agent.id}
+        view="settings"
         refresh={0}
         deltas={{}}
         onSelectAgent={() => {}}
+        onViewChange={() => {}}
         onChanged={async () => {}}
         onError={() => {}}
       />,
@@ -101,10 +123,13 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         agents={[agent]}
         channels={[{ name: "general", most_recent_message_at: 0 }]}
+        tickets={[]}
         selectedAgentId={agent.id}
+        view="settings"
         refresh={0}
         deltas={{}}
         onSelectAgent={() => {}}
+        onViewChange={() => {}}
         onChanged={async () => {}}
         onError={() => {}}
       />,
@@ -128,10 +153,13 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         agents={[agent]}
         channels={[{ name: "general", most_recent_message_at: 0 }]}
+        tickets={[]}
         selectedAgentId={agent.id}
+        view="settings"
         refresh={0}
         deltas={{}}
         onSelectAgent={() => {}}
+        onViewChange={() => {}}
         onChanged={onChanged}
         onError={() => {}}
       />,
@@ -153,10 +181,13 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         agents={[{ ...agent, state: "running", active_turn_id: "turn-1" }]}
         channels={[{ name: "general", most_recent_message_at: 0 }]}
+        tickets={[]}
         selectedAgentId={agent.id}
+        view="chat"
         refresh={0}
         deltas={{}}
         onSelectAgent={() => {}}
+        onViewChange={() => {}}
         onChanged={async () => {}}
         onError={() => {}}
       />,
@@ -180,10 +211,13 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         agents={[{ ...agent, state: "error", last_error: "Turn failed" }]}
         channels={[{ name: "general", most_recent_message_at: 0 }]}
+        tickets={[]}
         selectedAgentId={agent.id}
+        view="chat"
         refresh={0}
         deltas={{}}
         onSelectAgent={() => {}}
+        onViewChange={() => {}}
         onChanged={async () => {}}
         onError={() => {}}
       />,
@@ -192,5 +226,68 @@ describe("AgentWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 
     await waitFor(() => expect(api.resumeAgent).toHaveBeenCalledWith(agent.id));
+  });
+
+  it("opens settings from an operational chat header", () => {
+    const onViewChange = vi.fn();
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[ticket]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={onViewChange}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText("Ticket #17: Move agent settings").parentElement
+        ?.textContent,
+    ).toContain("idle");
+    const settings = screen.getByRole("link", { name: "Settings" });
+    expect(settings.getAttribute("href")).toBe("#agents/1/settings");
+    fireEvent.click(settings);
+    expect(onViewChange).toHaveBeenCalledWith("settings");
+  });
+
+  it("preserves the chat draft and scroll position while settings are open", () => {
+    const props = {
+      agents: [agent],
+      channels: [],
+      tickets: [],
+      selectedAgentId: agent.id,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { container, rerender } = render(
+      <AgentWorkspace {...props} view="chat" />,
+    );
+    const draft = screen.getByRole("textbox", { name: "Message" });
+    const chat = container.querySelector<HTMLElement>(".agent-chat")!;
+    fireEvent.change(draft, { target: { value: "Unsent work" } });
+    chat.scrollTop = 80;
+
+    rerender(<AgentWorkspace {...props} view="settings" />);
+    expect(screen.getByRole("heading", { name: "Agent settings" })).toBeTruthy();
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+      "Unsent work",
+    );
+    expect(chat.scrollTop).toBe(80);
+
+    rerender(<AgentWorkspace {...props} view="chat" />);
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+      "Unsent work",
+    );
+    expect(chat.scrollTop).toBe(80);
   });
 });
