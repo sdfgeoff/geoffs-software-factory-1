@@ -222,7 +222,15 @@ aside > button {
   text-align: left;
 }
 .channel-setting {
+  display: grid;
+  gap: 0.5rem;
   margin-bottom: 1rem;
+}
+.channel-setting small {
+  color: #69635b;
+}
+.channel-setting button {
+  justify-self: start;
 }
 aside button.selected {
   background: #1f4b43;
@@ -240,9 +248,37 @@ aside button.selected {
   gap: 1rem;
 }
 .conversation-title h2 {
-  margin-bottom: 0.2rem;
+  margin: 0;
 }
-.conversation-title p {
+.agent-heading,
+.agent-operation {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+.secondary-link {
+  color: #1f4b43;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.agent-operation {
+  margin: 0.35rem 0;
+}
+.agent-operation span {
+  padding: 0.18rem 0.35rem;
+  border-radius: 0.3rem;
+  background: #cfc6b8;
+  color: #4b443b;
+}
+.agent-operation span[data-state="running"] {
+  background: #cce9da;
+  color: #155e42;
+}
+.agent-operation span[data-state="error"] {
+  background: #f4c8bf;
+  color: #8d261d;
+}
+.conversation-title .worktree-path {
   overflow: hidden;
   margin: 0;
   color: #81796d;
@@ -333,6 +369,12 @@ aside button.selected {
 }
 .agent-chat article.agent {
   margin-right: 20%;
+}
+.agent-chat-panel:not([hidden]) {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
 }
 .streaming {
   opacity: 0.75;
