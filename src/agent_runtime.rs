@@ -298,9 +298,9 @@ impl AgentManager {
         let implementation_branch = current_branch(&agent.worktree_path).await?;
         let commit = git_text(&agent.worktree_path, &["rev-parse", "HEAD"]).await?;
         let target_branch = git_text(&project.path, &["symbolic-ref", "--short", "HEAD"]).await?;
-        let ticket = self
+        let (ticket, wake_agent_ids) = self
             .store
-            .submit_review(
+            .submit_review_with_wakes(
                 ticket_id,
                 agent_id,
                 Some(&implementation_branch),
@@ -310,21 +310,8 @@ impl AgentManager {
             )
             .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
-        if let Some(reviewer) = self
-            .store
-            .agents_with_scope("approve_review", agent_id)
-            .await?
-            .into_iter()
-            .next()
-        {
-            self.notify_agent(
-                reviewer.id,
-                &format!(
-                    "Ticket #{} '{}' from branch '{}' is ready for review. Claim its review before inspecting it.",
-                    ticket.id, ticket.title, implementation_branch
-                ),
-            )
-            .await?;
+        for agent_id in wake_agent_ids {
+            self.deliver_pending(agent_id).await;
         }
         Ok(ticket)
     }
@@ -1505,6 +1492,10 @@ mod tests {
             .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
             .await
             .unwrap();
+        store
+            .set_agent_wake_settings(reviewer.id, true, None)
+            .await
+            .unwrap();
         let ticket = manager
             .submit_review(ticket.id, worker.id, Some(ticket.revision))
             .await
@@ -1517,12 +1508,12 @@ mod tests {
             Path::new(&worker.worktree_path),
             &["switch", "-c", "tickets/next"],
         );
-        assert!(
-            store
-                .pending_notification(reviewer.id)
-                .await
-                .unwrap()
-                .is_some()
+        let reviewer_events = store.wake_events(reviewer.id).await.unwrap();
+        assert_eq!(reviewer_events.len(), 1);
+        assert_eq!(reviewer_events[0].kind, "ticket.review_requested");
+        assert_eq!(
+            reviewer_events[0].delivery_state,
+            crate::domain::WakeEventState::Pending
         );
         let ticket = manager
             .claim_review(ticket.id, reviewer.id, Some(ticket.revision))

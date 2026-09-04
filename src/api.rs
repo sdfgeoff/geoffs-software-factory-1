@@ -75,16 +75,19 @@ async fn list_tickets(State(store): State<Store>) -> Result<Json<Vec<Ticket>>, A
 
 async fn create_ticket(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Json(input): Json<CreateTicketRequest>,
 ) -> Result<Json<Ticket>, AppError> {
-    Ok(Json(
-        store
-            .create_ticket(NewTicket {
-                title: input.title,
-                description: input.description,
-            })
-            .await?,
-    ))
+    let (ticket, wake_agent_ids) = store
+        .create_ticket_with_wakes(NewTicket {
+            title: input.title,
+            description: input.description,
+        })
+        .await?;
+    for agent_id in wake_agent_ids {
+        agents.deliver_pending(agent_id).await;
+    }
+    Ok(Json(ticket))
 }
 
 async fn get_ticket(
@@ -109,6 +112,7 @@ struct UpdateTicket {
 
 async fn update_ticket(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<UpdateTicket>,
@@ -127,24 +131,27 @@ async fn update_ticket(
             AppError::bad_request("assignee_id must be an integer or null")
         })?)),
     };
-    Ok(Json(
-        store
-            .update_ticket(
-                id,
-                TicketChanges {
-                    title: input.title,
-                    description: input.description,
-                    state: input.state,
-                    assignee_id,
-                    expected_revision: input.expected_revision,
-                },
-            )
-            .await?,
-    ))
+    let (ticket, wake_agent_ids) = store
+        .update_ticket_with_wakes(
+            id,
+            TicketChanges {
+                title: input.title,
+                description: input.description,
+                state: input.state,
+                assignee_id,
+                expected_revision: input.expected_revision,
+            },
+        )
+        .await?;
+    for agent_id in wake_agent_ids {
+        agents.deliver_pending(agent_id).await;
+    }
+    Ok(Json(ticket))
 }
 
 async fn claim_ticket(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ClaimTicketRequest>,
@@ -152,11 +159,13 @@ async fn claim_ticket(
     let agent_id = agent_header(&headers)?
         .or(input.agent_id)
         .ok_or_else(|| AppError::bad_request("agent_id is required"))?;
-    Ok(Json(
-        store
-            .claim_ticket(id, agent_id, input.expected_revision)
-            .await?,
-    ))
+    let (ticket, wake_agent_ids) = store
+        .claim_ticket_with_wakes(id, agent_id, input.expected_revision)
+        .await?;
+    for agent_id in wake_agent_ids {
+        agents.deliver_pending(agent_id).await;
+    }
+    Ok(Json(ticket))
 }
 
 async fn list_wake_events(
@@ -292,6 +301,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn new_tickets_wake_opted_in_agents_over_http() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .set_agent_wake_settings(agent.id, true, None)
+            .await
+            .unwrap();
+        store
+            .update_agent_runtime(
+                agent.id,
+                crate::domain::AgentState::Paused,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let response = test_router(store.clone())
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"Available work"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = store.wake_events(agent.id).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "ticket.available");
+        assert_eq!(
+            events[0].delivery_state,
+            crate::domain::WakeEventState::Pending
+        );
     }
 
     #[tokio::test]
