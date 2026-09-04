@@ -222,7 +222,15 @@ aside > button {
   text-align: left;
 }
 .channel-setting {
+  display: grid;
+  gap: 0.5rem;
   margin-bottom: 1rem;
+}
+.channel-setting small {
+  color: #69635b;
+}
+.channel-setting button {
+  justify-self: start;
 }
 aside button.selected {
   background: #1f4b43;
