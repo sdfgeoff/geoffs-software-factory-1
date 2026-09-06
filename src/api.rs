@@ -8,13 +8,17 @@ use axum::{
 };
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateTicketRequest, CreateWakeEventRequest,
-    MessageRangeQuery, PostMessageRequest, SetAgentChannelSubscriptionsRequest, SetProjectRequest,
+    MessageRangeQuery, PostMessageRequest, ReserveTicketsRequest,
+    SetAgentChannelSubscriptionsRequest, SetProjectRequest,
 };
 use serde::Deserialize;
 
 use crate::{
     agent_runtime::AgentManager,
-    domain::{Channel, Message, Project, Ticket, TicketState, WakeDeliveryPolicy, WakeEvent},
+    domain::{
+        Channel, Message, Project, Ticket, TicketActivity, TicketState, WakeDeliveryPolicy,
+        WakeEvent,
+    },
     error::AppError,
     store::{NewTicket, Store, TicketChanges},
 };
@@ -23,7 +27,9 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
         .route("/project", get(get_project).put(set_project))
         .route("/tickets", get(list_tickets).post(create_ticket))
+        .route("/ticket-reservations", axum::routing::post(reserve_tickets))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
+        .route("/tickets/{id}/activity", get(ticket_activity))
         .route("/tickets/{id}/claim", axum::routing::post(claim_ticket))
         .route(
             "/agents/{id}/wake-events",
@@ -88,6 +94,7 @@ async fn list_tickets(State(store): State<Store>) -> Result<Json<Vec<Ticket>>, A
 async fn create_ticket(
     State(store): State<Store>,
     Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
     Json(input): Json<CreateTicketRequest>,
 ) -> Result<Json<Ticket>, AppError> {
     let (ticket, wake_agent_ids) = store
@@ -95,6 +102,7 @@ async fn create_ticket(
             title: input.title,
             description: input.description,
             blocker_ids: input.blocker_ids,
+            created_by_agent_id: agent_header(&headers)?,
         })
         .await?;
     for agent_id in wake_agent_ids {
@@ -112,6 +120,49 @@ async fn get_ticket(
         .await?
         .map(Json)
         .ok_or_else(|| AppError::not_found("ticket not found"))
+}
+
+async fn ticket_activity(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<TicketActivity>>, AppError> {
+    Ok(Json(store.ticket_activity(id).await?))
+}
+
+async fn reserve_tickets(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    Json(input): Json<ReserveTicketsRequest>,
+) -> Result<Json<Vec<Ticket>>, AppError> {
+    let caller = agent_header(&headers)?;
+    let agent_id = match caller {
+        Some(caller_id) => {
+            if input.administrative_override {
+                return Err(AppError::forbidden(
+                    "agents cannot use the administrative reservation override",
+                ));
+            }
+            if input.agent_id.is_some_and(|agent_id| agent_id != caller_id) {
+                return Err(AppError::forbidden(
+                    "agents may reserve tickets only for themselves",
+                ));
+            }
+            caller_id
+        }
+        None => input
+            .agent_id
+            .ok_or_else(|| AppError::bad_request("agent_id is required"))?,
+    };
+    Ok(Json(
+        store
+            .reserve_tickets(
+                &input.ticket_ids,
+                agent_id,
+                caller,
+                input.administrative_override,
+            )
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -444,6 +495,7 @@ mod tests {
                 title: "Claim me".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -471,6 +523,137 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn reservations_keep_creator_and_require_an_explicit_admin_override() {
+        let store = Store::memory().await.unwrap();
+        store.create_agent("first", "/tmp/first").await.unwrap();
+        store.create_agent("second", "/tmp/second").await.unwrap();
+        let app = test_router(store);
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, 1)
+                    .body(Body::from(r#"{"title":"Owned work"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(created["created_by_agent_id"], 1);
+
+        let reserved = app
+            .clone()
+            .oneshot(
+                Request::post("/ticket-reservations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, 1)
+                    .body(Body::from(r#"{"ticket_ids":[1]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reserved.status(), StatusCode::OK);
+        let reserved: Value =
+            serde_json::from_slice(&to_bytes(reserved.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(reserved[0]["state"], "todo");
+        assert_eq!(reserved[0]["assignee_id"], Value::Null);
+        assert_eq!(reserved[0]["reserved_for_agent_id"], 1);
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::post("/ticket-reservations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, 2)
+                    .body(Body::from(
+                        r#"{"ticket_ids":[1],"administrative_override":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let overridden = app
+            .clone()
+            .oneshot(
+                Request::post("/ticket-reservations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"ticket_ids":[1],"agent_id":2,"administrative_override":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(overridden.status(), StatusCode::OK);
+
+        let activity = app
+            .clone()
+            .oneshot(
+                Request::get("/tickets/1/activity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(activity.status(), StatusCode::OK);
+        let activity: Value =
+            serde_json::from_slice(&to_bytes(activity.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(activity[0]["action"], "reservation_override");
+        assert_eq!(activity[0]["previous_reserved_for_agent_id"], 1);
+        assert_eq!(activity[0]["reserved_for_agent_id"], 2);
+
+        let competing_claim = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets/1/claim")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, 1)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(competing_claim.status(), StatusCode::CONFLICT);
+
+        let user_created = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"User work"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let user_created: Value = serde_json::from_slice(
+            &to_bytes(user_created.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(user_created["created_by_agent_id"], Value::Null);
+        let admin_reservation = app
+            .oneshot(
+                Request::post("/ticket-reservations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"ticket_ids":[2],"agent_id":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_reservation.status(), StatusCode::OK);
     }
 
     #[tokio::test]

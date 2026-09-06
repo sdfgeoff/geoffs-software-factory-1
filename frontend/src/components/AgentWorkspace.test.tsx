@@ -40,6 +40,8 @@ const ticket: Ticket = {
   title: "Move agent settings",
   description: "",
   state: "in_progress",
+  created_by_agent_id: null,
+  reserved_for_agent_id: null,
   assignee_id: agent.id,
   implementation_branch: null,
   review_commit: null,

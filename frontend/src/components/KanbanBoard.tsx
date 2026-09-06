@@ -94,6 +94,9 @@ function TicketCard({
   const [assignee, setAssignee] = useState(
     ticket.assignee_id?.toString() ?? "",
   );
+  const [reservation, setReservation] = useState(
+    ticket.reserved_for_agent_id?.toString() ?? "",
+  );
   const [blockerIds, setBlockerIds] = useState(ticket.blocker_ids.join(", "));
   const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
   useEffect(() => {
@@ -101,6 +104,7 @@ function TicketCard({
     setDescription(ticket.description);
     setState(ticket.state);
     setAssignee(ticket.assignee_id?.toString() ?? "");
+    setReservation(ticket.reserved_for_agent_id?.toString() ?? "");
     setBlockerIds(ticket.blocker_ids.join(", "));
   }, [ticket]);
   async function save(event: FormEvent) {
@@ -118,6 +122,26 @@ function TicketCard({
       onError(error);
     }
   }
+  async function reserve() {
+    if (!reservation) return;
+    try {
+      const agentId = Number(reservation);
+      await api.reserveTickets(
+        [ticket.id],
+        agentId,
+        ticket.reserved_for_agent_id !== null &&
+          ticket.reserved_for_agent_id !== agentId,
+      );
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
+  const reservedFor = agents.find(
+    (agent) => agent.id === ticket.reserved_for_agent_id,
+  );
+  const assignedTo = agents.find((agent) => agent.id === ticket.assignee_id);
   return (
     <details className="ticket-card">
       <summary>
@@ -128,6 +152,14 @@ function TicketCard({
         )}
       </summary>
       <form onSubmit={save}>
+        <dl className="ticket-ownership">
+          <dt>Created by</dt>
+          <dd>{creator?.name ?? "User/system"}</dd>
+          <dt>Reserved for</dt>
+          <dd>{reservedFor?.name ?? "Nobody"}</dd>
+          <dt>Active assignee</dt>
+          <dd>{assignedTo?.name ?? "Nobody"}</dd>
+        </dl>
         {ticket.unresolved_blockers.length > 0 && (
           <p className="ticket-blockers">
             Blocked by {ticket.unresolved_blockers
@@ -200,7 +232,7 @@ function TicketCard({
           </select>
         </label>
         <label>
-          Agent
+          Active assignee
           <select
             value={assignee}
             onChange={(event) => setAssignee(event.target.value)}
@@ -213,6 +245,35 @@ function TicketCard({
             ))}
           </select>
         </label>
+        <label>
+          Reservation
+          <select
+            value={reservation}
+            onChange={(event) => setReservation(event.target.value)}
+            disabled={ticket.state !== "todo"}
+          >
+            <option value="">Not reserved</option>
+            {agents.map((agent) => (
+              <option value={agent.id} key={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={reserve}
+          disabled={
+            ticket.state !== "todo" ||
+            !reservation ||
+            reservation === (ticket.reserved_for_agent_id?.toString() ?? "")
+          }
+        >
+          {ticket.reserved_for_agent_id &&
+          reservation !== ticket.reserved_for_agent_id.toString()
+            ? "Override reservation"
+            : "Reserve"}
+        </button>
         <button type="submit">Save</button>
       </form>
     </details>

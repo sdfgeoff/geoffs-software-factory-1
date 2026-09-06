@@ -10,6 +10,8 @@ export interface Ticket {
   title: string;
   description: string;
   state: TicketState;
+  created_by_agent_id: number | null;
+  reserved_for_agent_id: number | null;
   assignee_id: number | null;
   implementation_branch: string | null;
   review_commit: string | null;

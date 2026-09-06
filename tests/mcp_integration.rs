@@ -76,6 +76,7 @@ async fn mcp_calls_the_server_without_database_access() {
     )
     .await;
     assert_eq!(created.pointer("/result/isError"), None);
+    assert_eq!(tool_content(&created)["created_by_agent_id"], 1);
 
     let claimed = mcp_request(
         &base_url,
@@ -98,12 +99,32 @@ async fn mcp_calls_the_server_without_database_access() {
     .await;
     assert_eq!(tool_content(&dependent)["blocker_ids"], json!([1]));
 
+    let reservable = mcp_tool(
+        &base_url,
+        1,
+        4,
+        "create_ticket",
+        json!({"title":"Reserved MCP ticket"}),
+    )
+    .await;
+    assert_eq!(tool_content(&reservable)["created_by_agent_id"], 1);
+    let reserved = mcp_tool(
+        &base_url,
+        1,
+        5,
+        "reserve_tickets",
+        json!({"ticket_ids":[3]}),
+    )
+    .await;
+    assert_eq!(tool_content(&reserved)[0]["state"], "todo");
+    assert_eq!(tool_content(&reserved)[0]["reserved_for_agent_id"], 1);
+
     let conflict = mcp_request(
         &base_url,
         2,
         json!({
-            "jsonrpc":"2.0","id":4,"method":"tools/call",
-            "params":{"name":"claim_ticket","arguments":{"ticket_id":1}}
+            "jsonrpc":"2.0","id":6,"method":"tools/call",
+            "params":{"name":"claim_ticket","arguments":{"ticket_id":3}}
         }),
     )
     .await;
@@ -111,6 +132,16 @@ async fn mcp_calls_the_server_without_database_access() {
         conflict.pointer("/result/isError"),
         Some(&Value::Bool(true))
     );
+
+    let activity = mcp_tool(
+        &base_url,
+        1,
+        7,
+        "get_ticket_activity",
+        json!({"ticket_id":3}),
+    )
+    .await;
+    assert_eq!(tool_content(&activity), json!([]));
 }
 
 #[tokio::test]

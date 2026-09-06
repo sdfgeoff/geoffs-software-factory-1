@@ -165,6 +165,16 @@ fn tools() -> Value {
             json!({"type":"object","properties":{"ticket_id":{"type":"integer"}},"required":["ticket_id"]})
         ),
         tool(
+            "get_ticket_activity",
+            "List a ticket's activity log",
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"}},"required":["ticket_id"]})
+        ),
+        tool(
+            "reserve_tickets",
+            "Reserve todo tickets for the calling agent without claiming them",
+            json!({"type":"object","properties":{"ticket_ids":{"type":"array","items":{"type":"integer"},"minItems":1,"uniqueItems":true}},"required":["ticket_ids"]})
+        ),
+        tool(
             "set_ticket_details",
             "Update ticket fields",
             json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"state":{"type":"string","enum":["todo","in_progress"]},"assignee_id":{"type":["integer","null"]},"blocker_ids":{"type":"array","items":{"type":"integer"}},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
@@ -257,6 +267,28 @@ async fn call_tool(
             let ticket_id = integer(&args, "ticket_id")?;
             board
                 .request(Method::GET, &format!("/tickets/{ticket_id}"), None)
+                .await?
+        }
+        "get_ticket_activity" => {
+            let ticket_id = integer(&args, "ticket_id")?;
+            board
+                .request(Method::GET, &format!("/tickets/{ticket_id}/activity"), None)
+                .await?
+        }
+        "reserve_tickets" => {
+            let ticket_ids = args
+                .get("ticket_ids")
+                .and_then(Value::as_array)
+                .filter(|ids| !ids.is_empty() && ids.iter().all(Value::is_i64))
+                .ok_or_else(|| {
+                    McpError::bad_request("ticket_ids must be a non-empty array of integers")
+                })?;
+            board
+                .request(
+                    Method::POST,
+                    "/ticket-reservations",
+                    Some(json!({"ticket_ids": ticket_ids})),
+                )
                 .await?
         }
         "set_ticket_details" => {

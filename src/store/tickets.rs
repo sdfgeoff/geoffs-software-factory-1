@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use sqlx::{Sqlite, Transaction};
 
 use crate::{
-    domain::{Message, Project, Ticket, TicketBlocker, TicketState, WakeDeliveryPolicy},
+    domain::{
+        Message, Project, Ticket, TicketActivity, TicketBlocker, TicketState, WakeDeliveryPolicy,
+    },
     error::AppError,
 };
 
@@ -17,6 +19,7 @@ pub struct NewTicket {
     pub title: String,
     pub description: String,
     pub blocker_ids: Vec<i64>,
+    pub created_by_agent_id: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -64,7 +67,7 @@ impl Store {
     pub async fn tickets(&self) -> Result<Vec<Ticket>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let mut tickets: Vec<Ticket> = sqlx::query_as(
-            "SELECT id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets ORDER BY id",
         )
         .fetch_all(&mut *transaction)
@@ -79,7 +82,7 @@ impl Store {
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let ticket: Option<Ticket> = sqlx::query_as(
-            "SELECT id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -104,12 +107,20 @@ impl Store {
         new: NewTicket,
     ) -> Result<(Ticket, Vec<i64>), AppError> {
         validate_title(&new.title)?;
+        if let Some(agent_id) = new.created_by_agent_id
+            && self.agent(agent_id).await?.is_none()
+        {
+            return Err(AppError::bad_request("creating agent does not exist"));
+        }
         let mut transaction = self.pool.begin().await?;
-        let result = sqlx::query("INSERT INTO tickets (title, description) VALUES (?, ?)")
-            .bind(new.title.trim())
-            .bind(new.description)
-            .execute(&mut *transaction)
-            .await?;
+        let result = sqlx::query(
+            "INSERT INTO tickets (title, description, created_by_agent_id) VALUES (?, ?, ?)",
+        )
+        .bind(new.title.trim())
+        .bind(new.description)
+        .bind(new.created_by_agent_id)
+        .execute(&mut *transaction)
+        .await?;
         replace_ticket_dependencies(
             &mut transaction,
             result.last_insert_rowid(),
@@ -205,6 +216,111 @@ impl Store {
         Ok((ticket, wake_agent_ids))
     }
 
+    pub async fn reserve_tickets(
+        &self,
+        ticket_ids: &[i64],
+        agent_id: i64,
+        actor_agent_id: Option<i64>,
+        administrative_override: bool,
+    ) -> Result<Vec<Ticket>, AppError> {
+        if ticket_ids.is_empty() {
+            return Err(AppError::bad_request("at least one ticket ID is required"));
+        }
+        if ticket_ids.iter().copied().collect::<HashSet<_>>().len() != ticket_ids.len() {
+            return Err(AppError::bad_request("duplicate ticket ID"));
+        }
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::bad_request("reservation agent does not exist"));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let mut tickets = Vec::with_capacity(ticket_ids.len());
+        for ticket_id in ticket_ids {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tickets WHERE id = ?)")
+                    .bind(ticket_id)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if !exists {
+                return Err(AppError::not_found(format!(
+                    "ticket #{ticket_id} not found"
+                )));
+            }
+            let ticket = ticket_in_transaction(&mut transaction, *ticket_id).await?;
+            if ticket.state != TicketState::Todo || ticket.assignee_id.is_some() {
+                return Err(AppError::conflict(format!(
+                    "ticket #{} is not unassigned todo work",
+                    ticket.id
+                )));
+            }
+            if !administrative_override
+                && ticket
+                    .reserved_for_agent_id
+                    .is_some_and(|owner| owner != agent_id)
+            {
+                return Err(AppError::conflict(format!(
+                    "ticket #{} is reserved for another agent",
+                    ticket.id
+                )));
+            }
+            tickets.push(ticket);
+        }
+
+        let mut reserved = Vec::with_capacity(tickets.len());
+        for ticket in tickets {
+            if ticket.reserved_for_agent_id != Some(agent_id) {
+                let result = sqlx::query(
+                    "UPDATE tickets SET reserved_for_agent_id = ?, revision = revision + 1, \
+                     updated_at = unixepoch() WHERE id = ? AND state = 'todo' \
+                     AND assignee_id IS NULL AND revision = ? \
+                     AND (? OR reserved_for_agent_id IS NULL OR reserved_for_agent_id = ?)",
+                )
+                .bind(agent_id)
+                .bind(ticket.id)
+                .bind(ticket.revision)
+                .bind(administrative_override)
+                .bind(agent_id)
+                .execute(&mut *transaction)
+                .await?;
+                if result.rows_affected() == 0 {
+                    return Err(AppError::conflict(format!(
+                        "ticket #{} changed while it was being reserved",
+                        ticket.id
+                    )));
+                }
+                if administrative_override {
+                    sqlx::query(
+                        "INSERT INTO ticket_activity \
+                         (ticket_id, action, actor_agent_id, previous_reserved_for_agent_id, reserved_for_agent_id) \
+                         VALUES (?, 'reservation_override', ?, ?, ?)",
+                    )
+                    .bind(ticket.id)
+                    .bind(actor_agent_id)
+                    .bind(ticket.reserved_for_agent_id)
+                    .bind(agent_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+            }
+            reserved.push(ticket_in_transaction(&mut transaction, ticket.id).await?);
+        }
+        transaction.commit().await?;
+        Ok(reserved)
+    }
+
+    pub async fn ticket_activity(&self, ticket_id: i64) -> Result<Vec<TicketActivity>, AppError> {
+        if self.ticket(ticket_id).await?.is_none() {
+            return Err(AppError::not_found("ticket not found"));
+        }
+        Ok(sqlx::query_as(
+            "SELECT id, ticket_id, action, actor_agent_id, previous_reserved_for_agent_id, \
+             reserved_for_agent_id, created_at FROM ticket_activity \
+             WHERE ticket_id = ? ORDER BY created_at, id",
+        )
+        .bind(ticket_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn claim_ticket(
         &self,
         id: i64,
@@ -233,17 +349,25 @@ impl Store {
         if !current.unresolved_blockers.is_empty() {
             return Err(blocked_ticket_error(&current));
         }
+        if current
+            .reserved_for_agent_id
+            .is_some_and(|owner| owner != agent_id)
+        {
+            return Err(AppError::conflict("ticket is reserved for another agent"));
+        }
         let mut transaction = self.pool.begin().await?;
         let claimed: Option<Ticket> = sqlx::query_as(
-            "UPDATE tickets SET assignee_id = ?, state = 'in_progress', revision = revision + 1, \
+            "UPDATE tickets SET assignee_id = ?, reserved_for_agent_id = NULL, state = 'in_progress', revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
+             AND (reserved_for_agent_id IS NULL OR reserved_for_agent_id = ?) \
              AND NOT EXISTS (SELECT 1 FROM ticket_dependencies d JOIN tickets blocker ON blocker.id = d.blocker_id \
              WHERE d.ticket_id = tickets.id AND blocker.state != 'done') \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(agent_id)
         .bind(id)
+        .bind(agent_id)
         .bind(agent_id)
         .bind(expected_revision)
         .bind(expected_revision)
@@ -313,7 +437,7 @@ impl Store {
              revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'in_progress' AND assignee_id = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(implementation_branch)
         .bind(commit)
@@ -355,7 +479,7 @@ impl Store {
             "UPDATE tickets SET reviewer_id = ?, revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND assignee_id != ? \
              AND (reviewer_id IS NULL OR reviewer_id = ?) AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(reviewer_id)
         .bind(id)
@@ -393,7 +517,7 @@ impl Store {
             "UPDATE tickets SET state = 'in_progress', review_feedback = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND state = 'review' AND reviewer_id = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(feedback.trim())
         .bind(id)
@@ -466,7 +590,7 @@ impl Store {
             "UPDATE tickets SET state = 'done', revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND reviewer_id = ? AND review_commit = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(id)
         .bind(reviewer_id)
@@ -493,7 +617,7 @@ async fn ticket_in_transaction(
     id: i64,
 ) -> Result<Ticket, AppError> {
     let mut ticket = sqlx::query_as(
-        "SELECT id, title, description, state, assignee_id, implementation_branch, review_commit, \
+        "SELECT id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, \
          review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
          FROM tickets WHERE id = ?",
     )
@@ -580,6 +704,7 @@ async fn replace_ticket_dependencies(
 fn ticket_is_available(ticket: &Ticket) -> bool {
     ticket.state == TicketState::Todo
         && ticket.assignee_id.is_none()
+        && ticket.reserved_for_agent_id.is_none()
         && ticket.unresolved_blockers.is_empty()
 }
 
@@ -602,6 +727,8 @@ fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'st
             "description",
             "state",
             "assignee_id",
+            "created_by_agent_id",
+            "reserved_for_agent_id",
             "blocker_ids",
         ];
     };
@@ -617,6 +744,9 @@ fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'st
     }
     if previous.assignee_id != ticket.assignee_id {
         fields.push("assignee_id");
+    }
+    if previous.reserved_for_agent_id != ticket.reserved_for_agent_id {
+        fields.push("reserved_for_agent_id");
     }
     if previous.implementation_branch != ticket.implementation_branch {
         fields.push("implementation_branch");
@@ -694,6 +824,8 @@ async fn insert_pending_ticket_wakes(
             "title": ticket.title,
             "state": ticket.state,
             "assignee_id": ticket.assignee_id,
+            "created_by_agent_id": ticket.created_by_agent_id,
+            "reserved_for_agent_id": ticket.reserved_for_agent_id,
             "implementation_branch": ticket.implementation_branch,
             "review_commit": ticket.review_commit,
             "review_target_branch": ticket.review_target_branch,
@@ -745,6 +877,7 @@ mod tests {
                 title: "First".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -789,6 +922,7 @@ mod tests {
                 title: "Foundation".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -797,6 +931,7 @@ mod tests {
                 title: "Follow-up".into(),
                 description: String::new(),
                 blocker_ids: vec![blocker.id],
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -879,6 +1014,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reservations_preserve_provenance_enforce_claims_and_roll_back_in_bulk() {
+        let store = Store::memory().await.unwrap();
+        let creator = store.create_agent("creator", "/tmp/creator").await.unwrap();
+        let reserved = store
+            .create_agent("reserved", "/tmp/reserved")
+            .await
+            .unwrap();
+        let other = store.create_agent("other", "/tmp/other").await.unwrap();
+        let first = store
+            .create_ticket(NewTicket {
+                title: "First".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: Some(creator.id),
+            })
+            .await
+            .unwrap();
+        let second = store
+            .create_ticket(NewTicket {
+                title: "Second".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let tickets = store
+            .reserve_tickets(
+                &[first.id, second.id],
+                reserved.id,
+                Some(reserved.id),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tickets[0].created_by_agent_id, Some(creator.id));
+        assert_eq!(tickets[0].reserved_for_agent_id, Some(reserved.id));
+        assert_eq!(tickets[0].state, TicketState::Todo);
+        assert_eq!(tickets[0].assignee_id, None);
+        assert!(
+            store
+                .claim_ticket(first.id, other.id, Some(tickets[0].revision))
+                .await
+                .is_err()
+        );
+        let claimed = store
+            .claim_ticket(first.id, reserved.id, Some(tickets[0].revision))
+            .await
+            .unwrap();
+        assert_eq!(claimed.assignee_id, Some(reserved.id));
+        assert_eq!(claimed.reserved_for_agent_id, None);
+        assert_eq!(claimed.created_by_agent_id, Some(creator.id));
+
+        let rollback = store
+            .create_ticket(NewTicket {
+                title: "Rollback".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .reserve_tickets(&[rollback.id, claimed.id], other.id, Some(other.id), false,)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .ticket(rollback.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .reserved_for_agent_id,
+            None
+        );
+
+        let overridden = store
+            .reserve_tickets(&[second.id], other.id, None, true)
+            .await
+            .unwrap();
+        assert_eq!(overridden[0].reserved_for_agent_id, Some(other.id));
+        let activity = store.ticket_activity(second.id).await.unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].action, "reservation_override");
+        assert_eq!(
+            activity[0].previous_reserved_for_agent_id,
+            Some(reserved.id)
+        );
+        assert_eq!(activity[0].reserved_for_agent_id, Some(other.id));
+    }
+
+    #[tokio::test]
     async fn separate_work_and_review_wake_settings_select_independent_targets() {
         let store = Store::memory().await.unwrap();
         let implementer = store
@@ -919,6 +1149,7 @@ mod tests {
                 title: "Build it".into(),
                 description: "Implement the change".into(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -995,6 +1226,7 @@ mod tests {
                 title: "Review me".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();

@@ -170,6 +170,18 @@ nav button.active {
   cursor: pointer;
   font-weight: 700;
 }
+.ticket-ownership {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+}
+.ticket-ownership dt {
+  color: #6c6256;
+}
+.ticket-ownership dd {
+  margin: 0;
+}
 .ticket-card summary span {
   color: #987a66;
   font-weight: 500;

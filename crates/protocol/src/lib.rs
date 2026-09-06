@@ -17,6 +17,14 @@ pub struct CreateTicketRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ReserveTicketsRequest {
+    pub ticket_ids: Vec<i64>,
+    pub agent_id: Option<i64>,
+    #[serde(default)]
+    pub administrative_override: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ClaimTicketRequest {
     pub agent_id: Option<i64>,
     pub expected_revision: Option<i64>,

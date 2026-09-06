@@ -80,6 +80,7 @@ mod tests {
                 title: "Persistent".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();

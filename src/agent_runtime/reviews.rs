@@ -353,6 +353,7 @@ mod tests {
                 title: "Merge me".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -524,6 +525,7 @@ mod tests {
                 title: "Stale review".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -615,6 +617,7 @@ mod tests {
                 title: "Conflicting review".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -678,6 +681,7 @@ mod tests {
                 title: "Detached review".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();
@@ -747,6 +751,7 @@ mod tests {
                 title: "Legacy review".into(),
                 description: String::new(),
                 blocker_ids: Vec::new(),
+                created_by_agent_id: None,
             })
             .await
             .unwrap();

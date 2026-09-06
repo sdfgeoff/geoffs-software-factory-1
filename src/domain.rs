@@ -13,6 +13,8 @@ pub struct Ticket {
     pub title: String,
     pub description: String,
     pub state: TicketState,
+    pub created_by_agent_id: Option<i64>,
+    pub reserved_for_agent_id: Option<i64>,
     pub assignee_id: Option<i64>,
     pub implementation_branch: Option<String>,
     pub review_commit: Option<String>,
@@ -26,6 +28,17 @@ pub struct Ticket {
     pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
+pub struct TicketActivity {
+    pub id: i64,
+    pub ticket_id: i64,
+    pub action: String,
+    pub actor_agent_id: Option<i64>,
+    pub previous_reserved_for_agent_id: Option<i64>,
+    pub reserved_for_agent_id: Option<i64>,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

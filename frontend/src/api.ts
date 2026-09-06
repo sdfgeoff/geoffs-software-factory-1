@@ -43,6 +43,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ ...changes, expected_revision: ticket.revision }),
     }),
+  reserveTickets: (
+    ticketIds: number[],
+    agentId: number,
+    administrativeOverride = false,
+  ) =>
+    request<Ticket[]>("/ticket-reservations", {
+      method: "POST",
+      body: JSON.stringify({
+        ticket_ids: ticketIds,
+        agent_id: agentId,
+        administrative_override: administrativeOverride,
+      }),
+    }),
   channels: () => request<Channel[]>("/channels"),
   messages: (channel: string) =>
     request<BoardMessage[]>(
