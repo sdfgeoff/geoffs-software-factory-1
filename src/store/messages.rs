@@ -427,7 +427,7 @@ mod tests {
             .unwrap();
 
         sqlx::raw_sql(include_str!(
-            "../../migrations/0018_channel_descriptions.sql"
+            "../../migrations/0019_channel_descriptions.sql"
         ))
         .execute(&pool)
         .await
