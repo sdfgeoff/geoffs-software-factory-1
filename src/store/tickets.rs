@@ -168,6 +168,14 @@ impl Store {
             .unwrap_or_else(|| current.description.clone());
         let state = changes.state.unwrap_or(current.state);
         let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
+        if current.reserved_for_agent_id.is_some()
+            && assignee_id != current.assignee_id
+            && assignee_id != current.reserved_for_agent_id
+        {
+            return Err(AppError::conflict(
+                "ticket is reserved for another agent; override the reservation first",
+            ));
+        }
         let blocker_ids = changes
             .blocker_ids
             .unwrap_or_else(|| current.blocker_ids.clone());
@@ -1057,6 +1065,19 @@ mod tests {
         assert!(
             store
                 .claim_ticket(first.id, other.id, Some(tickets[0].revision))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .update_ticket(
+                    first.id,
+                    TicketChanges {
+                        assignee_id: Some(Some(other.id)),
+                        expected_revision: Some(tickets[0].revision),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .is_err()
         );
