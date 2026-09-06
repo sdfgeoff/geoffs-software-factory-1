@@ -12,6 +12,7 @@ mod tickets;
 mod wakes;
 
 pub(crate) use messages::validate_channel;
+pub(crate) use settings::MERGE_NOTIFICATION_CHANNEL_DESCRIPTION;
 pub(crate) use tickets::MergeNotification;
 pub use tickets::{NewTicket, TicketChanges};
 

@@ -52,6 +52,21 @@ impl Store {
         Ok(self.channel(name).await?.unwrap())
     }
 
+    pub(crate) async fn ensure_channel(
+        &self,
+        name: &str,
+        description: &str,
+    ) -> Result<Channel, AppError> {
+        validate_channel(name)?;
+        validate_channel_description(description)?;
+        sqlx::query("INSERT OR IGNORE INTO channels (name, description) VALUES (?, ?)")
+            .bind(name)
+            .bind(description)
+            .execute(&self.pool)
+            .await?;
+        Ok(self.channel(name).await?.unwrap())
+    }
+
     pub async fn messages(
         &self,
         channel: &str,

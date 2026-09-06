@@ -457,6 +457,7 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(settings["merge_notification_channel"], "environment-merges");
+        assert!(store.channel("environment-merges").await.unwrap().is_some());
 
         let invalid = app
             .clone()

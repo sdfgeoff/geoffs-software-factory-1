@@ -2,6 +2,8 @@ use crate::{error::AppError, store::validate_channel};
 
 use super::Store;
 
+pub(crate) const MERGE_NOTIFICATION_CHANNEL_DESCRIPTION: &str = "Ticket merge notifications";
+
 impl Store {
     pub async fn saved_merge_notification_channel(
         &self,
@@ -17,6 +19,8 @@ impl Store {
     ) -> Result<Option<String>, AppError> {
         if let Some(channel) = channel {
             validate_channel(channel)?;
+            self.ensure_channel(channel, MERGE_NOTIFICATION_CHANNEL_DESCRIPTION)
+                .await?;
         }
         sqlx::query(
             "INSERT INTO board_settings (id, merge_notification_channel) VALUES (1, ?) \

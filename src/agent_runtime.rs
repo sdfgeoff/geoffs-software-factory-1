@@ -14,7 +14,7 @@ use tokio::{
 use crate::{
     domain::{Agent, BoardSettings},
     error::AppError,
-    store::{Store, validate_channel},
+    store::{MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, validate_channel},
 };
 
 mod inbox;
@@ -85,6 +85,11 @@ impl AgentManager {
             .saved_merge_notification_channel()
             .await?
             .unwrap_or_else(|| self.merge_notification_channel_fallback.clone());
+        if let Some(channel) = merge_notification_channel.as_deref() {
+            self.store
+                .ensure_channel(channel, MERGE_NOTIFICATION_CHANNEL_DESCRIPTION)
+                .await?;
+        }
         Ok(BoardSettings {
             merge_notification_channel,
         })

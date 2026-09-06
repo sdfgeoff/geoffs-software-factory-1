@@ -114,6 +114,7 @@ impl AgentManager {
                 "review is not assigned to this agent or has changed",
             ));
         }
+        let merge_notification_channel = self.settings().await?.merge_notification_channel;
         let commit = ticket
             .review_commit
             .as_deref()
@@ -200,7 +201,6 @@ impl AgentManager {
             .agent(reviewer_id)
             .await?
             .ok_or_else(|| AppError::not_found("reviewer not found"))?;
-        let merge_notification_channel = self.settings().await?.merge_notification_channel;
         let (ticket, wake_agent_ids) = if let Some(channel) = merge_notification_channel.as_deref()
         {
             let source_branch = ticket.implementation_branch.as_deref().unwrap_or("unknown");
@@ -328,11 +328,9 @@ mod tests {
         )
         .with_merge_notification_channel(Some("environment-merges".into()))
         .unwrap();
+        assert!(store.channel("merges").await.unwrap().is_none());
         manager.set_settings(Some("merges")).await.unwrap();
-        store
-            .create_channel("merges", "Merged ticket notifications")
-            .await
-            .unwrap();
+        assert!(store.channel("merges").await.unwrap().is_some());
         let worker = manager.create("worker").await.unwrap();
         let reviewer = manager.create("reviewer").await.unwrap();
         let subscriber = manager.create("subscriber").await.unwrap();
