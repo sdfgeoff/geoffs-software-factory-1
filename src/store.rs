@@ -144,6 +144,16 @@ mod tests {
         let reopened = Store::open(&path).await.unwrap();
         assert_eq!(reopened.tickets().await.unwrap().len(), 1);
         let agent = reopened.agent(agent.id).await.unwrap().unwrap();
+        let project = reopened.project().await.unwrap().unwrap();
+        assert_eq!(
+            reopened
+                .agent_project_worktree(agent.id, project.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .path,
+            "/tmp/persistent-agent"
+        );
         assert!(agent.wake_on_pending_work);
         assert!(!agent.wake_on_pending_review);
         assert_eq!(agent.idle_heartbeat_minutes, Some(20));

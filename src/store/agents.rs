@@ -1,5 +1,5 @@
 use crate::{
-    domain::{Agent, AgentMessage, AgentState},
+    domain::{Agent, AgentMessage, AgentProjectWorktree, AgentState},
     error::AppError,
 };
 
@@ -61,7 +61,7 @@ impl Store {
         exclude_agent_id: i64,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT a.id, a.name, a.state, a.thread_id, a.worktree_path, a.active_turn_id, \
+            "SELECT a.id, a.name, a.state, a.thread_id, a.home_path, a.active_turn_id, \
              a.last_error, a.wake_on_pending_work, a.wake_on_pending_review, a.idle_heartbeat_minutes, \
              a.idle_since, a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
@@ -76,7 +76,7 @@ impl Store {
 
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents ORDER BY id",
         )
@@ -86,7 +86,7 @@ impl Store {
 
     pub async fn agents_due_for_idle_heartbeat(&self, now: i64) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE state = 'idle' AND idle_heartbeat_minutes IS NOT NULL \
              AND idle_since IS NOT NULL AND idle_since + idle_heartbeat_minutes * 60 <= ? \
@@ -99,7 +99,7 @@ impl Store {
 
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE id = ?",
         )
@@ -110,7 +110,7 @@ impl Store {
 
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, worktree_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE name = ?",
         )
@@ -119,15 +119,123 @@ impl Store {
         .await
     }
 
-    pub async fn create_agent(&self, name: &str, worktree: &str) -> Result<Agent, AppError> {
+    pub async fn create_agent(&self, name: &str, legacy_worktree: &str) -> Result<Agent, AppError> {
+        let mut transaction = self.pool.begin().await?;
+        let home = format!("{legacy_worktree}.agent-home");
         let result = sqlx::query(
-            "INSERT INTO agents (name, worktree_path, idle_since) VALUES (?, ?, unixepoch())",
+            "INSERT INTO agents (name, home_path, idle_since) VALUES (?, ?, unixepoch())",
         )
         .bind(name)
-        .bind(worktree)
-        .execute(&self.pool)
+        .bind(home)
+        .execute(&mut *transaction)
         .await?;
-        Ok(self.agent(result.last_insert_rowid()).await?.unwrap())
+        let id = result.last_insert_rowid();
+        let current_project_id: Option<i64> =
+            sqlx::query_scalar("SELECT current_project_id FROM board_state WHERE id = 1")
+                .fetch_optional(&mut *transaction)
+                .await?
+                .flatten();
+        if let Some(project_id) = current_project_id {
+            sqlx::query(
+                "INSERT INTO agent_project_worktrees (agent_id, project_id, path) VALUES (?, ?, ?)",
+            )
+            .bind(id)
+            .bind(project_id)
+            .bind(legacy_worktree)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(self.agent(id).await?.unwrap())
+    }
+
+    pub async fn create_agent_for_project(
+        &self,
+        name: &str,
+        homes_root: &str,
+        project_id: i64,
+    ) -> Result<(Agent, AgentProjectWorktree), AppError> {
+        let mut transaction = self.pool.begin().await?;
+        let project_is_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ? AND archived_at IS NULL)",
+        )
+        .bind(project_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !project_is_active {
+            return Err(AppError::conflict("agent project is missing or archived"));
+        }
+        let result = sqlx::query(
+            "INSERT INTO agents (name, home_path, idle_since) \
+             VALUES (?, 'pending:' || lower(hex(randomblob(16))), unixepoch())",
+        )
+        .bind(name)
+        .execute(&mut *transaction)
+        .await?;
+        let agent_id = result.last_insert_rowid();
+        let home = format!("{homes_root}/{agent_id}");
+        let worktree_path = format!("{home}/projects/{project_id}");
+        sqlx::query("UPDATE agents SET home_path = ? WHERE id = ?")
+            .bind(&home)
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "INSERT INTO agent_project_worktrees (agent_id, project_id, path) VALUES (?, ?, ?)",
+        )
+        .bind(agent_id)
+        .bind(project_id)
+        .bind(&worktree_path)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok((
+            self.agent(agent_id).await?.unwrap(),
+            self.agent_project_worktree(agent_id, project_id)
+                .await?
+                .unwrap(),
+        ))
+    }
+
+    pub async fn agent_project_worktree(
+        &self,
+        agent_id: i64,
+        project_id: i64,
+    ) -> Result<Option<AgentProjectWorktree>, sqlx::Error> {
+        let row: Option<(i64, i64, String, i64, i64)> = sqlx::query_as(
+            "SELECT agent_id, project_id, path, created_at, updated_at \
+             FROM agent_project_worktrees WHERE agent_id = ? AND project_id = ?",
+        )
+        .bind(agent_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(worktree_from_row))
+    }
+
+    pub async fn agent_project_worktrees(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<AgentProjectWorktree>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        let rows: Vec<(i64, i64, String, i64, i64)> = sqlx::query_as(
+            "SELECT agent_id, project_id, path, created_at, updated_at \
+             FROM agent_project_worktrees WHERE agent_id = ? ORDER BY project_id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(worktree_from_row).collect())
+    }
+
+    pub(crate) async fn delete_agent(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM agents WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Agent, AppError> {
@@ -312,6 +420,16 @@ impl Store {
     }
 }
 
+fn worktree_from_row(row: (i64, i64, String, i64, i64)) -> AgentProjectWorktree {
+    AgentProjectWorktree {
+        agent_id: row.0,
+        project_id: row.1,
+        path: row.2,
+        created_at: row.3,
+        updated_at: row.4,
+    }
+}
+
 fn validate_scope(scope: &str) -> Result<(), AppError> {
     if scope.is_empty()
         || scope.len() > 100
@@ -329,6 +447,77 @@ mod tests {
     use sqlx::SqlitePool;
 
     use super::*;
+
+    #[tokio::test]
+    async fn legacy_worktree_migration_preserves_the_checkout_mapping() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 20) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO projects (id, path) VALUES (1, '/repo')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE board_state SET current_project_id = 1 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, name, worktree_path) VALUES (7, 'legacy', '/dirty-checkout')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 20)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let agent: (String, String) = sqlx::query_as(
+            "SELECT agents.home_path, worktrees.path FROM agents \
+             JOIN agent_project_worktrees worktrees ON worktrees.agent_id = agents.id \
+             WHERE agents.id = 7 AND worktrees.project_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(agent.0, "/dirty-checkout.agent-home");
+        assert_eq!(agent.1, "/dirty-checkout");
+    }
+
+    #[tokio::test]
+    async fn worktree_pairs_are_unique_and_survive_agent_renames() {
+        let store = Store::memory().await.unwrap();
+        let project = store.project().await.unwrap().unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let before = store
+            .agent_project_worktree(agent.id, project.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let renamed = store.rename_agent(agent.id, "renamed").await.unwrap();
+        let after = store
+            .agent_project_worktree(agent.id, project.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.home_path, agent.home_path);
+        assert_eq!(after, before);
+        assert!(
+            sqlx::query(
+                "INSERT INTO agent_project_worktrees (agent_id, project_id, path) \
+                 VALUES (?, ?, '/tmp/duplicate')",
+            )
+            .bind(agent.id)
+            .bind(project.id)
+            .execute(&store.pool)
+            .await
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn separate_wake_settings_migration_preserves_existing_preferences() {

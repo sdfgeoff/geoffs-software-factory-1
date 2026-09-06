@@ -1,6 +1,7 @@
 import type {
   Agent,
   AgentMessage,
+  AgentProjectWorktree,
   BoardMessage,
   BoardSettings,
   Channel,
@@ -124,6 +125,8 @@ export const api = {
     request<Agent>(`/agents/${id}/resume`, { method: "POST" }),
   agentMessages: (id: number) =>
     request<AgentMessage[]>(`/agents/${id}/messages`),
+  agentProjectWorktrees: (id: number) =>
+    request<AgentProjectWorktree[]>(`/agents/${id}/project-worktrees`),
   sendAgentMessage: (id: number, message: string) =>
     request<Agent>(`/agents/${id}/messages`, {
       method: "POST",

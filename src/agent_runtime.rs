@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, BoardSettings},
+    domain::{Agent, AgentProjectWorktree, BoardSettings},
     error::AppError,
     store::{MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, validate_channel},
 };
@@ -119,6 +119,13 @@ impl AgentManager {
         Ok(self.store.agents().await?)
     }
 
+    pub async fn project_worktrees(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<AgentProjectWorktree>, AppError> {
+        self.store.agent_project_worktrees(agent_id).await
+    }
+
     pub async fn scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
         self.store.agent_scopes(agent_id).await
     }
@@ -206,35 +213,66 @@ impl AgentManager {
                 AppError::bad_request("select a project before creating an agent")
             })?;
         let root = PathBuf::from(project.path);
-        let worktree = worktree_path(&root, name)?;
-        if worktree.exists() {
-            return Err(AppError::conflict("agent worktree path already exists"));
+        let homes_root = agent_homes_root(&root)?;
+        let homes_root = homes_root
+            .to_str()
+            .ok_or_else(|| AppError::bad_request("agent home root is not valid UTF-8"))?;
+        let (agent, worktree) = self
+            .store
+            .create_agent_for_project(name, homes_root, project.id)
+            .await?;
+        if let Err(error) = std::fs::create_dir_all(&agent.home_path) {
+            self.store.delete_agent(agent.id).await?;
+            return Err(AppError::internal(format!(
+                "failed to create agent home: {error}"
+            )));
         }
-        std::fs::create_dir_all(worktree.parent().unwrap()).map_err(|error| {
-            AppError::internal(format!("failed to create worktree directory: {error}"))
-        })?;
+        let worktree_path = PathBuf::from(&worktree.path);
+        if let Err(error) = std::fs::create_dir_all(worktree_path.parent().unwrap()) {
+            self.store.delete_agent(agent.id).await?;
+            return Err(AppError::internal(format!(
+                "failed to create worktree directory: {error}"
+            )));
+        }
         let output = Command::new("git")
             .arg("-C")
             .arg(&root)
             .args(["worktree", "add", "-b"])
-            .arg(format!("agents/{name}"))
-            .arg(&worktree)
+            .arg(format!("agents/{}", agent.id))
+            .arg(&worktree_path)
             .arg("HEAD")
             .output()
             .await
             .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
         if !output.status.success() {
+            self.store.delete_agent(agent.id).await?;
             return Err(AppError::bad_request(format!(
                 "failed to create worktree: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        let path = worktree
-            .to_str()
-            .ok_or_else(|| AppError::bad_request("worktree path is not valid UTF-8"))?;
-        let agent = self.store.create_agent(name, path).await?;
         self.emit(agent.id, "agent_created", json!(agent));
         Ok(agent)
+    }
+
+    async fn worktree_for_project(
+        &self,
+        agent_id: i64,
+        project_id: i64,
+    ) -> Result<AgentProjectWorktree, AppError> {
+        self.store
+            .agent_project_worktree(agent_id, project_id)
+            .await?
+            .ok_or_else(|| AppError::conflict("agent has no worktree for the ticket project"))
+    }
+
+    async fn current_worktree(&self, agent_id: i64) -> Result<AgentProjectWorktree, AppError> {
+        let project = self
+            .store
+            .project()
+            .await?
+            .ok_or_else(|| AppError::bad_request("project is not selected"))?;
+        self.worktree_for_project(agent_id, project.id).await
     }
 
     fn emit(&self, agent_id: i64, kind: &str, data: Value) {
@@ -260,7 +298,7 @@ fn validate_agent_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn worktree_path(root: &Path, name: &str) -> Result<PathBuf, AppError> {
+fn agent_homes_root(root: &Path) -> Result<PathBuf, AppError> {
     let parent = root
         .parent()
         .ok_or_else(|| AppError::bad_request("project root cannot be a filesystem root"))?;
@@ -268,9 +306,7 @@ fn worktree_path(root: &Path, name: &str) -> Result<PathBuf, AppError> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| AppError::bad_request("project folder name is not valid UTF-8"))?;
-    Ok(parent
-        .join(format!(".{project}-agent-worktrees"))
-        .join(name))
+    Ok(parent.join(format!(".{project}-agent-homes")))
 }
 
 #[cfg(test)]
@@ -311,12 +347,12 @@ mod tests {
             );
         }
         let store = Store::memory().await.unwrap();
-        store
+        let project = store
             .set_project(repository.to_str().unwrap())
             .await
             .unwrap();
         let manager = AgentManager::new(
-            store,
+            store.clone(),
             "codex".into(),
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
@@ -324,10 +360,39 @@ mod tests {
 
         let first = manager.create("backend").await.unwrap();
         let second = manager.create("frontend").await.unwrap();
+        let first_worktree = store
+            .agent_project_worktree(first.id, project.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_worktree = store
+            .agent_project_worktree(second.id, project.id)
+            .await
+            .unwrap()
+            .unwrap();
 
-        assert_ne!(first.worktree_path, second.worktree_path);
-        assert!(Path::new(&first.worktree_path).join(".git").exists());
-        assert!(Path::new(&second.worktree_path).join(".git").exists());
+        assert_ne!(first.home_path, second.home_path);
+        assert_eq!(
+            Path::new(&first.home_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            first.id.to_string()
+        );
+        assert!(!Path::new(&first.home_path).join(".git").exists());
+        assert!(Path::new(&first_worktree.path).join(".git").exists());
+        assert!(Path::new(&second_worktree.path).join(".git").exists());
+        let renamed = store.rename_agent(first.id, "renamed").await.unwrap();
+        assert_eq!(renamed.home_path, first.home_path);
+        assert_eq!(
+            store
+                .agent_project_worktree(first.id, project.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .path,
+            first_worktree.path
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 }

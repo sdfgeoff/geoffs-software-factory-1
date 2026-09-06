@@ -26,13 +26,14 @@ impl AgentManager {
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
         let project = self.store.active_ticket_project(&ticket).await?;
-        if git_common_dir(&agent.worktree_path).await? != git_common_dir(&project.path).await? {
+        let worktree = self.worktree_for_project(agent.id, project.id).await?;
+        if git_common_dir(&worktree.path).await? != git_common_dir(&project.path).await? {
             return Err(AppError::conflict(
                 "agent worktree does not belong to the ticket project",
             ));
         }
-        let implementation_branch = current_branch(&agent.worktree_path).await?;
-        let commit = git_text(&agent.worktree_path, &["rev-parse", "HEAD"]).await?;
+        let implementation_branch = current_branch(&worktree.path).await?;
+        let commit = git_text(&worktree.path, &["rev-parse", "HEAD"]).await?;
         if git_text(&project.path, &["rev-parse", &implementation_branch]).await? != commit {
             return Err(AppError::conflict(
                 "implementation branch does not belong to the ticket project",
@@ -357,6 +358,7 @@ mod tests {
         manager.set_settings(Some("merges")).await.unwrap();
         assert!(store.channel("merges").await.unwrap().is_some());
         let worker = manager.create("worker").await.unwrap();
+        let worker_worktree = agent_worktree(&store, worker.id).await;
         let reviewer = manager.create("reviewer").await.unwrap();
         let subscriber = manager.create("subscriber").await.unwrap();
         store
@@ -370,10 +372,10 @@ mod tests {
                 .unwrap();
         }
 
-        std::fs::write(Path::new(&worker.worktree_path).join("work.txt"), "ready").unwrap();
-        run_git(Path::new(&worker.worktree_path), &["add", "work.txt"]);
+        std::fs::write(Path::new(&worker_worktree).join("work.txt"), "ready").unwrap();
+        run_git(Path::new(&worker_worktree), &["add", "work.txt"]);
         run_git(
-            Path::new(&worker.worktree_path),
+            Path::new(&worker_worktree),
             &["commit", "-qm", "ready for review"],
         );
         let ticket = store
@@ -399,10 +401,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             ticket.implementation_branch.as_deref(),
-            Some("agents/worker")
+            Some(format!("agents/{}", worker.id).as_str())
         );
         run_git(
-            Path::new(&worker.worktree_path),
+            Path::new(&worker_worktree),
             &["switch", "-c", "tickets/next"],
         );
         let reviewer_events = store.wake_events(reviewer.id).await.unwrap();
@@ -522,9 +524,10 @@ mod tests {
             .unwrap();
         let messages = store.messages("merges", None, None).await.unwrap();
         assert_eq!(messages.len(), 1);
+        let source_branch = format!("Source branch: `agents/{}`", worker.id);
         for expected in [
             "Ticket #1 “Merge me”",
-            "Source branch: `agents/worker`",
+            &source_branch,
             "Target branch: `main`",
             &format!("Merge commit: `{resulting_commit}`"),
             "Approved by: @reviewer",
@@ -565,10 +568,10 @@ mod tests {
             .claim_review(second.id, reviewer.id, Some(second.revision))
             .await
             .unwrap();
-        std::fs::write(Path::new(&worker.worktree_path).join("later.txt"), "later").unwrap();
-        run_git(Path::new(&worker.worktree_path), &["add", "later.txt"]);
+        std::fs::write(Path::new(&worker_worktree).join("later.txt"), "later").unwrap();
+        run_git(Path::new(&worker_worktree), &["add", "later.txt"]);
         run_git(
-            Path::new(&worker.worktree_path),
+            Path::new(&worker_worktree),
             &["commit", "-qm", "changed after review"],
         );
         assert!(
@@ -631,10 +634,10 @@ mod tests {
             "diverged"
         );
 
-        std::fs::write(Path::new(&worker.worktree_path).join("work.txt"), "worker").unwrap();
-        run_git(Path::new(&worker.worktree_path), &["add", "work.txt"]);
+        std::fs::write(Path::new(&worker_worktree).join("work.txt"), "worker").unwrap();
+        run_git(Path::new(&worker_worktree), &["add", "work.txt"]);
         run_git(
-            Path::new(&worker.worktree_path),
+            Path::new(&worker_worktree),
             &["commit", "-qm", "worker conflict"],
         );
         let conflicting = store
@@ -714,7 +717,7 @@ mod tests {
             .claim_ticket(detached.id, worker.id, Some(detached.revision))
             .await
             .unwrap();
-        run_git(Path::new(&worker.worktree_path), &["checkout", "--detach"]);
+        run_git(Path::new(&worker_worktree), &["checkout", "--detach"]);
         let error = manager
             .submit_review(detached.id, worker.id, Some(detached.revision))
             .await
@@ -755,19 +758,16 @@ mod tests {
             "http://127.0.0.1:1/api".into(),
         );
         let worker = manager.create("old-name").await.unwrap();
+        let worker_worktree = agent_worktree(&store, worker.id).await;
         let reviewer = manager.create("reviewer").await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
             .unwrap();
-        std::fs::write(
-            Path::new(&worker.worktree_path).join("legacy.txt"),
-            "legacy",
-        )
-        .unwrap();
-        run_git(Path::new(&worker.worktree_path), &["add", "legacy.txt"]);
+        std::fs::write(Path::new(&worker_worktree).join("legacy.txt"), "legacy").unwrap();
+        run_git(Path::new(&worker_worktree), &["add", "legacy.txt"]);
         run_git(
-            Path::new(&worker.worktree_path),
+            Path::new(&worker_worktree),
             &["commit", "-qm", "legacy review"],
         );
 
@@ -784,7 +784,7 @@ mod tests {
             .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
             .await
             .unwrap();
-        let commit = git_text(&worker.worktree_path, &["rev-parse", "HEAD"])
+        let commit = git_text(&worker_worktree, &["rev-parse", "HEAD"])
             .await
             .unwrap();
         let ticket = store
@@ -861,19 +861,16 @@ mod tests {
             "http://127.0.0.1:1/api".into(),
         );
         let worker = manager.create("project-worker").await.unwrap();
+        let worker_worktree = agent_worktree(&store, worker.id).await;
         let reviewer = manager.create("project-reviewer").await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
             .unwrap();
-        std::fs::write(
-            Path::new(&worker.worktree_path).join("work.txt"),
-            "ticket repo",
-        )
-        .unwrap();
-        run_git(Path::new(&worker.worktree_path), &["add", "work.txt"]);
+        std::fs::write(Path::new(&worker_worktree).join("work.txt"), "ticket repo").unwrap();
+        run_git(Path::new(&worker_worktree), &["add", "work.txt"]);
         run_git(
-            Path::new(&worker.worktree_path),
+            Path::new(&worker_worktree),
             &["commit", "-qm", "project work"],
         );
         let ticket = store
@@ -933,5 +930,15 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    async fn agent_worktree(store: &Store, agent_id: i64) -> String {
+        let project = store.project().await.unwrap().unwrap();
+        store
+            .agent_project_worktree(agent_id, project.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .path
     }
 }

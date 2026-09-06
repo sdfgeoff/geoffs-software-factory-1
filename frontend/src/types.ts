@@ -54,13 +54,20 @@ export interface Agent {
   name: string;
   state: AgentState;
   thread_id: string | null;
-  worktree_path: string;
+  home_path: string;
   active_turn_id: string | null;
   last_error: string | null;
   wake_on_pending_work: boolean;
   wake_on_pending_review: boolean;
   idle_heartbeat_minutes: number | null;
   idle_since: number | null;
+  created_at: number;
+  updated_at: number;
+}
+export interface AgentProjectWorktree {
+  agent_id: number;
+  project_id: number;
+  path: string;
   created_at: number;
   updated_at: number;
 }

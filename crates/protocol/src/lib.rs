@@ -2,6 +2,15 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_ID_HEADER: &str = "x-multi-agent-board-agent-id";
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentProjectWorktree {
+    pub agent_id: i64,
+    pub project_id: i64,
+    pub path: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SetProjectRequest {
     pub path: String,

@@ -1,6 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { Agent, AgentMessage, Channel, Ticket } from "../types";
+import type {
+  Agent,
+  AgentMessage,
+  AgentProjectWorktree,
+  Channel,
+  Ticket,
+} from "../types";
 import { MessageContent } from "./MessageContent";
 
 export type AgentView = "chat" | "settings";
@@ -33,6 +39,7 @@ export function AgentWorkspace({
   onError,
 }: Props) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [worktrees, setWorktrees] = useState<AgentProjectWorktree[]>([]);
   const [name, setName] = useState("");
   const [renamedName, setRenamedName] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -67,6 +74,13 @@ export function AgentWorkspace({
   useEffect(() => {
     if (selectedAgentId)
       void api.agentMessages(selectedAgentId).then(setMessages).catch(onError);
+  }, [selectedAgentId, refresh, onError]);
+  useEffect(() => {
+    if (selectedAgentId)
+      void api
+        .agentProjectWorktrees(selectedAgentId)
+        .then(setWorktrees)
+        .catch(onError);
   }, [selectedAgentId, refresh, onError]);
   useEffect(() => {
     if (selectedAgentId)
@@ -223,8 +237,11 @@ export function AgentWorkspace({
                     ? `Ticket #${currentTicket.id}: ${currentTicket.title}`
                     : "No active ticket"}
                 </p>
-                <p className="worktree-path" title={selected.worktree_path}>
-                  {selected.worktree_path}
+                <p
+                  className="worktree-path"
+                  title={worktrees[0]?.path ?? selected.home_path}
+                >
+                  {worktrees[0]?.path ?? selected.home_path}
                 </p>
               </div>
               <button className="secondary" onClick={toggle}>

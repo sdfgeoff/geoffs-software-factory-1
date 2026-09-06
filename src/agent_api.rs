@@ -14,7 +14,7 @@ use std::{convert::Infallible, time::Duration};
 
 use crate::{
     agent_runtime::AgentManager,
-    domain::{Agent, AgentMessage},
+    domain::{Agent, AgentMessage, AgentProjectWorktree},
     error::AppError,
 };
 
@@ -22,6 +22,10 @@ pub fn router(manager: AgentManager) -> Router {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/{id}", axum::routing::patch(rename_agent))
+        .route(
+            "/agents/{id}/project-worktrees",
+            get(agent_project_worktrees),
+        )
         .route(
             "/agents/{id}/messages",
             get(list_messages).post(send_message),
@@ -65,6 +69,13 @@ async fn rename_agent(
     Json(input): Json<RenameAgentRequest>,
 ) -> Result<Json<Agent>, AppError> {
     Ok(Json(manager.rename(id, &input.name).await?))
+}
+
+async fn agent_project_worktrees(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<AgentProjectWorktree>>, AppError> {
+    Ok(Json(manager.project_worktrees(id).await?))
 }
 
 async fn list_messages(
@@ -257,7 +268,9 @@ mod tests {
             "http://127.0.0.1:1/api".into(),
         );
 
-        let response = router(manager)
+        let app = router(manager);
+        let response = app
+            .clone()
             .oneshot(
                 Request::patch(format!("/agents/{}", agent.id))
                     .header(header::CONTENT_TYPE, "application/json")
@@ -272,7 +285,22 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(body["name"], "builder");
-        assert_eq!(body["worktree_path"], "/tmp/worker");
+        assert_eq!(body["home_path"], "/tmp/worker.agent-home");
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/agents/{}/project-worktrees", agent.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body[0]["agent_id"], agent.id);
+        assert_eq!(body[0]["path"], "/tmp/worker");
     }
 
     #[tokio::test]

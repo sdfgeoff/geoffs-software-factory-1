@@ -8,6 +8,7 @@ vi.mock("./api", () => ({
   api: {
     agentChannelSubscriptions: vi.fn(),
     agentMessages: vi.fn(),
+    agentProjectWorktrees: vi.fn(),
     agentScopes: vi.fn(),
     agents: vi.fn(),
     channels: vi.fn(),
@@ -22,7 +23,7 @@ const agent: Agent = {
   name: "worker",
   state: "idle",
   thread_id: null,
-  worktree_path: "/repo/worker",
+  home_path: "/repo/worker-home",
   active_turn_id: null,
   last_error: null,
   wake_on_pending_work: false,
@@ -50,6 +51,7 @@ describe("App agent routes", () => {
     vi.mocked(api.channels).mockResolvedValue([]);
     vi.mocked(api.agents).mockResolvedValue([agent]);
     vi.mocked(api.agentMessages).mockResolvedValue([]);
+    vi.mocked(api.agentProjectWorktrees).mockResolvedValue([]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
   });

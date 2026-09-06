@@ -140,11 +140,12 @@ impl AgentManager {
             .await?
             .and_then(|agent| agent.thread_id)
             .ok_or_else(|| AppError::internal("agent has no Codex thread"))?;
+        let worktree = self.current_worktree(agent.id).await?;
         let result = running
             .rpc
             .request(
                 "turn/start",
-                turn_params(&thread_id, message, &agent.worktree_path),
+                turn_params(&thread_id, message, &worktree.path),
             )
             .await;
         match result {
@@ -281,6 +282,7 @@ impl AgentManager {
         if let Some(running) = self.processes.lock().await.get(&agent.id).cloned() {
             return Ok(running);
         }
+        let worktree = self.current_worktree(agent.id).await?;
         let command_value = serde_json::to_string(&self.executable_path.to_string_lossy().as_ref())
             .map_err(|error| AppError::internal(error.to_string()))?;
         let board_url = serde_json::to_string(&self.board_url)
@@ -321,13 +323,13 @@ impl AgentManager {
         let instructions = agent_instructions(agent);
         let params = if let Some(thread_id) = &agent.thread_id {
             json!({
-                "threadId": thread_id, "cwd": agent.worktree_path,
+                "threadId": thread_id, "cwd": worktree.path,
                 "approvalPolicy": "never", "sandbox": "danger-full-access",
                 "developerInstructions": instructions
             })
         } else {
             json!({
-                "cwd": agent.worktree_path, "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "cwd": worktree.path, "approvalPolicy": "never", "sandbox": "danger-full-access",
                 "developerInstructions": instructions, "serviceName": "multi_agent_board"
             })
         };

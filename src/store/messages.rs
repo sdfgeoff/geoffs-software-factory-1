@@ -563,7 +563,7 @@ mod tests {
         let renamed = store.rename_agent(agent.id, "builder").await.unwrap();
 
         assert_eq!(renamed.name, "builder");
-        assert_eq!(renamed.worktree_path, "/tmp/worker");
+        assert_eq!(renamed.home_path, "/tmp/worker.agent-home");
         let messages = store.messages("general", None, None).await.unwrap();
         assert_eq!(messages[0].author, "human");
         assert_eq!(messages[0].agent_id, None);

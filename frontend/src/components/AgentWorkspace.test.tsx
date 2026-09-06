@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   api: {
     agentChannelSubscriptions: vi.fn(),
     agentMessages: vi.fn(),
+    agentProjectWorktrees: vi.fn(),
     agentScopes: vi.fn(),
     pauseAgent: vi.fn(),
     renameAgent: vi.fn(),
@@ -24,7 +25,7 @@ const agent: Agent = {
   name: "reviewer",
   state: "idle",
   thread_id: null,
-  worktree_path: "/repo/reviewer",
+  home_path: "/repo/reviewer-home",
   active_turn_id: null,
   last_error: null,
   wake_on_pending_work: false,
@@ -64,6 +65,15 @@ describe("AgentWorkspace", () => {
   beforeEach(() => {
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentMessages).mockResolvedValue([]);
+    vi.mocked(api.agentProjectWorktrees).mockResolvedValue([
+      {
+        agent_id: agent.id,
+        project_id: 1,
+        path: "/repo/reviewer",
+        created_at: 0,
+        updated_at: 0,
+      },
+    ]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
     vi.mocked(api.pauseAgent).mockResolvedValue(agent);
     vi.mocked(api.renameAgent).mockResolvedValue(agent);

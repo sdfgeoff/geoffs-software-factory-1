@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+pub use multi_agent_board_protocol::AgentProjectWorktree;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BoardSettings {
     pub merge_notification_channel: Option<String>,
@@ -90,7 +92,7 @@ pub struct Agent {
     pub name: String,
     pub state: AgentState,
     pub thread_id: Option<String>,
-    pub worktree_path: String,
+    pub home_path: String,
     pub active_turn_id: Option<String>,
     pub last_error: Option<String>,
     pub wake_on_pending_work: bool,
