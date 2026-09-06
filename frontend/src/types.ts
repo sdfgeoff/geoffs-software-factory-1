@@ -16,9 +16,15 @@ export interface Ticket {
   review_target_branch: string | null;
   reviewer_id: number | null;
   review_feedback: string | null;
+  blocker_ids: number[];
+  unresolved_blockers: TicketBlocker[];
   revision: number;
   created_at: number;
   updated_at: number;
+}
+export interface TicketBlocker {
+  id: number;
+  title: string;
 }
 export interface Channel {
   name: string;

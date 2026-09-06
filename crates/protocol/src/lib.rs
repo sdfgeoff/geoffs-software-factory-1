@@ -12,6 +12,8 @@ pub struct CreateTicketRequest {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub blocker_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

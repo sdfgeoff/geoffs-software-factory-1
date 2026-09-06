@@ -19,9 +19,19 @@ pub struct Ticket {
     pub review_target_branch: Option<String>,
     pub reviewer_id: Option<i64>,
     pub review_feedback: Option<String>,
+    #[sqlx(skip)]
+    pub blocker_ids: Vec<i64>,
+    #[sqlx(skip)]
+    pub unresolved_blockers: Vec<TicketBlocker>,
     pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TicketBlocker {
+    pub id: i64,
+    pub title: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]

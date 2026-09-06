@@ -94,6 +94,7 @@ async fn create_ticket(
         .create_ticket_with_wakes(NewTicket {
             title: input.title,
             description: input.description,
+            blocker_ids: input.blocker_ids,
         })
         .await?;
     for agent_id in wake_agent_ids {
@@ -119,6 +120,7 @@ struct UpdateTicket {
     description: Option<String>,
     state: Option<TicketState>,
     assignee_id: Option<serde_json::Value>,
+    blocker_ids: Option<Vec<i64>>,
     expected_revision: Option<i64>,
 }
 
@@ -151,6 +153,7 @@ async fn update_ticket(
                 description: input.description,
                 state: input.state,
                 assignee_id,
+                blocker_ids: input.blocker_ids,
                 expected_revision: input.expected_revision,
             },
         )
@@ -440,6 +443,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Claim me".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -467,6 +471,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn ticket_dependencies_round_trip_and_block_claims_over_http() {
+        let store = Store::memory().await.unwrap();
+        store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let app = test_router(store);
+        let blocker = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"Foundation"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocker.status(), StatusCode::OK);
+
+        let dependent = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"Follow-up","blocker_ids":[1]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dependent.status(), StatusCode::OK);
+        let dependent: Value =
+            serde_json::from_slice(&to_bytes(dependent.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(dependent["blocker_ids"], serde_json::json!([1]));
+        assert_eq!(dependent["unresolved_blockers"][0]["title"], "Foundation");
+
+        let claim = app
+            .oneshot(
+                Request::post("/tickets/2/claim")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"agent_id":1,"expected_revision":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

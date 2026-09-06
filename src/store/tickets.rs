@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use sqlx::{Sqlite, Transaction};
 
 use crate::{
-    domain::{Message, Project, Ticket, TicketState, WakeDeliveryPolicy},
+    domain::{Message, Project, Ticket, TicketBlocker, TicketState, WakeDeliveryPolicy},
     error::AppError,
 };
 
@@ -11,6 +13,7 @@ use super::{MessageWrite, Store, insert_message};
 pub struct NewTicket {
     pub title: String,
     pub description: String,
+    pub blocker_ids: Vec<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -19,6 +22,7 @@ pub struct TicketChanges {
     pub description: Option<String>,
     pub state: Option<TicketState>,
     pub assignee_id: Option<Option<i64>>,
+    pub blocker_ids: Option<Vec<i64>>,
     pub expected_revision: Option<i64>,
 }
 
@@ -55,22 +59,37 @@ impl Store {
     }
 
     pub async fn tickets(&self) -> Result<Vec<Ticket>, sqlx::Error> {
-        sqlx::query_as(
+        let mut transaction = self.pool.begin().await?;
+        let mut tickets: Vec<Ticket> = sqlx::query_as(
             "SELECT id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets ORDER BY id",
         )
-        .fetch_all(&self.pool)
-        .await
+        .fetch_all(&mut *transaction)
+        .await?;
+        for ticket in &mut tickets {
+            load_ticket_dependencies(&mut transaction, ticket).await?;
+        }
+        transaction.commit().await?;
+        Ok(tickets)
     }
 
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
-        sqlx::query_as(
+        let mut transaction = self.pool.begin().await?;
+        let ticket: Option<Ticket> = sqlx::query_as(
             "SELECT id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets WHERE id = ?",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
-        .await
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let ticket = if let Some(mut ticket) = ticket {
+            load_ticket_dependencies(&mut transaction, &mut ticket).await?;
+            Some(ticket)
+        } else {
+            None
+        };
+        transaction.commit().await?;
+        Ok(ticket)
     }
 
     pub async fn create_ticket(&self, new: NewTicket) -> Result<Ticket, AppError> {
@@ -88,14 +107,24 @@ impl Store {
             .bind(new.description)
             .execute(&mut *transaction)
             .await?;
-        let ticket = ticket_in_transaction(&mut transaction, result.last_insert_rowid()).await?;
-        let wake_agent_ids = insert_pending_ticket_wakes(
+        replace_ticket_dependencies(
             &mut transaction,
-            None,
-            &ticket,
-            TicketWakeReason::Available,
+            result.last_insert_rowid(),
+            &new.blocker_ids,
         )
         .await?;
+        let ticket = ticket_in_transaction(&mut transaction, result.last_insert_rowid()).await?;
+        let wake_agent_ids = if ticket_is_available(&ticket) {
+            insert_pending_ticket_wakes(
+                &mut transaction,
+                None,
+                &ticket,
+                TicketWakeReason::Available,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         transaction.commit().await?;
         Ok((ticket, wake_agent_ids))
     }
@@ -125,6 +154,9 @@ impl Store {
             .unwrap_or_else(|| current.description.clone());
         let state = changes.state.unwrap_or(current.state);
         let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
+        let blocker_ids = changes
+            .blocker_ids
+            .unwrap_or_else(|| current.blocker_ids.clone());
         if let Some(agent_id) = assignee_id
             && self.agent(agent_id).await?.is_none()
         {
@@ -146,7 +178,14 @@ impl Store {
         if result.rows_affected() == 0 {
             return Err(AppError::conflict("ticket was changed by another user"));
         }
+        replace_ticket_dependencies(&mut transaction, id, &blocker_ids).await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        if !ticket.unresolved_blockers.is_empty()
+            && ((current.state == TicketState::Todo && ticket.state == TicketState::InProgress)
+                || (current.assignee_id.is_none() && ticket.assignee_id.is_some()))
+        {
+            return Err(blocked_ticket_error(&ticket));
+        }
         let reason = if current.assignee_id != ticket.assignee_id && ticket.assignee_id.is_some() {
             Some(TicketWakeReason::Assigned)
         } else if !ticket_is_available(&current) && ticket_is_available(&ticket) {
@@ -188,10 +227,15 @@ impl Store {
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        if !current.unresolved_blockers.is_empty() {
+            return Err(blocked_ticket_error(&current));
+        }
         let mut transaction = self.pool.begin().await?;
         let claimed: Option<Ticket> = sqlx::query_as(
             "UPDATE tickets SET assignee_id = ?, state = 'in_progress', revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
+             AND NOT EXISTS (SELECT 1 FROM ticket_dependencies d JOIN tickets blocker ON blocker.id = d.blocker_id \
+             WHERE d.ticket_id = tickets.id AND blocker.state != 'done') \
              AND (? IS NULL OR revision = ?) \
              RETURNING id, title, description, state, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
@@ -203,7 +247,8 @@ impl Store {
         .fetch_optional(&mut *transaction)
         .await?;
         match claimed {
-            Some(ticket) => {
+            Some(mut ticket) => {
+                load_ticket_dependencies(&mut transaction, &mut ticket).await?;
                 let wake_agent_ids = if current.assignee_id != ticket.assignee_id {
                     insert_pending_ticket_wakes(
                         &mut transaction,
@@ -276,11 +321,12 @@ impl Store {
         .bind(expected_revision)
         .fetch_optional(&mut *transaction)
         .await?;
-        let ticket = ticket.ok_or_else(|| {
+        let mut ticket = ticket.ok_or_else(|| {
             AppError::conflict(
                 "ticket is not assigned to this agent, is not in progress, or has changed",
             )
         })?;
+        load_ticket_dependencies(&mut transaction, &mut ticket).await?;
         let wake_agent_ids = insert_pending_ticket_wakes(
             &mut transaction,
             Some(&current),
@@ -301,6 +347,7 @@ impl Store {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
+        let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
             "UPDATE tickets SET reviewer_id = ?, revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND assignee_id != ? \
@@ -313,11 +360,14 @@ impl Store {
         .bind(reviewer_id)
         .bind(expected_revision)
         .bind(expected_revision)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        ticket.ok_or_else(|| {
+        let mut ticket = ticket.ok_or_else(|| {
             AppError::conflict("review is unavailable, belongs to this agent, or has changed")
-        })
+        })?;
+        load_ticket_dependencies(&mut transaction, &mut ticket).await?;
+        transaction.commit().await?;
+        Ok(ticket)
     }
 
     pub async fn request_changes(
@@ -335,6 +385,7 @@ impl Store {
                 "review feedback must contain between 1 and 10000 characters",
             ));
         }
+        let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
             "UPDATE tickets SET state = 'in_progress', review_feedback = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND state = 'review' AND reviewer_id = ? \
@@ -346,11 +397,14 @@ impl Store {
         .bind(reviewer_id)
         .bind(expected_revision)
         .bind(expected_revision)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        ticket.ok_or_else(|| {
+        let mut ticket = ticket.ok_or_else(|| {
             AppError::conflict("review is not assigned to this agent or has changed")
-        })
+        })?;
+        load_ticket_dependencies(&mut transaction, &mut ticket).await?;
+        transaction.commit().await?;
+        Ok(ticket)
     }
 
     pub async fn complete_review(
@@ -418,9 +472,10 @@ impl Store {
         .bind(expected_revision)
         .fetch_optional(&mut *transaction)
         .await?;
-        let ticket = ticket.ok_or_else(|| {
+        let mut ticket = ticket.ok_or_else(|| {
             AppError::conflict("review is not assigned to this agent or has changed")
         })?;
+        load_ticket_dependencies(&mut transaction, &mut ticket).await?;
         let message = match message {
             Some(message) => Some(insert_message(&mut transaction, message).await?),
             None => None,
@@ -434,23 +489,118 @@ async fn ticket_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     id: i64,
 ) -> Result<Ticket, AppError> {
-    Ok(sqlx::query_as(
+    let mut ticket = sqlx::query_as(
         "SELECT id, title, description, state, assignee_id, implementation_branch, review_commit, \
          review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
          FROM tickets WHERE id = ?",
     )
     .bind(id)
     .fetch_one(&mut **transaction)
-    .await?)
+    .await?;
+    load_ticket_dependencies(transaction, &mut ticket).await?;
+    Ok(ticket)
+}
+
+async fn load_ticket_dependencies(
+    transaction: &mut Transaction<'_, Sqlite>,
+    ticket: &mut Ticket,
+) -> Result<(), sqlx::Error> {
+    let blockers: Vec<(i64, String, TicketState)> = sqlx::query_as(
+        "SELECT blocker.id, blocker.title, blocker.state FROM ticket_dependencies dependency \
+         JOIN tickets blocker ON blocker.id = dependency.blocker_id \
+         WHERE dependency.ticket_id = ? ORDER BY blocker.id",
+    )
+    .bind(ticket.id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    ticket.blocker_ids = blockers.iter().map(|(id, _, _)| *id).collect();
+    ticket.unresolved_blockers = blockers
+        .into_iter()
+        .filter(|(_, _, state)| *state != TicketState::Done)
+        .map(|(id, title, _)| TicketBlocker { id, title })
+        .collect();
+    Ok(())
+}
+
+async fn replace_ticket_dependencies(
+    transaction: &mut Transaction<'_, Sqlite>,
+    ticket_id: i64,
+    blocker_ids: &[i64],
+) -> Result<(), AppError> {
+    let unique: HashSet<_> = blocker_ids.iter().copied().collect();
+    if unique.len() != blocker_ids.len() {
+        return Err(AppError::bad_request("duplicate blocker ticket ID"));
+    }
+    for blocker_id in blocker_ids {
+        if *blocker_id == ticket_id {
+            return Err(AppError::bad_request("a ticket cannot block itself"));
+        }
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tickets WHERE id = ?)")
+            .bind(blocker_id)
+            .fetch_one(&mut **transaction)
+            .await?;
+        if !exists {
+            return Err(AppError::bad_request(format!(
+                "blocker ticket #{blocker_id} does not exist"
+            )));
+        }
+        let creates_cycle: bool = sqlx::query_scalar(
+            "WITH RECURSIVE reachable(id) AS ( \
+             SELECT ? UNION SELECT dependency.blocker_id FROM ticket_dependencies dependency \
+             JOIN reachable ON dependency.ticket_id = reachable.id) \
+             SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ?)",
+        )
+        .bind(blocker_id)
+        .bind(ticket_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if creates_cycle {
+            return Err(AppError::bad_request(format!(
+                "blocker ticket #{blocker_id} creates a dependency cycle"
+            )));
+        }
+    }
+    sqlx::query("DELETE FROM ticket_dependencies WHERE ticket_id = ?")
+        .bind(ticket_id)
+        .execute(&mut **transaction)
+        .await?;
+    for blocker_id in blocker_ids {
+        sqlx::query("INSERT INTO ticket_dependencies (ticket_id, blocker_id) VALUES (?, ?)")
+            .bind(ticket_id)
+            .bind(blocker_id)
+            .execute(&mut **transaction)
+            .await?;
+    }
+    Ok(())
 }
 
 fn ticket_is_available(ticket: &Ticket) -> bool {
-    ticket.state == TicketState::Todo && ticket.assignee_id.is_none()
+    ticket.state == TicketState::Todo
+        && ticket.assignee_id.is_none()
+        && ticket.unresolved_blockers.is_empty()
+}
+
+fn blocked_ticket_error(ticket: &Ticket) -> AppError {
+    AppError::conflict(format!(
+        "ticket is blocked by {}",
+        ticket
+            .unresolved_blockers
+            .iter()
+            .map(|blocker| format!("#{} '{}'", blocker.id, blocker.title))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'static str> {
     let Some(previous) = previous else {
-        return vec!["title", "description", "state", "assignee_id"];
+        return vec![
+            "title",
+            "description",
+            "state",
+            "assignee_id",
+            "blocker_ids",
+        ];
     };
     let mut fields = Vec::new();
     if previous.title != ticket.title {
@@ -479,6 +629,9 @@ fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'st
     }
     if previous.review_feedback != ticket.review_feedback {
         fields.push("review_feedback");
+    }
+    if previous.blocker_ids != ticket.blocker_ids {
+        fields.push("blocker_ids");
     }
     fields
 }
@@ -542,6 +695,8 @@ async fn insert_pending_ticket_wakes(
             "review_commit": ticket.review_commit,
             "review_target_branch": ticket.review_target_branch,
             "reviewer_id": ticket.reviewer_id,
+            "blocker_ids": ticket.blocker_ids,
+            "unresolved_blockers": ticket.unresolved_blockers,
         }
     }))
     .map_err(|error| AppError::internal(format!("failed to encode ticket wake event: {error}")))?;
@@ -586,6 +741,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "First".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -611,6 +767,108 @@ mod tests {
                         expected_revision: Some(1),
                         ..Default::default()
                     }
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn dependencies_are_validated_and_block_claims_until_done() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .set_agent_wake_settings(agent.id, true, false, None)
+            .await
+            .unwrap();
+        let blocker = store
+            .create_ticket(NewTicket {
+                title: "Foundation".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let dependent = store
+            .create_ticket(NewTicket {
+                title: "Follow-up".into(),
+                description: String::new(),
+                blocker_ids: vec![blocker.id],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(dependent.blocker_ids, vec![blocker.id]);
+        assert_eq!(dependent.unresolved_blockers[0].title, "Foundation");
+        assert_eq!(store.wake_events(agent.id).await.unwrap().len(), 1);
+        assert!(
+            store
+                .claim_ticket(dependent.id, agent.id, Some(dependent.revision))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("blocked by")
+        );
+        for changes in [
+            TicketChanges {
+                state: Some(TicketState::InProgress),
+                expected_revision: Some(dependent.revision),
+                ..Default::default()
+            },
+            TicketChanges {
+                assignee_id: Some(Some(agent.id)),
+                expected_revision: Some(dependent.revision),
+                ..Default::default()
+            },
+        ] {
+            assert!(store.update_ticket(dependent.id, changes).await.is_err());
+        }
+
+        store
+            .update_ticket(
+                blocker.id,
+                TicketChanges {
+                    state: Some(TicketState::Done),
+                    expected_revision: Some(blocker.revision),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let refreshed = store.ticket(dependent.id).await.unwrap().unwrap();
+        assert!(refreshed.unresolved_blockers.is_empty());
+        assert_eq!(refreshed.blocker_ids, vec![blocker.id]);
+        assert_eq!(
+            store
+                .claim_ticket(dependent.id, agent.id, Some(refreshed.revision))
+                .await
+                .unwrap()
+                .state,
+            TicketState::InProgress
+        );
+
+        for blocker_ids in [vec![999], vec![dependent.id], vec![blocker.id, blocker.id]] {
+            assert!(
+                store
+                    .update_ticket(
+                        dependent.id,
+                        TicketChanges {
+                            blocker_ids: Some(blocker_ids),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .update_ticket(
+                    blocker.id,
+                    TicketChanges {
+                        blocker_ids: Some(vec![dependent.id]),
+                        ..Default::default()
+                    },
                 )
                 .await
                 .is_err()
@@ -657,6 +915,7 @@ mod tests {
             .create_ticket_with_wakes(NewTicket {
                 title: "Build it".into(),
                 description: "Implement the change".into(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -732,6 +991,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Review me".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();

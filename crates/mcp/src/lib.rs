@@ -157,7 +157,7 @@ fn tools() -> Value {
         tool(
             "create_ticket",
             "Create a board ticket",
-            json!({"type":"object","properties":{"title":{"type":"string"},"description":{"type":"string"}},"required":["title"]})
+            json!({"type":"object","properties":{"title":{"type":"string"},"description":{"type":"string"},"blocker_ids":{"type":"array","items":{"type":"integer"}}},"required":["title"]})
         ),
         tool(
             "get_ticket_details",
@@ -167,7 +167,7 @@ fn tools() -> Value {
         tool(
             "set_ticket_details",
             "Update ticket fields",
-            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"state":{"type":"string","enum":["todo","in_progress"]},"assignee_id":{"type":["integer","null"]},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
+            json!({"type":"object","properties":{"ticket_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"state":{"type":"string","enum":["todo","in_progress"]},"assignee_id":{"type":["integer","null"]},"blocker_ids":{"type":"array","items":{"type":"integer"}},"expected_revision":{"type":"integer"}},"required":["ticket_id"]})
         ),
         tool(
             "claim_ticket",
