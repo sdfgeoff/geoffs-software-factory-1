@@ -20,7 +20,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, AgentState, WakeEvent},
+    domain::{Agent, AgentState, WakeDeliveryPolicy, WakeEvent},
     error::AppError,
     store::{MergeNotification, Store, validate_channel},
 };
@@ -217,6 +217,7 @@ impl AgentManager {
                         "idle.heartbeat",
                         json!({"message": message, "minutes": minutes, "occurred_at": now.to_string()}),
                         None,
+                        WakeDeliveryPolicy::IdleOnly,
                     )
                     .await
                     .is_ok()
@@ -717,7 +718,11 @@ impl AgentManager {
             if matches!(agent.state, AgentState::Paused | AgentState::Error) {
                 return;
             }
-            let Ok(Some(event)) = self.store.claim_pending_wake_event(agent_id).await else {
+            let Ok(Some(event)) = self
+                .store
+                .claim_pending_wake_event(agent_id, agent.state == AgentState::Idle)
+                .await
+            else {
                 return;
             };
             let message = wake_event_message(&event);
@@ -1230,6 +1235,114 @@ mod tests {
             manager.store.wake_events(agent.id).await.unwrap()[0].delivery_state,
             crate::domain::WakeEventState::Delivered
         );
+    }
+
+    #[tokio::test]
+    async fn ticket_wakes_wait_for_idle_without_blocking_channel_messages() {
+        let (manager, agent, _rpc, server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        for (kind, message) in [
+            ("ticket.available", "Pending implementation work"),
+            ("ticket.review_requested", "Pending review"),
+        ] {
+            manager
+                .store
+                .enqueue_wake_event(
+                    agent.id,
+                    kind,
+                    json!({"message": message}),
+                    None,
+                    WakeDeliveryPolicy::IdleOnly,
+                )
+                .await
+                .unwrap();
+        }
+        manager
+            .set_channel_subscriptions(agent.id, &["general".into()])
+            .await
+            .unwrap();
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let steer: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(steer["method"], "turn/steer");
+            assert_eq!(
+                steer["params"]["input"][0]["text"],
+                "A message was posted in #general by human:\nStatus changed"
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turnId\":\"turn-1\"}}}}\n",
+                        steer["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let start: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(start["method"], "turn/start");
+            assert_eq!(
+                start["params"]["input"][0]["text"],
+                "Pending implementation work"
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-2\"}}}}}}\n",
+                        start["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let (_, targets) = manager
+            .store
+            .post_message_with_wakes("general", None, "human", "Status changed")
+            .await
+            .unwrap();
+        for agent_id in targets {
+            manager.deliver_pending(agent_id).await;
+        }
+        let events = manager.store.wake_events(agent.id).await.unwrap();
+        assert_eq!(
+            events[0].delivery_state,
+            crate::domain::WakeEventState::Pending
+        );
+        assert_eq!(
+            events[1].delivery_state,
+            crate::domain::WakeEventState::Pending
+        );
+        assert_eq!(
+            events[2].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
+
+        manager
+            .store
+            .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
+            .await
+            .unwrap();
+        manager.deliver_pending(agent.id).await;
+        server_task.await.unwrap();
+
+        let events = manager.store.wake_events(agent.id).await.unwrap();
+        assert_eq!(
+            events[0].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
+        assert_eq!(
+            events[1].delivery_state,
+            crate::domain::WakeEventState::Pending
+        );
+        let agent = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(agent.state, AgentState::Running);
+        assert_eq!(agent.active_turn_id.as_deref(), Some("turn-2"));
     }
 
     #[tokio::test]
