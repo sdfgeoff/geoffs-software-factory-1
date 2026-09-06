@@ -39,6 +39,14 @@ pub(crate) struct MergeNotification<'a> {
     pub deduplication_key: &'a str,
 }
 
+pub struct ReviewSubmission<'a> {
+    pub implementation_branch: Option<&'a str>,
+    pub commit: &'a str,
+    pub target_branch: &'a str,
+    pub project_id: i64,
+    pub project_path: &'a str,
+}
+
 #[derive(Clone, Copy)]
 enum TicketWakeReason {
     Available,
@@ -48,26 +56,73 @@ enum TicketWakeReason {
 
 impl Store {
     pub async fn project(&self) -> Result<Option<Project>, sqlx::Error> {
-        sqlx::query_as("SELECT path, updated_at FROM projects WHERE id = 1")
+        sqlx::query_as(
+            "SELECT p.id, p.path, p.archived_at, p.updated_at FROM projects p \
+             JOIN board_state state ON state.current_project_id = p.id WHERE state.id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn project_by_id(&self, id: i64) -> Result<Option<Project>, sqlx::Error> {
+        sqlx::query_as("SELECT id, path, archived_at, updated_at FROM projects WHERE id = ?")
+            .bind(id)
             .fetch_optional(&self.pool)
             .await
     }
 
     pub async fn set_project(&self, path: &str) -> Result<Project, sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO projects (id, path) VALUES (1, ?) \
-             ON CONFLICT(id) DO UPDATE SET path = excluded.path, updated_at = unixepoch()",
+        let mut transaction = self.pool.begin().await?;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO projects (path) VALUES (?) \
+             ON CONFLICT(path) DO UPDATE SET updated_at = unixepoch() RETURNING id",
         )
         .bind(path)
-        .execute(&self.pool)
+        .fetch_one(&mut *transaction)
         .await?;
-        Ok(self.project().await?.expect("project was just inserted"))
+        sqlx::query(
+            "INSERT INTO board_state (id, current_project_id) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET current_project_id = excluded.current_project_id",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        let project =
+            sqlx::query_as("SELECT id, path, archived_at, updated_at FROM projects WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        transaction.commit().await?;
+        Ok(project)
+    }
+
+    pub(crate) async fn active_ticket_project(&self, ticket: &Ticket) -> Result<Project, AppError> {
+        let project = self
+            .project_by_id(ticket.project_id)
+            .await?
+            .ok_or_else(|| AppError::conflict("ticket project no longer exists"))?;
+        if project.archived_at.is_some() {
+            return Err(AppError::conflict("ticket project is archived"));
+        }
+        Ok(project)
+    }
+
+    pub(crate) async fn review_ticket_project(&self, ticket: &Ticket) -> Result<Project, AppError> {
+        let project = self.active_ticket_project(ticket).await?;
+        if ticket.review_project_id != Some(project.id)
+            || ticket.review_project_path.as_deref() != Some(project.path.as_str())
+        {
+            return Err(AppError::conflict(
+                "ticket project no longer matches its recorded review context",
+            ));
+        }
+        Ok(project)
     }
 
     pub async fn tickets(&self) -> Result<Vec<Ticket>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let mut tickets: Vec<Ticket> = sqlx::query_as(
-            "SELECT id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets ORDER BY id",
         )
         .fetch_all(&mut *transaction)
@@ -82,7 +137,7 @@ impl Store {
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let ticket: Option<Ticket> = sqlx::query_as(
-            "SELECT id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at \
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -106,7 +161,23 @@ impl Store {
         &self,
         new: NewTicket,
     ) -> Result<(Ticket, Vec<i64>), AppError> {
+        self.create_ticket_for_project_with_wakes(new, None).await
+    }
+
+    pub async fn create_ticket_for_project_with_wakes(
+        &self,
+        new: NewTicket,
+        project_id: Option<i64>,
+    ) -> Result<(Ticket, Vec<i64>), AppError> {
         validate_title(&new.title)?;
+        let project = match project_id {
+            Some(id) => self.project_by_id(id).await?,
+            None => self.project().await?,
+        }
+        .ok_or_else(|| AppError::bad_request("ticket project does not exist"))?;
+        if project.archived_at.is_some() {
+            return Err(AppError::conflict("ticket project is archived"));
+        }
         if let Some(agent_id) = new.created_by_agent_id
             && self.agent(agent_id).await?.is_none()
         {
@@ -114,8 +185,9 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
-            "INSERT INTO tickets (title, description, created_by_agent_id) VALUES (?, ?, ?)",
+            "INSERT INTO tickets (project_id, title, description, created_by_agent_id) VALUES (?, ?, ?, ?)",
         )
+        .bind(project.id)
         .bind(new.title.trim())
         .bind(new.description)
         .bind(new.created_by_agent_id)
@@ -156,6 +228,7 @@ impl Store {
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.active_ticket_project(&current).await?;
         if let Some(expected) = changes.expected_revision
             && expected != current.revision
         {
@@ -254,6 +327,15 @@ impl Store {
                 )));
             }
             let ticket = ticket_in_transaction(&mut transaction, *ticket_id).await?;
+            let archived_at: Option<i64> =
+                sqlx::query_scalar("SELECT archived_at FROM projects WHERE id = ?")
+                    .bind(ticket.project_id)
+                    .fetch_optional(&mut *transaction)
+                    .await?
+                    .ok_or_else(|| AppError::conflict("ticket project no longer exists"))?;
+            if archived_at.is_some() {
+                return Err(AppError::conflict("ticket project is archived"));
+            }
             if ticket.state != TicketState::Todo || ticket.assignee_id.is_some() {
                 return Err(AppError::conflict(format!(
                     "ticket #{} is not unassigned todo work",
@@ -354,6 +436,7 @@ impl Store {
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.active_ticket_project(&current).await?;
         if !current.unresolved_blockers.is_empty() {
             return Err(blocked_ticket_error(&current));
         }
@@ -371,7 +454,7 @@ impl Store {
              AND NOT EXISTS (SELECT 1 FROM ticket_dependencies d JOIN tickets blocker ON blocker.id = d.blocker_id \
              WHERE d.ticket_id = tickets.id AND blocker.state != 'done') \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(agent_id)
         .bind(id)
@@ -408,20 +491,11 @@ impl Store {
         &self,
         id: i64,
         agent_id: i64,
-        implementation_branch: Option<&str>,
-        commit: &str,
-        target_branch: &str,
+        submission: ReviewSubmission<'_>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
         Ok(self
-            .submit_review_with_wakes(
-                id,
-                agent_id,
-                implementation_branch,
-                commit,
-                target_branch,
-                expected_revision,
-            )
+            .submit_review_with_wakes(id, agent_id, submission, expected_revision)
             .await?
             .0)
     }
@@ -430,28 +504,36 @@ impl Store {
         &self,
         id: i64,
         agent_id: i64,
-        implementation_branch: Option<&str>,
-        commit: &str,
-        target_branch: &str,
+        submission: ReviewSubmission<'_>,
         expected_revision: Option<i64>,
     ) -> Result<(Ticket, Vec<i64>), AppError> {
         let current = self
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        let project = self.active_ticket_project(&current).await?;
+        if project.id != submission.project_id || project.path != submission.project_path {
+            return Err(AppError::conflict(
+                "ticket project changed during review submission",
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
-            "UPDATE tickets SET state = 'review', implementation_branch = ?, review_commit = ?, review_target_branch = ?, reviewer_id = NULL, \
+            "UPDATE tickets SET state = 'review', implementation_branch = ?, review_commit = ?, review_target_branch = ?, review_project_id = ?, review_project_path = ?, reviewer_id = NULL, \
              revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'in_progress' AND assignee_id = ? \
+             AND project_id = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
-        .bind(implementation_branch)
-        .bind(commit)
-        .bind(target_branch)
+        .bind(submission.implementation_branch)
+        .bind(submission.commit)
+        .bind(submission.target_branch)
+        .bind(submission.project_id)
+        .bind(submission.project_path)
         .bind(id)
         .bind(agent_id)
+        .bind(submission.project_id)
         .bind(expected_revision)
         .bind(expected_revision)
         .fetch_optional(&mut *transaction)
@@ -482,12 +564,19 @@ impl Store {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.review_ticket_project(&current).await?;
         let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
             "UPDATE tickets SET reviewer_id = ?, revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND assignee_id != ? \
+             AND review_project_id = project_id AND review_project_path = \
+                 (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
              AND (reviewer_id IS NULL OR reviewer_id = ?) AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(reviewer_id)
         .bind(id)
@@ -520,12 +609,19 @@ impl Store {
                 "review feedback must contain between 1 and 10000 characters",
             ));
         }
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.review_ticket_project(&current).await?;
         let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
             "UPDATE tickets SET state = 'in_progress', review_feedback = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND state = 'review' AND reviewer_id = ? \
+             AND review_project_id = project_id AND review_project_path = \
+                 (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(feedback.trim())
         .bind(id)
@@ -593,12 +689,19 @@ impl Store {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.review_ticket_project(&current).await?;
         let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
             "UPDATE tickets SET state = 'done', revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND reviewer_id = ? AND review_commit = ? \
+             AND review_project_id = project_id AND review_project_path = \
+                 (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
         )
         .bind(id)
         .bind(reviewer_id)
@@ -625,8 +728,8 @@ async fn ticket_in_transaction(
     id: i64,
 ) -> Result<Ticket, AppError> {
     let mut ticket = sqlx::query_as(
-        "SELECT id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, \
-         review_target_branch, reviewer_id, review_feedback, revision, created_at, updated_at \
+        "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, \
+         review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at \
          FROM tickets WHERE id = ?",
     )
     .bind(id)
@@ -731,6 +834,7 @@ fn blocked_ticket_error(ticket: &Ticket) -> AppError {
 fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'static str> {
     let Some(previous) = previous else {
         return vec![
+            "project_id",
             "title",
             "description",
             "state",
@@ -829,6 +933,7 @@ async fn insert_pending_ticket_wakes(
         "revision": ticket.revision,
         "changed_fields": ticket_changed_fields(previous, ticket),
         "ticket": {
+            "project_id": ticket.project_id,
             "title": ticket.title,
             "state": ticket.state,
             "assignee_id": ticket.assignee_id,
@@ -837,6 +942,8 @@ async fn insert_pending_ticket_wakes(
             "implementation_branch": ticket.implementation_branch,
             "review_commit": ticket.review_commit,
             "review_target_branch": ticket.review_target_branch,
+            "review_project_id": ticket.review_project_id,
+            "review_project_path": ticket.review_project_path,
             "reviewer_id": ticket.reviewer_id,
             "blocker_ids": ticket.blocker_ids,
             "unresolved_blockers": ticket.unresolved_blockers,
@@ -876,6 +983,107 @@ fn validate_title(title: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tickets_keep_project_identity_and_reject_archived_projects() {
+        let store = Store::memory().await.unwrap();
+        let project = store.project().await.unwrap().unwrap();
+        let watcher = store.create_agent("watcher", "/tmp/watcher").await.unwrap();
+        store
+            .set_agent_wake_settings(watcher.id, true, false, None)
+            .await
+            .unwrap();
+        let (ticket, _) = store
+            .create_ticket_with_wakes(NewTicket {
+                title: "Project work".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(ticket.project_id, project.id);
+        assert_eq!(
+            store.wake_events(watcher.id).await.unwrap()[0].payload["ticket"]["project_id"],
+            project.id
+        );
+        let other = store.set_project("/tmp/another-project").await.unwrap();
+        assert_ne!(other.id, project.id);
+        assert_eq!(
+            store.ticket(ticket.id).await.unwrap().unwrap().project_id,
+            project.id
+        );
+        assert_eq!(
+            store.project_by_id(project.id).await.unwrap().unwrap().path,
+            project.path
+        );
+
+        store
+            .execute_test_sql("UPDATE projects SET archived_at = unixepoch() WHERE id = 1")
+            .await
+            .unwrap();
+        let error = store
+            .claim_ticket(ticket.id, watcher.id, Some(ticket.revision))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "ticket project is archived");
+    }
+
+    #[tokio::test]
+    async fn review_operations_reject_changed_project_context() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Pinned context".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = store
+            .submit_review(
+                ticket.id,
+                worker.id,
+                ReviewSubmission {
+                    implementation_branch: Some("tickets/work"),
+                    commit: "abc123",
+                    target_branch: "main",
+                    project_id: ticket.project_id,
+                    project_path: "/tmp/multi-agent-board-test-project",
+                },
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        store
+            .execute_test_sql("UPDATE tickets SET review_project_path = '/tmp/other-project'")
+            .await
+            .unwrap();
+
+        let error = store
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ticket project no longer matches its recorded review context"
+        );
+    }
 
     #[tokio::test]
     async fn ticket_updates_use_revisions() {
@@ -1197,9 +1405,13 @@ mod tests {
             .submit_review_with_wakes(
                 ticket.id,
                 implementer.id,
-                Some("agents/implementer"),
-                "abc123",
-                "main",
+                ReviewSubmission {
+                    implementation_branch: Some("agents/implementer"),
+                    commit: "abc123",
+                    target_branch: "main",
+                    project_id: ticket.project_id,
+                    project_path: "/tmp/multi-agent-board-test-project",
+                },
                 Some(ticket.revision),
             )
             .await
@@ -1259,9 +1471,13 @@ mod tests {
             .submit_review(
                 ticket.id,
                 worker.id,
-                Some("agents/worker"),
-                "abc123",
-                "main",
+                ReviewSubmission {
+                    implementation_branch: Some("agents/worker"),
+                    commit: "abc123",
+                    target_branch: "main",
+                    project_id: ticket.project_id,
+                    project_path: "/tmp/multi-agent-board-test-project",
+                },
                 Some(ticket.revision),
             )
             .await

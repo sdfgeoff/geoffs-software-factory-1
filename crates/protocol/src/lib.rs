@@ -9,6 +9,7 @@ pub struct SetProjectRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateTicketRequest {
+    pub project_id: Option<i64>,
     pub title: String,
     #[serde(default)]
     pub description: String,

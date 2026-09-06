@@ -13,7 +13,7 @@ mod wakes;
 
 pub(crate) use messages::validate_channel;
 pub(crate) use tickets::MergeNotification;
-pub use tickets::{NewTicket, TicketChanges};
+pub use tickets::{NewTicket, ReviewSubmission, TicketChanges};
 
 #[derive(Clone)]
 pub struct Store {
@@ -44,6 +44,9 @@ impl Store {
             .await?;
         let store = Self { pool };
         store.migrate().await?;
+        store
+            .set_project("/tmp/multi-agent-board-test-project")
+            .await?;
         Ok(store)
     }
 
@@ -69,6 +72,44 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn project_migration_backfills_existing_tickets() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 18) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO projects (id, path) VALUES (1, '/existing-project')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tickets (title) VALUES ('existing ticket')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 18)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let project_id: i64 = sqlx::query_scalar("SELECT project_id FROM tickets WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(project_id, 1);
+        let foreign_key_errors: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(foreign_key_errors.is_empty());
+    }
+
+    #[tokio::test]
     async fn file_store_survives_reopen() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -76,6 +117,10 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("multi-agent-board-{unique}.sqlite3"));
         let store = Store::open(&path).await.unwrap();
+        store
+            .set_project("/tmp/multi-agent-board-test-project")
+            .await
+            .unwrap();
         store
             .create_ticket(NewTicket {
                 title: "Persistent".into(),

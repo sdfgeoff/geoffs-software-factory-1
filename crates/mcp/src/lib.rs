@@ -157,7 +157,7 @@ fn tools() -> Value {
         tool(
             "create_ticket",
             "Create a board ticket",
-            json!({"type":"object","properties":{"title":{"type":"string"},"description":{"type":"string"},"blocker_ids":{"type":"array","items":{"type":"integer"}}},"required":["title"]})
+            json!({"type":"object","properties":{"project_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"blocker_ids":{"type":"array","items":{"type":"integer"}}},"required":["title"]})
         ),
         tool(
             "get_ticket_details",
