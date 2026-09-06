@@ -245,6 +245,30 @@ fn tools() -> Value {
             "post_to_message_board",
             "Post a message to an existing channel",
             json!({"type":"object","properties":{"channel_name":{"type":"string"},"author":{"type":"string"},"message":{"type":"string"}},"required":["channel_name","author","message"]})
+        ),
+        tool(
+            "schedule_self_reminder",
+            "Schedule a durable one-shot reminder for this agent",
+            json!({
+                "type":"object",
+                "properties":{
+                    "message":{"type":"string","minLength":1,"maxLength":50000},
+                    "deliver_at":{"type":"string","format":"date-time"},
+                    "delay_seconds":{"type":"integer","minimum":1,"maximum":31536000}
+                },
+                "required":["message"],
+                "oneOf":[{"required":["deliver_at"]},{"required":["delay_seconds"]}]
+            })
+        ),
+        tool(
+            "list_my_reminders",
+            "List this agent's reminders",
+            json!({"type":"object","properties":{}})
+        ),
+        tool(
+            "cancel_my_reminder",
+            "Cancel one of this agent's scheduled reminders",
+            json!({"type":"object","properties":{"reminder_id":{"type":"integer"}},"required":["reminder_id"]})
         )
     ])
 }
@@ -423,6 +447,23 @@ async fn call_tool(
                         })
                         .expect("message request is serializable"),
                     ),
+                )
+                .await?
+        }
+        "schedule_self_reminder" => {
+            string(&args, "message")?;
+            board
+                .request(Method::POST, "/agent/reminders", Some(args))
+                .await?
+        }
+        "list_my_reminders" => board.request(Method::GET, "/agent/reminders", None).await?,
+        "cancel_my_reminder" => {
+            let reminder_id = integer(&args, "reminder_id")?;
+            board
+                .request(
+                    Method::DELETE,
+                    &format!("/agent/reminders/{reminder_id}"),
+                    None,
                 )
                 .await?
         }

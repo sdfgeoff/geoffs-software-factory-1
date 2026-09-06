@@ -82,6 +82,13 @@ pub struct CreateWakeEventRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ScheduleSelfReminderRequest {
+    pub message: String,
+    pub deliver_at: Option<String>,
+    pub delay_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SetAgentScopesRequest {
     pub scopes: Vec<String>,
 }

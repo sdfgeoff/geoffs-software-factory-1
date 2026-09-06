@@ -6,21 +6,22 @@ use axum::{
     http::HeaderMap,
     routing::get,
 };
+use jiff::Timestamp;
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
     CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, ReserveTicketsRequest,
-    SetAgentChannelSubscriptionsRequest, SetProjectRequest,
+    ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest, SetProjectRequest,
 };
 use serde::Deserialize;
 
 use crate::{
     agent_runtime::AgentManager,
     domain::{
-        BoardSettings, Channel, Message, Project, Ticket, TicketActivity, TicketState,
+        BoardSettings, Channel, Message, Project, Reminder, Ticket, TicketActivity, TicketState,
         WakeDeliveryPolicy, WakeEvent,
     },
     error::AppError,
-    store::{NewTicket, Store, TicketChanges},
+    store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges},
 };
 
 pub fn router(store: Store, agents: AgentManager) -> Router {
@@ -47,6 +48,14 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         .route(
             "/agent/channel-subscriptions/remove",
             axum::routing::post(remove_my_channel_subscriptions),
+        )
+        .route(
+            "/agent/reminders",
+            get(list_my_reminders).post(schedule_self_reminder),
+        )
+        .route(
+            "/agent/reminders/{id}",
+            axum::routing::delete(cancel_my_reminder),
         )
         .route("/channels", get(list_channels).post(create_channel))
         .route("/channels/{name}", get(get_channel))
@@ -278,6 +287,56 @@ async fn create_wake_event(
                 WakeDeliveryPolicy::Immediate,
             )
             .await?,
+    ))
+}
+
+async fn schedule_self_reminder(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    Json(input): Json<ScheduleSelfReminderRequest>,
+) -> Result<Json<Reminder>, AppError> {
+    let agent_id = calling_agent(&headers)?;
+    let now = Timestamp::now().as_second();
+    let deliver_at = match (input.deliver_at, input.delay_seconds) {
+        (Some(deliver_at), None) => deliver_at
+            .parse::<Timestamp>()
+            .map_err(|_| AppError::bad_request("deliver_at must be an RFC 3339 timestamp"))?
+            .as_second(),
+        (None, Some(delay)) if (1..=MAX_REMINDER_DELAY_SECONDS).contains(&delay) => now
+            .checked_add(delay)
+            .ok_or_else(|| AppError::bad_request("delay_seconds is too large"))?,
+        (None, Some(_)) => {
+            return Err(AppError::bad_request(
+                "delay_seconds must be between 1 and 31536000",
+            ));
+        }
+        _ => {
+            return Err(AppError::bad_request(
+                "provide exactly one of deliver_at or delay_seconds",
+            ));
+        }
+    };
+    Ok(Json(
+        store
+            .create_reminder(agent_id, &input.message, deliver_at, now)
+            .await?,
+    ))
+}
+
+async fn list_my_reminders(
+    State(store): State<Store>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Reminder>>, AppError> {
+    Ok(Json(store.reminders(calling_agent(&headers)?).await?))
+}
+
+async fn cancel_my_reminder(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<Reminder>, AppError> {
+    Ok(Json(
+        store.cancel_reminder(calling_agent(&headers)?, id).await?,
     ))
 }
 
@@ -1011,5 +1070,127 @@ mod tests {
         assert_eq!(events.as_array().unwrap().len(), 1);
         assert_eq!(events[0]["delivery_state"], "pending");
         assert_eq!(events[0]["payload"]["message_id"], 9);
+    }
+
+    #[tokio::test]
+    async fn reminder_api_is_caller_scoped_and_validates_schedule_and_cancellation() {
+        let store = Store::memory().await.unwrap();
+        let first = store.create_agent("first", "/tmp/first").await.unwrap();
+        let second = store.create_agent("second", "/tmp/second").await.unwrap();
+        let app = test_router(store);
+
+        let relative = app
+            .clone()
+            .oneshot(
+                Request::post("/agent/reminders")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, first.id)
+                    .body(Body::from(r#"{"message":"Check CI","delay_seconds":60}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(relative.status(), StatusCode::OK);
+        let relative: Value =
+            serde_json::from_slice(&to_bytes(relative.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(relative["agent_id"], first.id);
+
+        let deliver_at = Timestamp::from_second(Timestamp::now().as_second() + 120)
+            .unwrap()
+            .to_string();
+        let absolute = app
+            .clone()
+            .oneshot(
+                Request::post("/agent/reminders")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, first.id)
+                    .body(Body::from(
+                        serde_json::json!({"message":"Review logs","deliver_at":deliver_at})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absolute.status(), StatusCode::OK);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get("/agent/reminders")
+                    .header(AGENT_ID_HEADER, first.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed: Value =
+            serde_json::from_slice(&to_bytes(listed.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 2);
+
+        let hidden = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/agent/reminders/{}", relative["id"]))
+                    .header(AGENT_ID_HEADER, second.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/agent/reminders/{}", relative["id"]))
+                    .header(AGENT_ID_HEADER, first.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let duplicate_cancel = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/agent/reminders/{}", relative["id"]))
+                    .header(AGENT_ID_HEADER, first.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_cancel.status(), StatusCode::CONFLICT);
+
+        for body in [
+            r#"{"message":"Missing time"}"#,
+            r#"{"message":"Two times","delay_seconds":1,"deliver_at":"2099-01-01T00:00:00Z"}"#,
+            r#"{"message":"Bad delay","delay_seconds":0}"#,
+            r#"{"message":"Bad time","deliver_at":"tomorrow"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/agent/reminders")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(AGENT_ID_HEADER, first.id)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let unauthenticated = app
+            .oneshot(
+                Request::get("/agent/reminders")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::FORBIDDEN);
     }
 }

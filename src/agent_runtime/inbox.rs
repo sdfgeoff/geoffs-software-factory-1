@@ -31,7 +31,22 @@ impl AgentManager {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            self.heartbeat_tick(Timestamp::now()).await;
+            let now = Timestamp::now();
+            self.reminder_tick(now).await;
+            self.heartbeat_tick(now).await;
+        }
+    }
+
+    async fn reminder_tick(&self, now: Timestamp) {
+        let agent_ids = {
+            let _operation = self.operations.lock().await;
+            self.store
+                .enqueue_due_reminders(now.as_second())
+                .await
+                .unwrap_or_default()
+        };
+        for agent_id in agent_ids {
+            self.deliver_pending(agent_id).await;
         }
     }
 
@@ -486,6 +501,21 @@ fn steer_params(thread_id: &str, turn_id: &str, message: &str) -> Value {
 }
 
 fn wake_event_message(event: &WakeEvent) -> String {
+    if event.kind == "reminder"
+        && let (Some(message), Some(requested)) = (
+            event.payload.get("message").and_then(Value::as_str),
+            event
+                .payload
+                .get("requested_delivery_at")
+                .and_then(Value::as_i64)
+                .and_then(|timestamp| Timestamp::from_second(timestamp).ok()),
+        )
+    {
+        return format!(
+            "Reminder scheduled for {requested}. Actual delivery time: {}.\n\n{message}",
+            Timestamp::now()
+        );
+    }
     event
         .payload
         .get("message")
@@ -808,6 +838,129 @@ mod tests {
             events[0].delivery_state,
             crate::domain::WakeEventState::Delivered
         );
+    }
+
+    #[tokio::test]
+    async fn due_reminder_starts_an_idle_turn_and_is_recorded_once() {
+        let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
+        let now = Timestamp::now();
+        manager
+            .store
+            .create_reminder(
+                agent.id,
+                "Check the deployment",
+                now.as_second(),
+                now.as_second() - 1,
+            )
+            .await
+            .unwrap();
+        let requested = Timestamp::from_second(now.as_second()).unwrap().to_string();
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let text = request["params"]["input"][0]["text"].as_str().unwrap();
+            assert_eq!(request["method"], "turn/start");
+            assert!(text.contains(&format!("Reminder scheduled for {requested}.")));
+            assert!(text.contains("Actual delivery time:"));
+            assert!(text.ends_with("Check the deployment"));
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-2\"}}}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        manager.reminder_tick(now).await;
+        manager.reminder_tick(now).await;
+
+        let events = manager.store.wake_events(agent.id).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].delivery_state,
+            crate::domain::WakeEventState::Delivered
+        );
+        let history = manager.store.agent_messages(agent.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].body.contains("Actual delivery time:"));
+        assert!(history[0].body.ends_with("Check the deployment"));
+    }
+
+    #[tokio::test]
+    async fn due_reminder_steers_an_active_turn() {
+        let (manager, agent, _rpc, server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        let now = Timestamp::now();
+        manager
+            .store
+            .create_reminder(agent.id, "Check logs", now.as_second(), now.as_second() - 1)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/steer");
+            assert!(
+                request["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("Check logs")
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turnId\":\"turn-1\"}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        manager.reminder_tick(now).await;
+
+        assert_eq!(manager.store.wake_events(agent.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn due_reminders_stay_pending_while_agents_cannot_run() {
+        for state in [AgentState::Paused, AgentState::Error] {
+            let store = Store::memory().await.unwrap();
+            let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+            store
+                .update_agent_runtime(agent.id, state, None, None, Some("not ready"))
+                .await
+                .unwrap();
+            let manager = AgentManager::new(
+                store.clone(),
+                "codex".into(),
+                "multi-agent-board".into(),
+                "http://127.0.0.1:1/api".into(),
+            );
+            let now = Timestamp::now();
+            store
+                .create_reminder(agent.id, "Wait", now.as_second(), now.as_second() - 1)
+                .await
+                .unwrap();
+
+            manager.reminder_tick(now).await;
+
+            let events = store.wake_events(agent.id).await.unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].delivery_state,
+                crate::domain::WakeEventState::Pending
+            );
+        }
     }
 
     #[tokio::test]

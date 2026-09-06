@@ -370,3 +370,65 @@ async fn mcp_creates_and_describes_empty_channels() {
         Some(&Value::Bool(true))
     );
 }
+
+#[tokio::test]
+async fn mcp_manages_only_the_calling_agents_reminders() {
+    let store = Store::memory().await.unwrap();
+    let first = store.create_agent("first", "/tmp/first").await.unwrap();
+    let second = store.create_agent("second", "/tmp/second").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store, agents);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+
+    let scheduled = mcp_tool(
+        &base_url,
+        first.id,
+        1,
+        "schedule_self_reminder",
+        json!({"message":"Check CI","delay_seconds":60,"agent_id":second.id}),
+    )
+    .await;
+    let reminder = tool_content(&scheduled);
+    assert_eq!(reminder["agent_id"], first.id);
+    assert_eq!(reminder["state"], "scheduled");
+
+    let listed = mcp_tool(&base_url, first.id, 2, "list_my_reminders", json!({})).await;
+    assert_eq!(tool_content(&listed).as_array().unwrap().len(), 1);
+    let hidden = mcp_tool(
+        &base_url,
+        second.id,
+        3,
+        "cancel_my_reminder",
+        json!({"reminder_id":reminder["id"]}),
+    )
+    .await;
+    assert_eq!(hidden.pointer("/result/isError"), Some(&Value::Bool(true)));
+
+    let cancelled = mcp_tool(
+        &base_url,
+        first.id,
+        4,
+        "cancel_my_reminder",
+        json!({"reminder_id":reminder["id"],"agent_id":second.id}),
+    )
+    .await;
+    assert_eq!(tool_content(&cancelled)["state"], "cancelled");
+
+    let invalid = mcp_tool(
+        &base_url,
+        first.id,
+        5,
+        "schedule_self_reminder",
+        json!({"message":"No time"}),
+    )
+    .await;
+    assert_eq!(invalid.pointer("/result/isError"), Some(&Value::Bool(true)));
+}

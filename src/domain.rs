@@ -139,6 +139,29 @@ pub struct WakeEvent {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
+pub struct Reminder {
+    pub id: i64,
+    pub agent_id: i64,
+    pub message: String,
+    pub deliver_at: i64,
+    pub state: ReminderState,
+    pub wake_event_id: Option<i64>,
+    pub enqueued_at: Option<i64>,
+    pub cancelled_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum ReminderState {
+    Scheduled,
+    Enqueued,
+    Cancelled,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
