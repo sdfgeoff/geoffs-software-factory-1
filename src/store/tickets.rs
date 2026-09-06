@@ -5,7 +5,10 @@ use crate::{
     error::AppError,
 };
 
-use super::{MessageWrite, Store, insert_message};
+use super::{
+    Store,
+    messages::{MessageWrite, insert_message},
+};
 
 #[derive(Debug)]
 pub struct NewTicket {
