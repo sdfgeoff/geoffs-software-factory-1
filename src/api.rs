@@ -16,8 +16,8 @@ use serde::Deserialize;
 use crate::{
     agent_runtime::AgentManager,
     domain::{
-        Channel, Message, Project, Ticket, TicketActivity, TicketState, WakeDeliveryPolicy,
-        WakeEvent,
+        BoardSettings, Channel, Message, Project, Ticket, TicketActivity, TicketState,
+        WakeDeliveryPolicy, WakeEvent,
     },
     error::AppError,
     store::{NewTicket, Store, TicketChanges},
@@ -25,6 +25,7 @@ use crate::{
 
 pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
+        .route("/settings", get(get_settings).put(set_settings))
         .route("/project", get(get_project).put(set_project))
         .route("/tickets", get(list_tickets).post(create_ticket))
         .route("/ticket-reservations", axum::routing::post(reserve_tickets))
@@ -54,6 +55,23 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         )
         .layer(Extension(agents))
         .with_state(store)
+}
+
+async fn get_settings(
+    Extension(agents): Extension<AgentManager>,
+) -> Result<Json<BoardSettings>, AppError> {
+    Ok(Json(agents.settings().await?))
+}
+
+async fn set_settings(
+    Extension(agents): Extension<AgentManager>,
+    Json(input): Json<BoardSettings>,
+) -> Result<Json<BoardSettings>, AppError> {
+    Ok(Json(
+        agents
+            .set_settings(input.merge_notification_channel.as_deref())
+            .await?,
+    ))
 }
 
 async fn get_project(State(store): State<Store>) -> Result<Json<Option<Project>>, AppError> {
@@ -386,6 +404,91 @@ mod tests {
                 "http://127.0.0.1:1/api".into(),
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn settings_use_environment_fallback_until_explicitly_saved() {
+        let store = Store::memory().await.unwrap();
+        let agents = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        )
+        .with_merge_notification_channel(Some("environment-merges".into()))
+        .unwrap();
+        let app = router(store.clone(), agents);
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/settings").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let settings: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(settings["merge_notification_channel"], "environment-merges");
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::put("/settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"merge_notification_channel":"not a channel"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let saved = app
+            .clone()
+            .oneshot(
+                Request::put("/settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"merge_notification_channel":"ui-merges"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let settings: Value =
+            serde_json::from_slice(&to_bytes(saved.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(settings["merge_notification_channel"], "ui-merges");
+
+        let disabled = app
+            .oneshot(
+                Request::put("/settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"merge_notification_channel":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled.status(), StatusCode::OK);
+
+        let restarted = router(
+            store.clone(),
+            AgentManager::new(
+                store,
+                "codex".into(),
+                "multi-agent-board".into(),
+                "http://127.0.0.1:1/api".into(),
+            )
+            .with_merge_notification_channel(Some("environment-merges".into()))
+            .unwrap(),
+        );
+        let response = restarted
+            .oneshot(Request::get("/settings").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let settings: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(settings["merge_notification_channel"], Value::Null);
     }
 
     #[tokio::test]

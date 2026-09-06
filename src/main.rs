@@ -7,7 +7,7 @@ use multi_agent_board::{agent_runtime::AgentManager, server, store::Store};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if matches!(std::env::args().nth(1).as_deref(), Some("-h" | "--help")) {
         println!(
-            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR                       Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA                       SQLite database path\n  MULTI_AGENT_BOARD_MERGE_NOTIFICATION_CHANNEL Channel for successful merge messages (disabled when unset)\n  MULTI_AGENT_BOARD_URL                        Board API URL (required in MCP mode)\n  MULTI_AGENT_BOARD_AGENT_ID                   Calling agent ID (required in MCP mode)\n  CODEX_BIN                                    Codex CLI path (default codex)"
+            "Usage: multi-agent-board [mcp]\n\nEnvironment:\n  MULTI_AGENT_BOARD_ADDR                       Listen address (default 127.0.0.1:3000)\n  MULTI_AGENT_BOARD_DATA                       SQLite database path\n  MULTI_AGENT_BOARD_MERGE_NOTIFICATION_CHANNEL Initial merge channel until saved in Settings\n  MULTI_AGENT_BOARD_URL                        Board API URL (required in MCP mode)\n  MULTI_AGENT_BOARD_AGENT_ID                   Calling agent ID (required in MCP mode)\n  CODEX_BIN                                    Codex CLI path (default codex)"
         );
         return Ok(());
     }

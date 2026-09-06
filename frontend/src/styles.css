@@ -92,6 +92,20 @@ h2 {
 .project-picker {
   min-width: min(34rem, 45vw);
 }
+.board-settings {
+  max-width: 40rem;
+  padding: 1.25rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.75rem;
+  background: #fffefa;
+}
+.board-settings form {
+  display: grid;
+  gap: 0.7rem;
+}
+.board-settings button {
+  justify-self: start;
+}
 .field-row,
 .create-row {
   display: flex;

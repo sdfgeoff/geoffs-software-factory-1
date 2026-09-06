@@ -1,11 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
+import {
+  channelNameInputPattern,
+  channelNamePattern,
+  channelNameRules,
+} from "../channelName";
 import type { Agent, BoardMessage, Channel } from "../types";
 import { MessageContent } from "./MessageContent";
-
-const channelNamePattern = /^[A-Za-z0-9._-]{1,64}$/;
-const channelNameRules =
-  "Use 1–64 ASCII letters, numbers, hyphens, underscores, or periods.";
 
 interface Props {
   agents: Agent[];
@@ -66,7 +67,7 @@ export function MessageBoard({
                 autoFocus
                 value={newChannel}
                 onChange={(event) => setNewChannel(event.target.value)}
-                pattern={"[A-Za-z0-9_.\\-]{1,64}"}
+                pattern={channelNameInputPattern}
                 maxLength={64}
                 aria-describedby="channel-name-rules"
                 required

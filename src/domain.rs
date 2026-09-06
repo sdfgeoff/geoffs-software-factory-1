@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BoardSettings {
+    pub merge_notification_channel: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
 pub struct Project {
     pub path: String,

@@ -7,6 +7,7 @@ use sqlx::{
 
 mod agents;
 mod messages;
+mod settings;
 mod tickets;
 mod wakes;
 

@@ -1,6 +1,9 @@
 export type TicketState = "todo" | "in_progress" | "review" | "done";
 export type AgentState =
   "paused" | "idle" | "running" | "awaiting_approval" | "error";
+export interface BoardSettings {
+  merge_notification_channel: string | null;
+}
 export interface Project {
   path: string;
   updated_at: number;

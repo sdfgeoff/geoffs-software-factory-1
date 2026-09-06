@@ -12,6 +12,7 @@ vi.mock("./api", () => ({
     agents: vi.fn(),
     channels: vi.fn(),
     project: vi.fn(),
+    settings: vi.fn(),
     tickets: vi.fn(),
   },
 }));
@@ -42,6 +43,9 @@ describe("App agent routes", () => {
     vi.stubGlobal("EventSource", MockEventSource);
     window.history.replaceState(null, "", "#agents/1/settings");
     vi.mocked(api.project).mockResolvedValue(null);
+    vi.mocked(api.settings).mockResolvedValue({
+      merge_notification_channel: null,
+    });
     vi.mocked(api.tickets).mockResolvedValue([]);
     vi.mocked(api.channels).mockResolvedValue([]);
     vi.mocked(api.agents).mockResolvedValue([agent]);
@@ -70,5 +74,16 @@ describe("App agent routes", () => {
 
     expect(window.location.hash).toBe("#agents/1");
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy();
+  });
+
+  it("opens board settings from the main navigation", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Agent settings" });
+
+    fireEvent.click(screen.getByRole("button", { name: "settings" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Board settings" }),
+    ).toBeTruthy();
   });
 });

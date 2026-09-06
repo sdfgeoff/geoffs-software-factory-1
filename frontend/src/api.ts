@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentMessage,
   BoardMessage,
+  BoardSettings,
   Channel,
   Project,
   Ticket,
@@ -26,6 +27,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  settings: () => request<BoardSettings>("/settings"),
+  setSettings: (mergeNotificationChannel: string | null) =>
+    request<BoardSettings>("/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        merge_notification_channel: mergeNotificationChannel,
+      }),
+    }),
   project: () => request<Project | null>("/project"),
   setProject: (path: string) =>
     request<Project>("/project", {

@@ -54,7 +54,7 @@ Ticket edits use revision checks. Conflicting browser or agent updates return a 
 
 Workers submit committed tickets to the Review column. The board records each ticket's implementation branch, so a worker can switch branches and work on another ticket while review is pending. An agent with `approve_review` can claim the review, request changes, or approve it. Approval makes the board verify the recorded commit, implementation branch, clean primary worktree, and target branch before merging the exact reviewed commit. The merge fast-forwards when possible or creates a merge commit when the target has advanced; conflicts are aborted and returned to the reviewer without changing the ticket. Agents never merge the primary worktree directly. Review and changes-request transitions wake the appropriate persistent agent, with notifications queued while an agent is busy.
 
-Set `MULTI_AGENT_BOARD_MERGE_NOTIFICATION_CHANNEL` to post one durable message to that channel after each successful ticket merge. Leave it unset to disable merge notifications.
+Choose a merge-notification channel in the board Settings view to post one durable message after each successful ticket merge. Clearing the field disables notifications. `MULTI_AGENT_BOARD_MERGE_NOTIFICATION_CHANNEL` supplies the initial value only until a setting is saved.
 
 ## Checks
 

@@ -200,8 +200,8 @@ impl AgentManager {
             .agent(reviewer_id)
             .await?
             .ok_or_else(|| AppError::not_found("reviewer not found"))?;
-        let (ticket, wake_agent_ids) = if let Some(channel) =
-            self.merge_notification_channel.as_deref()
+        let merge_notification_channel = self.settings().await?.merge_notification_channel;
+        let (ticket, wake_agent_ids) = if let Some(channel) = merge_notification_channel.as_deref()
         {
             let source_branch = ticket.implementation_branch.as_deref().unwrap_or("unknown");
             let body = format!(
@@ -326,8 +326,9 @@ mod tests {
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
         )
-        .with_merge_notification_channel(Some("merges".into()))
+        .with_merge_notification_channel(Some("environment-merges".into()))
         .unwrap();
+        manager.set_settings(Some("merges")).await.unwrap();
         let worker = manager.create("worker").await.unwrap();
         let reviewer = manager.create("reviewer").await.unwrap();
         let subscriber = manager.create("subscriber").await.unwrap();
@@ -519,6 +520,7 @@ mod tests {
             .set_channel_subscriptions(subscriber.id, &[])
             .await
             .unwrap();
+        manager.set_settings(None).await.unwrap();
 
         let second = store
             .create_ticket(NewTicket {
@@ -586,6 +588,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.state, TicketState::Done);
+        assert_eq!(store.messages("merges", None, None).await.unwrap().len(), 1);
         assert_eq!(
             git_text(
                 repository.to_str().unwrap(),

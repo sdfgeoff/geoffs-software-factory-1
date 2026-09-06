@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::Agent,
+    domain::{Agent, BoardSettings},
     error::AppError,
     store::{Store, validate_channel},
 };
@@ -36,7 +36,7 @@ pub struct AgentManager {
     codex_path: PathBuf,
     executable_path: PathBuf,
     board_url: String,
-    merge_notification_channel: Option<String>,
+    merge_notification_channel_fallback: Option<String>,
     processes: Arc<Mutex<HashMap<i64, Arc<RunningAgent>>>>,
     // ponytail: a global operation lock is enough for a local MVP; use per-agent locks if contention appears.
     operations: Arc<Mutex<()>>,
@@ -61,7 +61,7 @@ impl AgentManager {
             codex_path,
             executable_path,
             board_url,
-            merge_notification_channel: None,
+            merge_notification_channel_fallback: None,
             processes: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(())),
             events,
@@ -75,8 +75,35 @@ impl AgentManager {
         if let Some(channel) = channel.as_deref() {
             validate_channel(channel)?;
         }
-        self.merge_notification_channel = channel;
+        self.merge_notification_channel_fallback = channel;
         Ok(self)
+    }
+
+    pub async fn settings(&self) -> Result<BoardSettings, AppError> {
+        let merge_notification_channel = self
+            .store
+            .saved_merge_notification_channel()
+            .await?
+            .unwrap_or_else(|| self.merge_notification_channel_fallback.clone());
+        Ok(BoardSettings {
+            merge_notification_channel,
+        })
+    }
+
+    pub async fn set_settings(
+        &self,
+        merge_notification_channel: Option<&str>,
+    ) -> Result<BoardSettings, AppError> {
+        let _operation = self.operations.lock().await;
+        let merge_notification_channel = self
+            .store
+            .set_merge_notification_channel(merge_notification_channel)
+            .await?;
+        let settings = BoardSettings {
+            merge_notification_channel,
+        };
+        self.emit(0, "settings_updated", json!(settings));
+        Ok(settings)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {

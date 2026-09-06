@@ -4,12 +4,20 @@ import {
   AgentWorkspace,
   type AgentView,
 } from "./components/AgentWorkspace";
+import { BoardSettings } from "./components/BoardSettings";
 import { KanbanBoard } from "./components/KanbanBoard";
 import { MessageBoard } from "./components/MessageBoard";
 import { ProjectPicker } from "./components/ProjectPicker";
-import type { Agent, AgentEvent, Channel, Project, Ticket } from "./types";
+import type {
+  Agent,
+  AgentEvent,
+  BoardSettings as Settings,
+  Channel,
+  Project,
+  Ticket,
+} from "./types";
 
-type View = "board" | "messages" | "agents";
+type View = "board" | "messages" | "agents" | "settings";
 
 function agentRoute(hash: string) {
   const match = /^#agents\/(\d+)(\/settings)?$/.exec(hash);
@@ -26,6 +34,7 @@ export function App() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [view, setView] = useState<View>(initialAgentRoute ? "agents" : "board");
   const [selectedAgentId, setSelectedAgentId] = useState<number | null>(
     initialAgentRoute?.id ?? null,
@@ -39,17 +48,19 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [nextProject, nextTickets, nextChannels, nextAgents] =
+      const [nextProject, nextTickets, nextChannels, nextAgents, nextSettings] =
         await Promise.all([
           api.project(),
           api.tickets(),
           api.channels(),
           api.agents(),
+          api.settings(),
         ]);
       setProject(nextProject);
       setTickets(nextTickets);
       setChannels(nextChannels);
       setAgents(nextAgents);
+      setSettings(nextSettings);
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -137,7 +148,7 @@ export function App() {
         <ProjectPicker project={project} onChanged={reload} onError={report} />
       </header>
       <nav aria-label="Main views">
-        {(["board", "messages", "agents"] as View[]).map((item) => (
+        {(["board", "messages", "agents", "settings"] as View[]).map((item) => (
           <button
             key={item}
             className={view === item ? "active" : "ghost"}
@@ -188,6 +199,14 @@ export function App() {
           onViewChange={(nextView) => {
             if (selectedAgentId) navigateAgent(selectedAgentId, nextView);
           }}
+          onChanged={reload}
+          onError={report}
+        />
+      )}
+      {view === "settings" && settings && (
+        <BoardSettings
+          settings={settings}
+          channels={channels}
           onChanged={reload}
           onError={report}
         />
