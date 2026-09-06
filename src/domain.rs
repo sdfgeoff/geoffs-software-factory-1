@@ -8,13 +8,16 @@ pub struct BoardSettings {
 
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
 pub struct Project {
+    pub id: i64,
     pub path: String,
+    pub archived_at: Option<i64>,
     pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
 pub struct Ticket {
     pub id: i64,
+    pub project_id: i64,
     pub title: String,
     pub description: String,
     pub state: TicketState,
@@ -24,6 +27,8 @@ pub struct Ticket {
     pub implementation_branch: Option<String>,
     pub review_commit: Option<String>,
     pub review_target_branch: Option<String>,
+    pub review_project_id: Option<i64>,
+    pub review_project_path: Option<String>,
     pub reviewer_id: Option<i64>,
     pub review_feedback: Option<String>,
     #[sqlx(skip)]

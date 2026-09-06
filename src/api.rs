@@ -117,12 +117,15 @@ async fn create_ticket(
     Json(input): Json<CreateTicketRequest>,
 ) -> Result<Json<Ticket>, AppError> {
     let (ticket, wake_agent_ids) = store
-        .create_ticket_with_wakes(NewTicket {
-            title: input.title,
-            description: input.description,
-            blocker_ids: input.blocker_ids,
-            created_by_agent_id: agent_header(&headers)?,
-        })
+        .create_ticket_for_project_with_wakes(
+            NewTicket {
+                title: input.title,
+                description: input.description,
+                blocker_ids: input.blocker_ids,
+                created_by_agent_id: agent_header(&headers)?,
+            },
+            input.project_id,
+        )
         .await?;
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
@@ -584,6 +587,18 @@ mod tests {
     #[tokio::test]
     async fn tickets_round_trip_over_http() {
         let app = test_router(Store::memory().await.unwrap());
+        let missing_project = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"project_id":999,"title":"Wrong project"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_project.status(), StatusCode::BAD_REQUEST);
+
         let response = app
             .clone()
             .oneshot(
@@ -598,6 +613,7 @@ mod tests {
         let ticket: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
+        assert_eq!(ticket["project_id"], 1);
 
         let response = app
             .oneshot(

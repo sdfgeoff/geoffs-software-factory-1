@@ -37,6 +37,7 @@ const agent: Agent = {
 
 const ticket: Ticket = {
   id: 17,
+  project_id: 1,
   title: "Move agent settings",
   description: "",
   state: "in_progress",
@@ -46,6 +47,8 @@ const ticket: Ticket = {
   implementation_branch: null,
   review_commit: null,
   review_target_branch: null,
+  review_project_id: null,
+  review_project_path: null,
   reviewer_id: null,
   review_feedback: null,
   blocker_ids: [],

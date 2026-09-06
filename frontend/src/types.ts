@@ -5,11 +5,14 @@ export interface BoardSettings {
   merge_notification_channel: string | null;
 }
 export interface Project {
+  id: number;
   path: string;
+  archived_at: number | null;
   updated_at: number;
 }
 export interface Ticket {
   id: number;
+  project_id: number;
   title: string;
   description: string;
   state: TicketState;
@@ -19,6 +22,8 @@ export interface Ticket {
   implementation_branch: string | null;
   review_commit: string | null;
   review_target_branch: string | null;
+  review_project_id: number | null;
+  review_project_path: string | null;
   reviewer_id: number | null;
   review_feedback: string | null;
   blocker_ids: number[];
