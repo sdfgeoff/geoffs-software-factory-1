@@ -329,6 +329,10 @@ mod tests {
         .with_merge_notification_channel(Some("environment-merges".into()))
         .unwrap();
         manager.set_settings(Some("merges")).await.unwrap();
+        store
+            .create_channel("merges", "Merged ticket notifications")
+            .await
+            .unwrap();
         let worker = manager.create("worker").await.unwrap();
         let reviewer = manager.create("reviewer").await.unwrap();
         let subscriber = manager.create("subscriber").await.unwrap();
@@ -416,20 +420,15 @@ mod tests {
         assert_eq!(unchanged.state, TicketState::Review);
         assert_eq!(unchanged.revision, ticket.revision);
         assert!(
-            !store
-                .channels()
+            store
+                .messages("merges", None, None)
                 .await
                 .unwrap()
-                .iter()
-                .any(|channel| channel.name == "merges")
+                .is_empty()
         );
         assert!(events.try_recv().is_err());
         store
             .execute_test_sql("DROP TRIGGER fail_merge_notification")
-            .await
-            .unwrap();
-        store
-            .execute_test_sql("INSERT INTO channels (name) VALUES ('merges')")
             .await
             .unwrap();
         manager

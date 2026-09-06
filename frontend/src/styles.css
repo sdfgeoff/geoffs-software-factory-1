@@ -438,6 +438,10 @@ aside button.selected {
   background: #f9ded7;
   color: #7b2118;
 }
+.channel-description {
+  margin: -0.5rem 0 1rem;
+  color: #6c6256;
+}
 .capabilities {
   margin: 0.8rem 0;
   padding: 0.8rem;

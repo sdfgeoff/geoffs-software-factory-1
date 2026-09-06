@@ -18,11 +18,38 @@ pub(super) struct MessageWrite<'a> {
 impl Store {
     pub async fn channels(&self) -> Result<Vec<Channel>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT c.name, MAX(m.created_at) AS most_recent_message_at FROM channels c \
+            "SELECT c.name, c.description, MAX(m.created_at) AS most_recent_message_at FROM channels c \
              LEFT JOIN messages m ON m.channel_name = c.name GROUP BY c.name ORDER BY c.name",
         )
         .fetch_all(&self.pool)
         .await
+    }
+
+    pub async fn channel(&self, name: &str) -> Result<Option<Channel>, AppError> {
+        validate_channel(name)?;
+        Ok(sqlx::query_as(
+            "SELECT c.name, c.description, MAX(m.created_at) AS most_recent_message_at \
+             FROM channels c LEFT JOIN messages m ON m.channel_name = c.name \
+             WHERE c.name = ? GROUP BY c.name",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn create_channel(&self, name: &str, description: &str) -> Result<Channel, AppError> {
+        validate_channel(name)?;
+        validate_channel_description(description)?;
+        let result =
+            sqlx::query("INSERT OR IGNORE INTO channels (name, description) VALUES (?, ?)")
+                .bind(name)
+                .bind(description)
+                .execute(&self.pool)
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::conflict("channel already exists"));
+        }
+        Ok(self.channel(name).await?.unwrap())
     }
 
     pub async fn messages(
@@ -241,10 +268,16 @@ pub(super) async fn insert_message(
             "message deduplication key must contain between 1 and 500 characters",
         ));
     }
-    sqlx::query("INSERT OR IGNORE INTO channels (name) VALUES (?)")
-        .bind(message.channel)
-        .execute(&mut **transaction)
-        .await?;
+    let channel_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM channels WHERE name = ?)")
+            .bind(message.channel)
+            .fetch_one(&mut **transaction)
+            .await?;
+    if !channel_exists {
+        return Err(AppError::not_found(
+            "channel not found; create it before posting",
+        ));
+    }
     let result = sqlx::query(
         "INSERT OR IGNORE INTO messages \
          (channel_name, agent_id, author, body, deduplication_key) VALUES (?, ?, ?, ?, ?)",
@@ -329,6 +362,15 @@ pub(crate) fn validate_channel(channel: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_channel_description(description: &str) -> Result<(), AppError> {
+    if description.chars().count() > 500 {
+        return Err(AppError::bad_request(
+            "channel description must contain at most 500 characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_message(author: &str, body: &str) -> Result<(), AppError> {
     if author.trim().is_empty() || author.chars().count() > 100 {
         return Err(AppError::bad_request(
@@ -353,11 +395,52 @@ fn mentions_agent(body: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::SqlitePool;
+
     use super::*;
 
     #[tokio::test]
-    async fn posting_creates_a_channel() {
+    async fn channel_description_migration_preserves_existing_channels() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE channels (name TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO channels (name) VALUES ('general')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0018_channel_descriptions.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let description: String =
+            sqlx::query_scalar("SELECT description FROM channels WHERE name = 'general'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(description, "");
+    }
+
+    #[tokio::test]
+    async fn channels_are_created_explicitly_with_descriptions() {
         let store = Store::memory().await.unwrap();
+        let channel = store
+            .create_channel("backend", "Backend coordination")
+            .await
+            .unwrap();
+        assert_eq!(channel.description, "Backend coordination");
+        assert!(
+            store
+                .messages("backend", None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         store
             .post_message("backend", None, "Ada", "Schema is ready")
             .await
@@ -374,11 +457,31 @@ mod tests {
                 .body,
             "Schema is ready"
         );
+        assert!(store.create_channel("backend", "Duplicate").await.is_err());
+        assert!(store.create_channel("bad name", "Invalid").await.is_err());
+        assert!(
+            store
+                .create_channel("too-long", &"x".repeat(501))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn posting_requires_an_existing_channel() {
+        let store = Store::memory().await.unwrap();
+        let error = store
+            .post_message("missing", None, "Ada", "Schema is ready")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("create it before posting"));
     }
 
     #[tokio::test]
     async fn idempotent_messages_are_inserted_once() {
         let store = Store::memory().await.unwrap();
+        store.create_channel("merges", "").await.unwrap();
 
         let first = store
             .post_message_once("merges", None, "board", "Merged", "merge:1")

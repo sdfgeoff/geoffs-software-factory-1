@@ -2,7 +2,9 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use multi_agent_board_protocol::{AGENT_ID_HEADER, ErrorResponse, PostMessageRequest};
+use multi_agent_board_protocol::{
+    AGENT_ID_HEADER, CreateChannelRequest, ErrorResponse, PostMessageRequest,
+};
 
 #[derive(Debug)]
 struct McpError(String);
@@ -206,8 +208,13 @@ fn tools() -> Value {
         ),
         tool(
             "list_message_board_channels",
-            "List channels with latest message times",
+            "List channels with descriptions and latest message times",
             json!({"type":"object","properties":{}})
+        ),
+        tool(
+            "create_message_board_channel",
+            "Create a message-board channel",
+            json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"}},"required":["name"]})
         ),
         tool(
             "list_my_channel_subscriptions",
@@ -236,7 +243,7 @@ fn tools() -> Value {
         ),
         tool(
             "post_to_message_board",
-            "Post a message, creating the channel if needed",
+            "Post a message to an existing channel",
             json!({"type":"object","properties":{"channel_name":{"type":"string"},"author":{"type":"string"},"message":{"type":"string"}},"required":["channel_name","author","message"]})
         )
     ])
@@ -326,6 +333,23 @@ async fn call_tool(
             review_request(board, Method::POST, &args, "approve-review").await?
         }
         "list_message_board_channels" => board.request(Method::GET, "/channels", None).await?,
+        "create_message_board_channel" => {
+            let name = string(&args, "name")?;
+            let description = optional_string(&args, "description").unwrap_or_default();
+            board
+                .request(
+                    Method::POST,
+                    "/channels",
+                    Some(
+                        serde_json::to_value(CreateChannelRequest {
+                            name: name.into(),
+                            description: description.into(),
+                        })
+                        .expect("channel request is serializable"),
+                    ),
+                )
+                .await?
+        }
         "list_my_channel_subscriptions" => {
             board
                 .request(Method::GET, "/agent/channel-subscriptions", None)
@@ -372,13 +396,17 @@ async fn call_tool(
             } else {
                 format!("?{}", query.join("&"))
             };
-            board
+            let channel_details = board
+                .request(Method::GET, &format!("/channels/{channel}"), None)
+                .await?;
+            let messages = board
                 .request(
                     Method::GET,
                     &format!("/channels/{channel}/messages{suffix}"),
                     None,
                 )
-                .await?
+                .await?;
+            json!({"channel": channel_details, "messages": messages})
         }
         "post_to_message_board" => {
             let channel = string(&args, "channel_name")?.to_owned();

@@ -66,6 +66,11 @@ export const api = {
       }),
     }),
   channels: () => request<Channel[]>("/channels"),
+  createChannel: (name: string, description: string) =>
+    request<Channel>("/channels", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    }),
   messages: (channel: string) =>
     request<BoardMessage[]>(
       `/channels/${encodeURIComponent(channel)}/messages`,

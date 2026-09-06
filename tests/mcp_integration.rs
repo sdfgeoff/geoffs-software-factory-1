@@ -150,6 +150,10 @@ async fn mcp_manages_only_the_calling_agents_channel_subscriptions() {
     let first = store.create_agent("first", "/tmp/first").await.unwrap();
     let second = store.create_agent("second", "/tmp/second").await.unwrap();
     store
+        .create_channel("backend", "Backend work")
+        .await
+        .unwrap();
+    store
         .post_message("backend", None, "human", "Ready")
         .await
         .unwrap();
@@ -260,4 +264,109 @@ async fn mcp_manages_only_the_calling_agents_channel_subscriptions() {
                 .contains(expected)
         );
     }
+}
+
+#[tokio::test]
+async fn mcp_creates_and_describes_empty_channels() {
+    let store = Store::memory().await.unwrap();
+    let agent = store.create_agent("first", "/tmp/first").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store, agents);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+
+    let created = mcp_tool(
+        &base_url,
+        agent.id,
+        1,
+        "create_message_board_channel",
+        json!({"name":"architecture","description":"Architecture decisions"}),
+    )
+    .await;
+    assert_eq!(
+        tool_content(&created)["description"],
+        "Architecture decisions"
+    );
+
+    let listed = mcp_tool(
+        &base_url,
+        agent.id,
+        2,
+        "list_message_board_channels",
+        json!({}),
+    )
+    .await;
+    assert_eq!(tool_content(&listed)[0]["name"], "architecture");
+    assert_eq!(
+        tool_content(&listed)[0]["description"],
+        "Architecture decisions"
+    );
+
+    let read = mcp_tool(
+        &base_url,
+        agent.id,
+        3,
+        "read_message_board_channel",
+        json!({"channel_name":"architecture"}),
+    )
+    .await;
+    assert_eq!(
+        tool_content(&read)["channel"]["description"],
+        "Architecture decisions"
+    );
+    assert_eq!(tool_content(&read)["messages"], json!([]));
+
+    for (id, name, arguments, expected) in [
+        (
+            4,
+            "create_message_board_channel",
+            json!({"name":"architecture"}),
+            "already exists",
+        ),
+        (
+            5,
+            "create_message_board_channel",
+            json!({"name":"bad channel"}),
+            "channel names may contain",
+        ),
+        (
+            6,
+            "post_to_message_board",
+            json!({"channel_name":"missing","author":"first","message":"No channel"}),
+            "create it before posting",
+        ),
+    ] {
+        let response = mcp_tool(&base_url, agent.id, id, name, arguments).await;
+        assert_eq!(
+            response.pointer("/result/isError"),
+            Some(&Value::Bool(true))
+        );
+        assert!(
+            response
+                .pointer("/result/content/0/text")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains(expected)
+        );
+    }
+
+    let unauthenticated = mcp_tool(
+        &base_url,
+        999,
+        7,
+        "create_message_board_channel",
+        json!({"name":"unauthorized"}),
+    )
+    .await;
+    assert_eq!(
+        unauthenticated.pointer("/result/isError"),
+        Some(&Value::Bool(true))
+    );
 }

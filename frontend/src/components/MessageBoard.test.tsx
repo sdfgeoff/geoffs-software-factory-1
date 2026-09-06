@@ -11,7 +11,7 @@ import type { Agent } from "../types";
 import { MessageBoard } from "./MessageBoard";
 
 vi.mock("../api", () => ({
-  api: { messages: vi.fn(), postMessage: vi.fn() },
+  api: { createChannel: vi.fn(), messages: vi.fn(), postMessage: vi.fn() },
 }));
 
 const agent: Agent = {
@@ -52,7 +52,7 @@ describe("MessageBoard", () => {
     render(
       <MessageBoard
         agents={[agent]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         refresh={0}
         onSelectAgent={onSelectAgent}
         onChanged={async () => {}}
@@ -82,7 +82,7 @@ describe("MessageBoard", () => {
     render(
       <MessageBoard
         agents={[agent]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         refresh={0}
         onSelectAgent={onSelectAgent}
         onChanged={async () => {}}
@@ -94,12 +94,12 @@ describe("MessageBoard", () => {
     expect(onSelectAgent).toHaveBeenCalledWith(agent.id);
   });
 
-  it("enters and cancels explicit channel creation with a visible destination", async () => {
+  it("enters and cancels explicit channel creation", async () => {
     vi.mocked(api.messages).mockResolvedValue([]);
     render(
       <MessageBoard
         agents={[]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         refresh={0}
         onSelectAgent={() => {}}
         onChanged={async () => {}}
@@ -107,17 +107,16 @@ describe("MessageBoard", () => {
       />,
     );
 
-    expect(screen.queryByRole("textbox", { name: "Channel name" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "+ New channel" }));
-    const name = screen.getByRole("textbox", { name: "Channel name" });
+    const name = screen.getByRole("textbox", { name: "Name" });
+    expect(screen.getByRole("textbox", { name: "Description" })).toBeTruthy();
     expect(screen.getByText(/1–64 ASCII letters/)).toBeTruthy();
     fireEvent.change(name, { target: { value: "backend.v2" } });
-    expect(
-      screen.getByRole("button", { name: "Post to #backend.v2" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("textbox", { name: "Channel name" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Post to #general" }),
     ).toBeTruthy();
@@ -129,8 +128,8 @@ describe("MessageBoard", () => {
       <MessageBoard
         agents={[]}
         channels={[
-          { name: "general", most_recent_message_at: 0 },
-          { name: "backend", most_recent_message_at: 0 },
+          { name: "general", description: "", most_recent_message_at: 0 },
+          { name: "backend", description: "", most_recent_message_at: 0 },
         ]}
         refresh={0}
         onSelectAgent={() => {}}
@@ -140,37 +139,41 @@ describe("MessageBoard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "+ New channel" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Channel name" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
       target: { value: "draft" },
     });
+    fireEvent.change(screen.getByRole("textbox", { name: "Description" }), {
+      target: { value: "Draft description" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "#backend" }));
-    expect(screen.queryByRole("textbox", { name: "Channel name" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Post to #backend" }),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "+ New channel" }));
     expect(
-      (screen.getByRole("textbox", { name: "Channel name" }) as HTMLInputElement)
+      (screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement)
+        .value,
+    ).toBe("");
+    expect(
+      (screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement)
         .value,
     ).toBe("");
   });
 
-  it("blocks invalid names and creates a valid channel with its first post", async () => {
+  it("creates and selects an empty channel with its description", async () => {
     vi.mocked(api.messages).mockResolvedValue([]);
-    vi.mocked(api.postMessage).mockResolvedValue({
-      id: 1,
-      channel_name: "ops.v2",
-      agent_id: null,
-      author: "human",
-      body: "First post",
-      created_at: 0,
+    vi.mocked(api.createChannel).mockResolvedValue({
+      name: "ops.v2",
+      description: "Operations coordination",
+      most_recent_message_at: null,
     });
     const onChanged = vi.fn().mockResolvedValue(undefined);
     render(
       <MessageBoard
         agents={[]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         refresh={0}
         onSelectAgent={() => {}}
         onChanged={onChanged}
@@ -179,31 +182,92 @@ describe("MessageBoard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "+ New channel" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Channel name" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
       target: { value: "bad name" },
     });
-    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
-      target: { value: "First post" },
-    });
-    const invalidPost = screen.getByRole("button", {
-      name: "Post to #bad name",
-    });
-    expect(invalidPost.hasAttribute("disabled")).toBe(true);
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save.hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("alert").textContent).toContain("1–64 ASCII");
-    fireEvent.click(invalidPost);
-    expect(api.postMessage).not.toHaveBeenCalled();
+    fireEvent.click(save);
+    expect(api.createChannel).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Channel name" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
       target: { value: "ops.v2" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Post to #ops.v2" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Description" }), {
+      target: { value: "x".repeat(501) },
+    });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("500 characters");
+    fireEvent.change(screen.getByRole("textbox", { name: "Description" }), {
+      target: { value: "Operations coordination" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(api.postMessage).toHaveBeenCalledWith("ops.v2", "First post"),
+      expect(api.createChannel).toHaveBeenCalledWith(
+        "ops.v2",
+        "Operations coordination",
+      ),
     );
     expect(onChanged).toHaveBeenCalled();
-    expect(screen.queryByRole("textbox", { name: "Channel name" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Post to #ops.v2" }),
     ).toBeTruthy();
+    expect(screen.getByText("No messages in #ops.v2 yet.")).toBeTruthy();
+  });
+
+  it("shows a channel description beneath its name", async () => {
+    vi.mocked(api.messages).mockResolvedValue([]);
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          {
+            name: "general",
+            description: "Team-wide coordination",
+            most_recent_message_at: null,
+          },
+        ]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("Team-wide coordination")).toBeTruthy();
+  });
+
+  it("reports duplicate channel creation errors", async () => {
+    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.createChannel).mockRejectedValue(
+      new Error("channel already exists"),
+    );
+    const onError = vi.fn();
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          { name: "general", description: "", most_recent_message_at: null },
+        ]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={onError}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "+ New channel" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "general" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "channel already exists" }),
+      ),
+    );
   });
 });

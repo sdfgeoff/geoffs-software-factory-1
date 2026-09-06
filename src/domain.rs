@@ -65,6 +65,7 @@ pub enum TicketState {
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
 pub struct Channel {
     pub name: String,
+    pub description: String,
     pub most_recent_message_at: Option<i64>,
 }
 

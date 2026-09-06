@@ -75,7 +75,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
         selectedAgentId={agent.id}
         view="settings"
@@ -100,7 +100,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
         selectedAgentId={agent.id}
         view="settings"
@@ -127,7 +127,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
         selectedAgentId={agent.id}
         view="settings"
@@ -176,7 +176,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[agent]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
         selectedAgentId={agent.id}
         view="settings"
@@ -204,7 +204,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[{ ...agent, state: "running", active_turn_id: "turn-1" }]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
         selectedAgentId={agent.id}
         view="chat"
@@ -234,7 +234,7 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         agents={[{ ...agent, state: "error", last_error: "Turn failed" }]}
-        channels={[{ name: "general", most_recent_message_at: 0 }]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
         selectedAgentId={agent.id}
         view="chat"

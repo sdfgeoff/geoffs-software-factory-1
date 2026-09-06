@@ -33,6 +33,7 @@ export interface TicketBlocker {
 }
 export interface Channel {
   name: string;
+  description: string;
   most_recent_message_at: number | null;
 }
 export interface BoardMessage {

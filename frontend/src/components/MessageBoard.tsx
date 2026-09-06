@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import {
+  channelDescriptionMaxLength,
+  channelDescriptionRules,
   channelNameInputPattern,
   channelNamePattern,
   channelNameRules,
@@ -30,21 +32,34 @@ export function MessageBoard({
   const [body, setBody] = useState("");
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [newChannel, setNewChannel] = useState("");
-  const destination = creatingChannel ? newChannel : channel;
-  const validDestination =
-    !creatingChannel || channelNamePattern.test(newChannel);
+  const [newDescription, setNewDescription] = useState("");
+  const validNewChannel = channelNamePattern.test(newChannel);
+  const validDescription =
+    [...newDescription].length <= channelDescriptionMaxLength;
+  const selectedChannel = channels.find((item) => item.name === channel);
   useEffect(() => {
     void api.messages(channel).then(setMessages).catch(onError);
   }, [channel, refresh, onError]);
   async function post(event: FormEvent) {
     event.preventDefault();
-    if (!validDestination) return;
     try {
-      await api.postMessage(destination, body);
+      await api.postMessage(channel, body);
       setBody("");
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function createChannel(event: FormEvent) {
+    event.preventDefault();
+    if (!validNewChannel || !validDescription) return;
+    try {
+      const created = await api.createChannel(newChannel, newDescription);
+      setChannel(created.name);
+      setMessages([]);
       setCreatingChannel(false);
       setNewChannel("");
-      setChannel(destination);
+      setNewDescription("");
       await onChanged();
     } catch (error) {
       onError(error);
@@ -54,15 +69,16 @@ export function MessageBoard({
     setChannel(name);
     setCreatingChannel(false);
     setNewChannel("");
+    setNewDescription("");
   }
   return (
     <section className="messages-layout">
       <aside>
         <h2>Channels</h2>
         {creatingChannel ? (
-          <div className="channel-setting">
+          <form className="channel-setting" onSubmit={createChannel}>
             <label>
-              Channel name
+              Name
               <input
                 autoFocus
                 value={newChannel}
@@ -74,22 +90,48 @@ export function MessageBoard({
               />
             </label>
             <small id="channel-name-rules">{channelNameRules}</small>
-            {newChannel && !validDestination && (
+            {newChannel && !validNewChannel && (
               <p className="inline-error" role="alert">
                 {channelNameRules}
               </p>
             )}
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                setCreatingChannel(false);
-                setNewChannel("");
-              }}
-            >
-              Cancel
-            </button>
-          </div>
+            <label>
+              Description
+              <textarea
+                value={newDescription}
+                onChange={(event) => setNewDescription(event.target.value)}
+                maxLength={channelDescriptionMaxLength}
+                aria-describedby="channel-description-rules"
+              />
+            </label>
+            <small id="channel-description-rules">
+              {channelDescriptionRules}
+            </small>
+            {!validDescription && (
+              <p className="inline-error" role="alert">
+                {channelDescriptionRules}
+              </p>
+            )}
+            <div className="field-row">
+              <button
+                type="submit"
+                disabled={!validNewChannel || !validDescription}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setCreatingChannel(false);
+                  setNewChannel("");
+                  setNewDescription("");
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
         ) : (
           <button
             type="button"
@@ -111,7 +153,13 @@ export function MessageBoard({
       </aside>
       <div className="conversation">
         <h2>#{channel}</h2>
+        {selectedChannel?.description && (
+          <p className="channel-description">{selectedChannel.description}</p>
+        )}
         <div className="message-list">
+          {messages.length === 0 && (
+            <p className="empty">No messages in #{channel} yet.</p>
+          )}
           {messages.map((message) => {
             const agent = agents.find(
               (item) =>
@@ -148,9 +196,7 @@ export function MessageBoard({
               required
             />
           </label>
-          <button type="submit" disabled={!validDestination}>
-            Post to #{destination || "…"}
-          </button>
+          <button type="submit">Post to #{channel}</button>
         </form>
       </div>
     </section>

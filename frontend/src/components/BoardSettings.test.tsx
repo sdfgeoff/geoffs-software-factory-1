@@ -22,8 +22,8 @@ describe("BoardSettings", () => {
       <BoardSettings
         settings={{ merge_notification_channel: "merges" }}
         channels={[
-          { name: "general", most_recent_message_at: null },
-          { name: "merges", most_recent_message_at: null },
+          { name: "general", description: "", most_recent_message_at: null },
+          { name: "merges", description: "", most_recent_message_at: null },
         ]}
         onChanged={onChanged}
         onError={vi.fn()}

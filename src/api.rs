@@ -7,8 +7,8 @@ use axum::{
     routing::get,
 };
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, ClaimTicketRequest, CreateTicketRequest, CreateWakeEventRequest,
-    MessageRangeQuery, PostMessageRequest, ReserveTicketsRequest,
+    AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
+    CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, ReserveTicketsRequest,
     SetAgentChannelSubscriptionsRequest, SetProjectRequest,
 };
 use serde::Deserialize;
@@ -48,7 +48,8 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
             "/agent/channel-subscriptions/remove",
             axum::routing::post(remove_my_channel_subscriptions),
         )
-        .route("/channels", get(list_channels))
+        .route("/channels", get(list_channels).post(create_channel))
+        .route("/channels/{name}", get(get_channel))
         .route(
             "/channels/{name}/messages",
             get(read_messages).post(post_message),
@@ -345,6 +346,34 @@ async fn list_channels(State(store): State<Store>) -> Result<Json<Vec<Channel>>,
     Ok(Json(store.channels().await?))
 }
 
+async fn get_channel(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+) -> Result<Json<Channel>, AppError> {
+    store
+        .channel(&name)
+        .await?
+        .map(Json)
+        .ok_or_else(|| AppError::not_found("channel not found"))
+}
+
+async fn create_channel(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    Json(input): Json<CreateChannelRequest>,
+) -> Result<Json<Channel>, AppError> {
+    if let Some(agent_id) = agent_header(&headers)?
+        && store.agent(agent_id).await?.is_none()
+    {
+        return Err(AppError::forbidden("agent identity is invalid"));
+    }
+    Ok(Json(
+        store
+            .create_channel(&input.name, &input.description)
+            .await?,
+    ))
+}
+
 async fn read_messages(
     State(store): State<Store>,
     Path(name): Path<String>,
@@ -489,6 +518,66 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(settings["merge_notification_channel"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn channels_are_created_before_messages_and_expose_descriptions() {
+        let store = Store::memory().await.unwrap();
+        let app = test_router(store);
+        let create = || {
+            Request::post("/channels")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"design","description":"Design decisions"}"#,
+                ))
+                .unwrap()
+        };
+
+        let response = app.clone().oneshot(create()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let channel: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(channel["description"], "Design decisions");
+        assert_eq!(channel["most_recent_message_at"], Value::Null);
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/channels").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let channels: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(channels[0]["name"], "design");
+        assert_eq!(channels[0]["description"], "Design decisions");
+
+        assert_eq!(
+            app.clone().oneshot(create()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::post("/channels")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"bad channel"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let missing_post = app
+            .oneshot(
+                Request::post("/channels/missing/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"author":"human","body":"Hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_post.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
