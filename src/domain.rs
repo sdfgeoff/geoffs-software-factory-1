@@ -11,7 +11,9 @@ pub struct BoardSettings {
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
 pub struct Project {
     pub id: i64,
+    pub name: String,
     pub path: String,
+    pub default_branch: String,
     pub archived_at: Option<i64>,
     pub updated_at: i64,
 }

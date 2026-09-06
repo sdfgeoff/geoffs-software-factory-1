@@ -17,6 +17,13 @@ pub struct SetProjectRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct RegisterProjectRequest {
+    pub name: String,
+    pub path: String,
+    pub default_branch: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateTicketRequest {
     pub project_id: Option<i64>,
     pub title: String,

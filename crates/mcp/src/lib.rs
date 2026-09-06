@@ -157,6 +157,21 @@ fn tools() -> Value {
             json!({"type":"object","properties":{}})
         ),
         tool(
+            "list_projects",
+            "List registered project roots",
+            json!({"type":"object","properties":{}})
+        ),
+        tool(
+            "register_project",
+            "Register a Git project root",
+            json!({"type":"object","properties":{"name":{"type":"string"},"path":{"type":"string"},"default_branch":{"type":"string"}},"required":["name","path","default_branch"]})
+        ),
+        tool(
+            "archive_project",
+            "Archive a project with no active work",
+            json!({"type":"object","properties":{"project_id":{"type":"integer"}},"required":["project_id"]})
+        ),
+        tool(
             "create_ticket",
             "Create a board ticket",
             json!({"type":"object","properties":{"project_id":{"type":"integer"},"title":{"type":"string"},"description":{"type":"string"},"blocker_ids":{"type":"array","items":{"type":"integer"}}},"required":["title"]})
@@ -290,6 +305,23 @@ async fn call_tool(
     let args = arguments.cloned().unwrap_or_else(|| json!({}));
     let value = match name {
         "list_tickets" => board.request(Method::GET, "/tickets", None).await?,
+        "list_projects" => board.request(Method::GET, "/projects", None).await?,
+        "register_project" => {
+            string(&args, "name")?;
+            string(&args, "path")?;
+            string(&args, "default_branch")?;
+            board.request(Method::POST, "/projects", Some(args)).await?
+        }
+        "archive_project" => {
+            let project_id = integer(&args, "project_id")?;
+            board
+                .request(
+                    Method::POST,
+                    &format!("/projects/{project_id}/archive"),
+                    None,
+                )
+                .await?
+        }
         "create_ticket" => {
             string(&args, "title")?;
             board.request(Method::POST, "/tickets", Some(args)).await?

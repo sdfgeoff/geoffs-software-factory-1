@@ -9,8 +9,9 @@ use axum::{
 use jiff::Timestamp;
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
-    CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, ReserveTicketsRequest,
-    ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest, SetProjectRequest,
+    CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, RegisterProjectRequest,
+    ReserveTicketsRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
+    SetProjectRequest,
 };
 use serde::Deserialize;
 
@@ -28,6 +29,11 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
         .route("/settings", get(get_settings).put(set_settings))
         .route("/project", get(get_project).put(set_project))
+        .route("/projects", get(list_projects).post(register_project))
+        .route(
+            "/projects/{id}/archive",
+            axum::routing::post(archive_project),
+        )
         .route("/tickets", get(list_tickets).post(create_ticket))
         .route("/ticket-reservations", axum::routing::post(reserve_tickets))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
@@ -92,27 +98,116 @@ async fn set_project(
     State(store): State<Store>,
     Json(input): Json<SetProjectRequest>,
 ) -> Result<Json<Project>, AppError> {
-    let path = PathBuf::from(input.path);
-    let canonical = path
+    let canonical = canonical_git_root(&input.path).await?;
+    let path = canonical
+        .to_str()
+        .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
+    let project = if let Some(project) = store.project_by_path(path).await? {
+        store.select_project(project.id).await?
+    } else {
+        let name = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| AppError::bad_request("project name is not valid UTF-8"))?;
+        let default_branch = current_branch(&canonical).await?;
+        let project = store.register_project(name, path, &default_branch).await?;
+        store.select_project(project.id).await?
+    };
+    Ok(Json(project))
+}
+
+async fn list_projects(State(store): State<Store>) -> Result<Json<Vec<Project>>, AppError> {
+    Ok(Json(store.projects().await?))
+}
+
+async fn register_project(
+    State(store): State<Store>,
+    Json(input): Json<RegisterProjectRequest>,
+) -> Result<Json<Project>, AppError> {
+    let canonical = canonical_git_root(&input.path).await?;
+    validate_default_branch(&canonical, &input.default_branch).await?;
+    let path = canonical
+        .to_str()
+        .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
+    Ok(Json(
+        store
+            .register_project(&input.name, path, &input.default_branch)
+            .await?,
+    ))
+}
+
+async fn archive_project(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+) -> Result<Json<Project>, AppError> {
+    Ok(Json(store.archive_project(id).await?))
+}
+
+async fn canonical_git_root(path: &str) -> Result<PathBuf, AppError> {
+    let canonical = PathBuf::from(path)
         .canonicalize()
         .map_err(|_| AppError::bad_request("project path does not exist"))?;
-    if !canonical.is_dir() || !canonical.join(".git").exists() {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&canonical)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .await
+        .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
+    if !output.status.success() {
         return Err(AppError::bad_request(
             "project path must be a Git working tree",
         ));
     }
-    let path = canonical
-        .to_str()
-        .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
-    if let Some(current) = store.project().await?
-        && current.path != path
-        && !store.agents().await?.is_empty()
-    {
-        return Err(AppError::conflict(
-            "cannot change projects while agents exist",
+    let root = String::from_utf8(output.stdout)
+        .map_err(|_| AppError::bad_request("project path is not valid UTF-8"))?;
+    PathBuf::from(root.trim())
+        .canonicalize()
+        .map_err(|_| AppError::bad_request("Git root does not exist"))
+}
+
+async fn validate_default_branch(root: &std::path::Path, branch: &str) -> Result<(), AppError> {
+    let branch = branch.trim();
+    let valid_name = tokio::process::Command::new("git")
+        .args(["check-ref-format", "--branch", branch])
+        .output()
+        .await
+        .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
+    if !valid_name.status.success() {
+        return Err(AppError::bad_request("default branch name is invalid"));
+    }
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}^{{commit}}"))
+        .output()
+        .await
+        .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
+    if !output.status.success() {
+        return Err(AppError::bad_request(
+            "default branch does not exist in the project",
         ));
     }
-    Ok(Json(store.set_project(path).await?))
+    Ok(())
+}
+
+async fn current_branch(root: &std::path::Path) -> Result<String, AppError> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .output()
+        .await
+        .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
+    if !output.status.success() {
+        return Err(AppError::bad_request(
+            "project must have a checked-out default branch",
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|branch| branch.trim().to_owned())
+        .map_err(|_| AppError::bad_request("default branch is not valid UTF-8"))
 }
 
 async fn list_tickets(State(store): State<Store>) -> Result<Json<Vec<Ticket>>, AppError> {
@@ -485,6 +580,36 @@ mod tests {
 
     use super::*;
 
+    fn initialize_repository(path: &std::path::Path) -> String {
+        std::fs::create_dir_all(path).unwrap();
+        for arguments in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["commit", "--allow-empty", "-qm", "initial"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .into()
+    }
+
     fn test_router(store: Store) -> Router {
         router(
             store.clone(),
@@ -581,6 +706,135 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(settings["merge_notification_channel"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn projects_register_canonical_git_roots_and_archive_safely() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("mab-project-api-{unique}"));
+        let repository = base.join("repo");
+        let branch = initialize_repository(&repository);
+        let nested = repository.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let store = Store::memory().await.unwrap();
+        let app = test_router(store.clone());
+        let body = serde_json::json!({
+            "name": "API project",
+            "path": nested,
+            "default_branch": branch,
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let project: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(project["name"], "API project");
+        assert_eq!(
+            project["path"],
+            repository.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(project["default_branch"], branch);
+
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+        let non_repository = base.join("not-git");
+        std::fs::create_dir_all(&non_repository).unwrap();
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Invalid",
+                            "path": non_repository,
+                            "default_branch": "main",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let ticket = store
+            .create_ticket_for_project_with_wakes(
+                NewTicket {
+                    title: "Active work".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                project["id"].as_i64(),
+            )
+            .await
+            .unwrap()
+            .0;
+        store
+            .update_ticket(
+                ticket.id,
+                TicketChanges {
+                    state: Some(TicketState::InProgress),
+                    ..TicketChanges::default()
+                },
+            )
+            .await
+            .unwrap();
+        let blocked = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/projects/{}/archive", project["id"]))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        store
+            .update_ticket(
+                ticket.id,
+                TicketChanges {
+                    state: Some(TicketState::Todo),
+                    ..TicketChanges::default()
+                },
+            )
+            .await
+            .unwrap();
+        let archived = app
+            .oneshot(
+                Request::post(format!("/projects/{}/archive", project["id"]))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(archived.status(), StatusCode::OK);
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]

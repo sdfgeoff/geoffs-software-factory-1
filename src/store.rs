@@ -113,6 +113,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_registry_migration_preserves_legacy_projects() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 22) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO projects (path) VALUES ('/legacy/repo')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 22)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let project: (String, String, String) =
+            sqlx::query_as("SELECT name, path, default_branch FROM projects")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            project,
+            ("/legacy/repo".into(), "/legacy/repo".into(), "HEAD".into())
+        );
+    }
+
+    #[tokio::test]
     async fn file_store_survives_reopen() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)

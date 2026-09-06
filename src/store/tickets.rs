@@ -57,7 +57,7 @@ enum TicketWakeReason {
 impl Store {
     pub async fn project(&self) -> Result<Option<Project>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT p.id, p.path, p.archived_at, p.updated_at FROM projects p \
+            "SELECT p.id, p.name, p.path, p.default_branch, p.archived_at, p.updated_at FROM projects p \
              JOIN board_state state ON state.current_project_id = p.id WHERE state.id = 1",
         )
         .fetch_optional(&self.pool)
@@ -65,18 +65,52 @@ impl Store {
     }
 
     pub async fn project_by_id(&self, id: i64) -> Result<Option<Project>, sqlx::Error> {
-        sqlx::query_as("SELECT id, path, archived_at, updated_at FROM projects WHERE id = ?")
+        sqlx::query_as(
+            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+        )
             .bind(id)
             .fetch_optional(&self.pool)
             .await
     }
 
+    pub async fn project_by_path(&self, path: &str) -> Result<Option<Project>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE path = ?",
+        )
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn select_project(&self, id: i64) -> Result<Project, AppError> {
+        let project = self
+            .project_by_id(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("project not found"))?;
+        if project.archived_at.is_some() {
+            return Err(AppError::conflict("project is archived"));
+        }
+        sqlx::query(
+            "INSERT INTO board_state (id, current_project_id) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET current_project_id = excluded.current_project_id",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(project)
+    }
+
     pub async fn set_project(&self, path: &str) -> Result<Project, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path);
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO projects (path) VALUES (?) \
+            "INSERT INTO projects (name, path, default_branch) VALUES (?, ?, 'HEAD') \
              ON CONFLICT(path) DO UPDATE SET updated_at = unixepoch() RETURNING id",
         )
+        .bind(name)
         .bind(path)
         .fetch_one(&mut *transaction)
         .await?;
@@ -88,12 +122,113 @@ impl Store {
         .execute(&mut *transaction)
         .await?;
         let project =
-            sqlx::query_as("SELECT id, path, archived_at, updated_at FROM projects WHERE id = ?")
+            sqlx::query_as("SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?")
                 .bind(id)
                 .fetch_one(&mut *transaction)
                 .await?;
         transaction.commit().await?;
         Ok(project)
+    }
+
+    pub async fn projects(&self) -> Result<Vec<Project>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn register_project(
+        &self,
+        name: &str,
+        path: &str,
+        default_branch: &str,
+    ) -> Result<Project, AppError> {
+        let name = name.trim();
+        let default_branch = default_branch.trim();
+        if name.is_empty() || name.len() > 100 {
+            return Err(AppError::bad_request(
+                "project name must contain 1-100 characters",
+            ));
+        }
+        if default_branch.is_empty() {
+            return Err(AppError::bad_request("default branch is required"));
+        }
+        let mut transaction = self.pool.begin().await?;
+        if sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM projects WHERE path = ?)")
+            .bind(path)
+            .fetch_one(&mut *transaction)
+            .await?
+        {
+            return Err(AppError::conflict("project root is already registered"));
+        }
+        let id = sqlx::query("INSERT INTO projects (name, path, default_branch) VALUES (?, ?, ?)")
+            .bind(name)
+            .bind(path)
+            .bind(default_branch)
+            .execute(&mut *transaction)
+            .await?
+            .last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO board_state (id, current_project_id) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET current_project_id = COALESCE(current_project_id, excluded.current_project_id)",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        let project = sqlx::query_as(
+            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(project)
+    }
+
+    pub async fn archive_project(&self, id: i64) -> Result<Project, AppError> {
+        let mut transaction = self.pool.begin().await?;
+        let project: Option<Project> = sqlx::query_as(
+            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let project = project.ok_or_else(|| AppError::not_found("project not found"))?;
+        if project.archived_at.is_none() {
+            let active_work: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM tickets WHERE project_id = ? AND state IN ('in_progress', 'review'))",
+            )
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if active_work {
+                return Err(AppError::conflict(
+                    "cannot archive a project with active or review work",
+                ));
+            }
+            sqlx::query(
+                "UPDATE projects SET archived_at = unixepoch(), updated_at = unixepoch() WHERE id = ?",
+            )
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE board_state SET current_project_id = (SELECT id FROM projects WHERE archived_at IS NULL AND id != ? ORDER BY id LIMIT 1) WHERE id = 1 AND current_project_id = ?",
+            )
+            .bind(id)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let archived = sqlx::query_as(
+            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(archived)
     }
 
     pub(crate) async fn active_ticket_project(&self, ticket: &Ticket) -> Result<Project, AppError> {

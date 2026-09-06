@@ -240,7 +240,7 @@ impl AgentManager {
             .args(["worktree", "add", "-b"])
             .arg(format!("agents/{}", agent.id))
             .arg(&worktree_path)
-            .arg("HEAD")
+            .arg(&project.default_branch)
             .output()
             .await
             .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
@@ -255,15 +255,59 @@ impl AgentManager {
         Ok(agent)
     }
 
-    async fn worktree_for_project(
+    pub(crate) async fn worktree_for_project(
         &self,
         agent_id: i64,
         project_id: i64,
     ) -> Result<AgentProjectWorktree, AppError> {
-        self.store
+        if let Some(worktree) = self
+            .store
             .agent_project_worktree(agent_id, project_id)
             .await?
-            .ok_or_else(|| AppError::conflict("agent has no worktree for the ticket project"))
+        {
+            return Ok(worktree);
+        }
+        let agent = self
+            .store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        let project = self
+            .store
+            .project_by_id(project_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("project not found"))?;
+        if project.archived_at.is_some() {
+            return Err(AppError::conflict("agent project is archived"));
+        }
+        let path = PathBuf::from(&agent.home_path)
+            .join("projects")
+            .join(project.id.to_string());
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|error| {
+            AppError::internal(format!("failed to create worktree directory: {error}"))
+        })?;
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&project.path)
+            .args(["worktree", "add", "-b"])
+            .arg(format!("agents/{agent_id}"))
+            .arg(&path)
+            .arg(&project.default_branch)
+            .output()
+            .await
+            .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
+        if !output.status.success() {
+            return Err(AppError::bad_request(format!(
+                "failed to create worktree: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let path = path
+            .to_str()
+            .ok_or_else(|| AppError::bad_request("agent worktree path is not valid UTF-8"))?;
+        self.store
+            .add_agent_project_worktree(agent_id, project_id, path)
+            .await
     }
 
     async fn current_worktree(&self, agent_id: i64) -> Result<AgentProjectWorktree, AppError> {
@@ -315,6 +359,36 @@ mod tests {
 
     use super::*;
 
+    fn initialize_repository(path: &Path) -> String {
+        std::fs::create_dir_all(path).unwrap();
+        for arguments in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["commit", "--allow-empty", "-qm", "initial"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .into()
+    }
+
     #[test]
     fn agent_names_are_safe_for_branches_and_paths() {
         assert!(validate_agent_name("backend-1").is_ok());
@@ -330,23 +404,8 @@ mod tests {
             .as_nanos();
         let base = std::env::temp_dir().join(format!("mab-agent-test-{unique}"));
         let repository = base.join("repo");
-        std::fs::create_dir_all(&repository).unwrap();
-        for arguments in [
-            vec!["init", "-q"],
-            vec!["config", "user.name", "Test"],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["commit", "--allow-empty", "-qm", "initial"],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .args(arguments)
-                    .current_dir(&repository)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        let store = Store::memory().await.unwrap();
+        initialize_repository(&repository);
+        let store = Store::open(&base.join("board.sqlite3")).await.unwrap();
         let project = store
             .set_project(repository.to_str().unwrap())
             .await
@@ -393,6 +452,45 @@ mod tests {
                 .path,
             first_worktree.path
         );
+
+        let other_repository = base.join("other-repo");
+        let other_default_branch = initialize_repository(&other_repository);
+        let other = store
+            .register_project(
+                "Other",
+                other_repository.to_str().unwrap(),
+                &other_default_branch,
+            )
+            .await
+            .unwrap();
+        let first_other = manager
+            .worktree_for_project(first.id, other.id)
+            .await
+            .unwrap();
+        let reused = manager
+            .worktree_for_project(first.id, other.id)
+            .await
+            .unwrap();
+        let second_other = manager
+            .worktree_for_project(second.id, other.id)
+            .await
+            .unwrap();
+        assert_eq!(first_other, reused);
+        assert_ne!(first_other.path, second_other.path);
+        assert!(Path::new(&first_other.path).join(".git").exists());
+
+        drop(manager);
+        store.close().await;
+        let reopened = Store::open(&base.join("board.sqlite3")).await.unwrap();
+        assert_eq!(
+            reopened
+                .agent_project_worktree(first.id, other.id)
+                .await
+                .unwrap()
+                .unwrap(),
+            first_other
+        );
+        reopened.close().await;
         std::fs::remove_dir_all(base).unwrap();
     }
 }

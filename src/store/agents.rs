@@ -230,6 +230,26 @@ impl Store {
         Ok(rows.into_iter().map(worktree_from_row).collect())
     }
 
+    pub async fn add_agent_project_worktree(
+        &self,
+        agent_id: i64,
+        project_id: i64,
+        path: &str,
+    ) -> Result<AgentProjectWorktree, AppError> {
+        sqlx::query(
+            "INSERT INTO agent_project_worktrees (agent_id, project_id, path) VALUES (?, ?, ?)",
+        )
+        .bind(agent_id)
+        .bind(project_id)
+        .bind(path)
+        .execute(&self.pool)
+        .await?;
+        Ok(self
+            .agent_project_worktree(agent_id, project_id)
+            .await?
+            .unwrap())
+    }
+
     pub(crate) async fn delete_agent(&self, id: i64) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM agents WHERE id = ?")
             .bind(id)

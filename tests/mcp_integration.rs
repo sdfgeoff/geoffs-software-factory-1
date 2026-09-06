@@ -49,6 +49,86 @@ fn tool_content(response: &Value) -> Value {
     .unwrap()
 }
 
+fn initialize_repository(path: &std::path::Path) -> String {
+    std::fs::create_dir_all(path).unwrap();
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["commit", "--allow-empty", "-qm", "initial"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    String::from_utf8(
+        std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .into()
+}
+
+#[tokio::test]
+async fn mcp_registers_lists_and_archives_projects_through_http() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let repository = std::env::temp_dir().join(format!("mab-mcp-project-{unique}"));
+    let branch = initialize_repository(&repository);
+    let store = Store::memory().await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store, agents);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+
+    let registered = mcp_tool(
+        &base_url,
+        1,
+        1,
+        "register_project",
+        json!({
+            "name": "MCP project",
+            "path": repository,
+            "default_branch": branch,
+        }),
+    )
+    .await;
+    assert_eq!(registered.pointer("/result/isError"), None);
+    let project = tool_content(&registered);
+    let listed = mcp_tool(&base_url, 1, 2, "list_projects", json!({})).await;
+    assert!(tool_content(&listed).as_array().unwrap().contains(&project));
+    let archived = mcp_tool(
+        &base_url,
+        1,
+        3,
+        "archive_project",
+        json!({"project_id": project["id"]}),
+    )
+    .await;
+    assert!(tool_content(&archived)["archived_at"].is_number());
+
+    std::fs::remove_dir_all(repository).unwrap();
+}
+
 #[tokio::test]
 async fn mcp_calls_the_server_without_database_access() {
     let store = Store::memory().await.unwrap();
