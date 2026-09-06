@@ -431,6 +431,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Persistent".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();

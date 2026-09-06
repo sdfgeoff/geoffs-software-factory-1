@@ -94,12 +94,14 @@ function TicketCard({
   const [assignee, setAssignee] = useState(
     ticket.assignee_id?.toString() ?? "",
   );
+  const [blockerIds, setBlockerIds] = useState(ticket.blocker_ids.join(", "));
   const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
   useEffect(() => {
     setTitle(ticket.title);
     setDescription(ticket.description);
     setState(ticket.state);
     setAssignee(ticket.assignee_id?.toString() ?? "");
+    setBlockerIds(ticket.blocker_ids.join(", "));
   }, [ticket]);
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -109,6 +111,7 @@ function TicketCard({
         description,
         state,
         assignee_id: assignee ? Number(assignee) : null,
+        blocker_ids: parseBlockerIds(blockerIds),
       });
       await onChanged();
     } catch (error) {
@@ -120,8 +123,18 @@ function TicketCard({
       <summary>
         <span>#{ticket.id}</span>
         {ticket.title}
+        {ticket.unresolved_blockers.length > 0 && (
+          <strong className="blocked-badge">Blocked</strong>
+        )}
       </summary>
       <form onSubmit={save}>
+        {ticket.unresolved_blockers.length > 0 && (
+          <p className="ticket-blockers">
+            Blocked by {ticket.unresolved_blockers
+              .map((blocker) => `#${blocker.id} ${blocker.title}`)
+              .join(", ")}
+          </p>
+        )}
         {(ticket.implementation_branch || ticket.review_commit || ticket.review_feedback) && (
           <dl className="review-meta">
             {ticket.implementation_branch && (
@@ -166,6 +179,14 @@ function TicketCard({
           />
         </label>
         <label>
+          Blocker ticket IDs
+          <input
+            value={blockerIds}
+            onChange={(event) => setBlockerIds(event.target.value)}
+            placeholder="1, 2"
+          />
+        </label>
+        <label>
           Status
           <select
             value={state}
@@ -196,4 +217,13 @@ function TicketCard({
       </form>
     </details>
   );
+}
+
+function parseBlockerIds(value: string): number[] {
+  if (!value.trim()) return [];
+  const ids = value.split(",").map((part) => Number(part.trim()));
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new Error("Blocker ticket IDs must be positive integers separated by commas");
+  }
+  return ids;
 }

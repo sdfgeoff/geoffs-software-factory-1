@@ -14,6 +14,8 @@ const ticket: Ticket = {
   review_target_branch: null,
   reviewer_id: null,
   review_feedback: null,
+  blocker_ids: [],
+  unresolved_blockers: [],
   revision: 1,
   created_at: 0,
   updated_at: 0,
@@ -56,5 +58,25 @@ describe("KanbanBoard", () => {
     );
 
     expect(screen.getByText("tickets/7-board")).toBeTruthy();
+  });
+
+  it("shows unresolved blocker IDs and titles", () => {
+    render(
+      <KanbanBoard
+        tickets={[
+          {
+            ...ticket,
+            state: "todo",
+            blocker_ids: [2],
+            unresolved_blockers: [{ id: 2, title: "Build the foundation" }],
+          },
+        ]}
+        agents={[]}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("Blocked by #2 Build the foundation")).toBeTruthy();
   });
 });

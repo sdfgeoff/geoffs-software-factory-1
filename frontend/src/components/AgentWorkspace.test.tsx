@@ -46,6 +46,8 @@ const ticket: Ticket = {
   review_target_branch: null,
   reviewer_id: null,
   review_feedback: null,
+  blocker_ids: [],
+  unresolved_blockers: [],
   revision: 1,
   created_at: 0,
   updated_at: 0,

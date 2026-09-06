@@ -1630,6 +1630,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Merge me".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -1800,6 +1801,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Stale review".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -1890,6 +1892,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Conflicting review".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -1952,6 +1955,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Detached review".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();
@@ -2020,6 +2024,7 @@ mod tests {
             .create_ticket(NewTicket {
                 title: "Legacy review".into(),
                 description: String::new(),
+                blocker_ids: Vec::new(),
             })
             .await
             .unwrap();

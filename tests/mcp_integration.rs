@@ -88,11 +88,21 @@ async fn mcp_calls_the_server_without_database_access() {
     .await;
     assert_eq!(claimed.pointer("/result/isError"), None);
 
+    let dependent = mcp_tool(
+        &base_url,
+        1,
+        3,
+        "create_ticket",
+        json!({"title":"Blocked MCP ticket","blocker_ids":[1]}),
+    )
+    .await;
+    assert_eq!(tool_content(&dependent)["blocker_ids"], json!([1]));
+
     let conflict = mcp_request(
         &base_url,
         2,
         json!({
-            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "jsonrpc":"2.0","id":4,"method":"tools/call",
             "params":{"name":"claim_ticket","arguments":{"ticket_id":1}}
         }),
     )
