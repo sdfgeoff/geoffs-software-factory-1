@@ -201,6 +201,49 @@ impl AgentManager {
         self.store.agent_channel_subscriptions(agent_id).await
     }
 
+    pub async fn project_subscriptions(&self, agent_id: i64) -> Result<Vec<i64>, AppError> {
+        self.store.agent_project_subscriptions(agent_id).await
+    }
+
+    pub async fn set_project_subscriptions(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let project_ids = self
+            .store
+            .set_agent_project_subscriptions(agent_id, project_ids)
+            .await?;
+        self.emit(agent_id, "project_subscriptions", json!(project_ids));
+        Ok(project_ids)
+    }
+
+    pub async fn add_project_subscriptions(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let project_ids = self
+            .store
+            .add_agent_project_subscriptions(agent_id, project_ids)
+            .await?;
+        self.emit(agent_id, "project_subscriptions", json!(project_ids));
+        Ok(project_ids)
+    }
+
+    pub async fn remove_project_subscriptions(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let project_ids = self
+            .store
+            .remove_agent_project_subscriptions(agent_id, project_ids)
+            .await?;
+        self.emit(agent_id, "project_subscriptions", json!(project_ids));
+        Ok(project_ids)
+    }
+
     pub async fn set_channel_subscriptions(
         &self,
         agent_id: i64,

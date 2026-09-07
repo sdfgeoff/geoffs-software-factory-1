@@ -48,6 +48,7 @@ export function AgentWorkspace({
   const [prompt, setPrompt] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
+  const [projectSubscriptions, setProjectSubscriptions] = useState<number[]>([]);
   const [wakeOnPendingWork, setWakeOnPendingWork] = useState(false);
   const [wakeOnPendingReview, setWakeOnPendingReview] = useState(false);
   const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
@@ -100,6 +101,13 @@ export function AgentWorkspace({
       void api
         .agentChannelSubscriptions(selectedAgentId)
         .then(setSubscriptions)
+        .catch(onError);
+  }, [selectedAgentId, refresh, onError]);
+  useEffect(() => {
+    if (selectedAgentId)
+      void api
+        .agentProjectSubscriptions(selectedAgentId)
+        .then(setProjectSubscriptions)
         .catch(onError);
   }, [selectedAgentId, refresh, onError]);
   async function create(event: FormEvent) {
@@ -165,6 +173,20 @@ export function AgentWorkspace({
     try {
       setSubscriptions(
         await api.setAgentChannelSubscriptions(selected.id, next),
+      );
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function setProjectSubscription(projectId: number, enabled: boolean) {
+    if (!selected) return;
+    const next = enabled
+      ? [...new Set([...projectSubscriptions, projectId])]
+      : projectSubscriptions.filter((item) => item !== projectId);
+    try {
+      setProjectSubscriptions(
+        await api.setAgentProjectSubscriptions(selected.id, next),
       );
       await onChanged();
     } catch (error) {
@@ -374,6 +396,24 @@ export function AgentWorkspace({
                 </fieldset>
                 <button type="submit">Save wake settings</button>
               </form>
+              <fieldset className="capabilities">
+                <legend>Project subscriptions</legend>
+                {projects.filter((project) => !project.archived_at).map((project) => (
+                  <label key={project.id}>
+                    <input
+                      type="checkbox"
+                      checked={projectSubscriptions.includes(project.id)}
+                      onChange={(event) =>
+                        void setProjectSubscription(project.id, event.target.checked)
+                      }
+                    />
+                    <span>
+                      <strong>{project.name}</strong>
+                      Prefer work and reviews from this project
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
               <fieldset className="capabilities">
                 <legend>Channel subscriptions</legend>
                 {channels.map((channel) => (

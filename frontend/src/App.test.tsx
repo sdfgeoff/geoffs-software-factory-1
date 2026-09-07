@@ -15,6 +15,7 @@ vi.mock("./api", () => ({
   api: {
     agentChannelSubscriptions: vi.fn(),
     agentMessages: vi.fn(),
+    agentProjectSubscriptions: vi.fn(),
     agentProjectWorktrees: vi.fn(),
     agentScopes: vi.fn(),
     agents: vi.fn(),
@@ -94,6 +95,7 @@ describe("App agent routes", () => {
     vi.mocked(api.channels).mockResolvedValue([]);
     vi.mocked(api.agents).mockResolvedValue([agent]);
     vi.mocked(api.agentMessages).mockResolvedValue([]);
+    vi.mocked(api.agentProjectSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentProjectWorktrees).mockResolvedValue([]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
