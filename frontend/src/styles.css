@@ -180,12 +180,19 @@ nav button.active {
   align-items: start;
   overflow-x: auto;
 }
+.kanban-with-cancelled {
+  grid-template-columns: repeat(5, minmax(16rem, 1fr));
+}
 .column {
   min-height: 30rem;
   padding: 1rem;
   border: 1px solid #d8d1c5;
   border-radius: 0.75rem;
   background: #eae5dc;
+}
+.column-cancelled {
+  background: #e3e1dd;
+  opacity: 0.82;
 }
 .column h2 {
   display: flex;

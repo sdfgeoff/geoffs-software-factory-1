@@ -87,6 +87,7 @@ pub enum TicketState {
     InProgress,
     Review,
     Done,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]

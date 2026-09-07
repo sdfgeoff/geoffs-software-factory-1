@@ -375,6 +375,23 @@ impl Store {
             .description
             .unwrap_or_else(|| current.description.clone());
         let state = changes.state.unwrap_or(current.state);
+        if current.state != state {
+            match (current.state, state) {
+                (TicketState::Todo | TicketState::InProgress, TicketState::Cancelled) => {}
+                (TicketState::Review, TicketState::Cancelled) => {
+                    return Err(AppError::conflict(
+                        "a ticket under review cannot be cancelled",
+                    ));
+                }
+                (TicketState::Done, TicketState::Cancelled) => {
+                    return Err(AppError::conflict("a completed ticket cannot be cancelled"));
+                }
+                (TicketState::Cancelled, _) => {
+                    return Err(AppError::conflict("a cancelled ticket is terminal"));
+                }
+                _ => {}
+            }
+        }
         let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
         if current.reserved_for_agent_id.is_some()
             && assignee_id != current.assignee_id
@@ -410,6 +427,20 @@ impl Store {
         }
         replace_ticket_dependencies(&mut transaction, id, &blocker_ids).await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        if current.state != TicketState::Cancelled && ticket.state == TicketState::Cancelled {
+            sqlx::query("INSERT INTO ticket_activity (ticket_id, action) VALUES (?, 'cancelled')")
+                .bind(ticket.id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
+                 AND kind IN ('ticket.available', 'ticket.assigned', 'ticket.review_requested') \
+                 AND json_extract(payload, '$.ticket_id') = ?",
+            )
+            .bind(ticket.id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         if !ticket.unresolved_blockers.is_empty()
             && ((current.state == TicketState::Todo && ticket.state == TicketState::InProgress)
                 || (current.assignee_id.is_none() && ticket.assignee_id.is_some()))
@@ -585,6 +616,7 @@ impl Store {
         let claimed: Option<Ticket> = sqlx::query_as(
             "UPDATE tickets SET assignee_id = ?, reserved_for_agent_id = NULL, state = 'in_progress', revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND (assignee_id IS NULL OR assignee_id = ?) \
+             AND state = 'todo' \
              AND (reserved_for_agent_id IS NULL OR reserved_for_agent_id = ?) \
              AND NOT EXISTS (SELECT 1 FROM ticket_dependencies d JOIN tickets blocker ON blocker.id = d.blocker_id \
              WHERE d.ticket_id = tickets.id AND blocker.state != 'done') \
@@ -1117,7 +1149,51 @@ fn validate_title(title: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::SqlitePool;
+
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_state_migration_preserves_existing_tickets() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 24) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        let project_id = sqlx::query(
+            "INSERT INTO projects (name, path, default_branch) VALUES ('Board', '/board', 'main')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO tickets (id, project_id, title, state) VALUES (7, ?, 'Existing', 'done')",
+        )
+        .bind(project_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 24)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let preserved: (String, String) =
+            sqlx::query_as("SELECT title, state FROM tickets WHERE id = 7")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, ("Existing".into(), "done".into()));
+        sqlx::query(
+            "INSERT INTO tickets (project_id, title, state) VALUES (?, 'Obsolete', 'cancelled')",
+        )
+        .bind(project_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn tickets_keep_project_identity_and_reject_archived_projects() {
@@ -1258,6 +1334,117 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_terminal_audited_and_not_claimable_or_wakeable() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .set_agent_wake_settings(worker.id, true, false, None)
+            .await
+            .unwrap();
+        let (blocker, targets) = store
+            .create_ticket_with_wakes(NewTicket {
+                title: "Duplicate".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(targets, vec![worker.id]);
+        let dependent = store
+            .create_ticket(NewTicket {
+                title: "Dependent".into(),
+                description: String::new(),
+                blocker_ids: vec![blocker.id],
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let (cancelled, wake_targets) = store
+            .update_ticket_with_wakes(
+                blocker.id,
+                TicketChanges {
+                    state: Some(TicketState::Cancelled),
+                    expected_revision: Some(blocker.revision),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.state, TicketState::Cancelled);
+        assert!(wake_targets.is_empty());
+        assert!(store.wake_events(worker.id).await.unwrap().is_empty());
+        assert_eq!(
+            store.ticket_activity(blocker.id).await.unwrap()[0].action,
+            "cancelled"
+        );
+        assert!(
+            store
+                .claim_ticket(cancelled.id, worker.id, Some(cancelled.revision))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .reserve_tickets(&[cancelled.id], worker.id, None, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .update_ticket(
+                    cancelled.id,
+                    TicketChanges {
+                        state: Some(TicketState::Todo),
+                        expected_revision: Some(cancelled.revision),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("terminal")
+        );
+        let dependent = store.ticket(dependent.id).await.unwrap().unwrap();
+        assert_eq!(dependent.unresolved_blockers[0].id, cancelled.id);
+
+        for state in [TicketState::Review, TicketState::Done] {
+            let ticket = store
+                .create_ticket(NewTicket {
+                    title: format!("Cannot cancel {state:?}"),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                })
+                .await
+                .unwrap();
+            let ticket = store
+                .update_ticket(
+                    ticket.id,
+                    TicketChanges {
+                        state: Some(state),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .update_ticket(
+                        ticket.id,
+                        TicketChanges {
+                            state: Some(TicketState::Cancelled),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

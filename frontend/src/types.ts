@@ -1,4 +1,9 @@
-export type TicketState = "todo" | "in_progress" | "review" | "done";
+export type TicketState =
+  | "todo"
+  | "in_progress"
+  | "review"
+  | "done"
+  | "cancelled";
 export type AgentState =
   "paused" | "idle" | "running" | "awaiting_approval" | "error";
 export interface BoardSettings {

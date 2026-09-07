@@ -309,10 +309,13 @@ async fn update_ticket(
     Json(input): Json<UpdateTicket>,
 ) -> Result<Json<Ticket>, AppError> {
     if agent_header(&headers)?.is_some()
-        && matches!(input.state, Some(TicketState::Review | TicketState::Done))
+        && matches!(
+            input.state,
+            Some(TicketState::Review | TicketState::Done | TicketState::Cancelled)
+        )
     {
         return Err(AppError::forbidden(
-            "agents must use the review workflow for review and done states",
+            "agents cannot directly set review, done, or cancelled states",
         ));
     }
     let assignee_id = match input.assignee_id {
@@ -1628,5 +1631,117 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unauthenticated.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn humans_cancel_safe_ticket_states_while_agents_and_reviews_cannot() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let todo = store
+            .create_ticket(NewTicket {
+                title: "Duplicate".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let in_progress = store
+            .create_ticket(NewTicket {
+                title: "Obsolete work".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let in_progress = store
+            .update_ticket(
+                in_progress.id,
+                TicketChanges {
+                    state: Some(TicketState::InProgress),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let review = store
+            .create_ticket(NewTicket {
+                title: "Reviewing".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let review = store
+            .update_ticket(
+                review.id,
+                TicketChanges {
+                    state: Some(TicketState::Review),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let app = test_router(store);
+
+        for ticket in [&todo, &in_progress] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::patch(format!("/tickets/{}", ticket.id))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(format!(
+                            "{{\"state\":\"cancelled\",\"expected_revision\":{}}}",
+                            ticket.revision
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["state"], "cancelled");
+        }
+
+        let activity = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/tickets/{}/activity", todo.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let activity: Value =
+            serde_json::from_slice(&to_bytes(activity.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(activity[0]["action"], "cancelled");
+
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/tickets/{}", review.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::from(r#"{"state":"cancelled"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        let conflict = app
+            .oneshot(
+                Request::patch(format!("/tickets/{}", review.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"state":"cancelled"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 }

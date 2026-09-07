@@ -7,6 +7,7 @@ const columns: { state: TicketState; label: string }[] = [
   { state: "in_progress", label: "In progress" },
   { state: "review", label: "Review" },
   { state: "done", label: "Done" },
+  { state: "cancelled", label: "Cancelled" },
 ];
 interface Props {
   tickets: Ticket[];
@@ -21,12 +22,19 @@ export function KanbanBoard({ tickets, agents, projects = [], currentProjectId =
   const [title, setTitle] = useState("");
   const [projectId, setProjectId] = useState(currentProjectId?.toString() ?? "");
   const [filterProjectId, setFilterProjectId] = useState("all");
+  const [showCancelled, setShowCancelled] = useState(false);
   useEffect(() => {
     if (!projectId && currentProjectId) setProjectId(currentProjectId.toString());
   }, [currentProjectId, projectId]);
-  const visibleTickets = filterProjectId === "all"
-    ? tickets
-    : tickets.filter((ticket) => ticket.project_id === Number(filterProjectId));
+  const visibleTickets = tickets.filter(
+    (ticket) =>
+      (showCancelled || ticket.state !== "cancelled") &&
+      (filterProjectId === "all" ||
+        ticket.project_id === Number(filterProjectId)),
+  );
+  const visibleColumns = showCancelled
+    ? columns
+    : columns.filter((column) => column.state !== "cancelled");
   async function create(event: FormEvent) {
     event.preventDefault();
     try {
@@ -69,10 +77,18 @@ export function KanbanBoard({ tickets, agents, projects = [], currentProjectId =
           ))}
         </select>
       </label>
-      <div className="kanban">
-        {columns.map((column) => (
+      <label>
+        <input
+          type="checkbox"
+          checked={showCancelled}
+          onChange={(event) => setShowCancelled(event.target.checked)}
+        />
+        Show cancelled tickets
+      </label>
+      <div className={`kanban${showCancelled ? " kanban-with-cancelled" : ""}`}>
+        {visibleColumns.map((column) => (
           <section
-            className="column"
+            className={`column column-${column.state}`}
             key={column.state}
             aria-labelledby={`column-${column.state}`}
           >
@@ -161,6 +177,14 @@ function TicketCard({
         ticket.reserved_for_agent_id !== null &&
           ticket.reserved_for_agent_id !== agentId,
       );
+      await onChanged();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function cancel() {
+    try {
+      await api.updateTicket(ticket, { state: "cancelled" });
       await onChanged();
     } catch (error) {
       onError(error);
@@ -255,12 +279,18 @@ function TicketCard({
           <select
             value={state}
             onChange={(event) => setState(event.target.value as TicketState)}
+            disabled={ticket.state === "cancelled"}
           >
-            {columns.map((column) => (
-              <option value={column.state} key={column.state}>
-                {column.label}
-              </option>
-            ))}
+            {columns
+              .filter(
+                (column) =>
+                  column.state !== "cancelled" || ticket.state === "cancelled",
+              )
+              .map((column) => (
+                <option value={column.state} key={column.state}>
+                  {column.label}
+                </option>
+              ))}
           </select>
         </label>
         <label>
@@ -307,6 +337,11 @@ function TicketCard({
             : "Reserve"}
         </button>
         <button type="submit">Save</button>
+        {(ticket.state === "todo" || ticket.state === "in_progress") && (
+          <button type="button" onClick={cancel}>
+            Cancel ticket
+          </button>
+        )}
       </form>
     </details>
   );

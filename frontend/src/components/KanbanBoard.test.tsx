@@ -175,4 +175,47 @@ describe("KanbanBoard", () => {
     );
     expect(changed).toHaveBeenCalled();
   });
+
+  it("hides cancelled tickets by default and shows their distinct column on request", () => {
+    render(
+      <KanbanBoard
+        tickets={[{ ...ticket, state: "cancelled", title: "Duplicate work" }]}
+        agents={[]}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText("Duplicate work")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Show cancelled tickets"));
+    expect(screen.getByText("Duplicate work")).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: /cancelled/i }).parentElement?.className,
+    ).toContain("column-cancelled");
+  });
+
+  it("cancels todo and in-progress tickets with an explicit action", async () => {
+    vi.mocked(api.updateTicket).mockResolvedValue({
+      ...ticket,
+      state: "cancelled",
+    });
+    const changed = vi.fn().mockResolvedValue(undefined);
+    render(
+      <KanbanBoard
+        tickets={[ticket]}
+        agents={[]}
+        onChanged={changed}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel ticket" }));
+
+    await waitFor(() =>
+      expect(api.updateTicket).toHaveBeenCalledWith(ticket, {
+        state: "cancelled",
+      }),
+    );
+    expect(changed).toHaveBeenCalled();
+  });
 });
