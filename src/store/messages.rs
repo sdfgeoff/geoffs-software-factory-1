@@ -524,6 +524,10 @@ mod tests {
             .unwrap();
         let partial = store.create_agent("mention", "/tmp/mention").await.unwrap();
         store
+            .set_agent_project_subscriptions(mentioned.id, &[])
+            .await
+            .unwrap();
+        store
             .set_agent_channel_subscriptions(subscriber.id, &["general".into()])
             .await
             .unwrap();

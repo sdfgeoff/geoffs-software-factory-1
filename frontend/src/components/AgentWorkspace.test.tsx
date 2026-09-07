@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   api: {
     agentChannelSubscriptions: vi.fn(),
     agentMessages: vi.fn(),
+    agentProjectSubscriptions: vi.fn(),
     agentProjectWorktrees: vi.fn(),
     agentScopes: vi.fn(),
     pauseAgent: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock("../api", () => ({
     sendAgentMessage: vi.fn(),
     setAgentScopes: vi.fn(),
     setAgentChannelSubscriptions: vi.fn(),
+    setAgentProjectSubscriptions: vi.fn(),
     setAgentWakeSettings: vi.fn(),
   },
 }));
@@ -66,6 +68,7 @@ describe("AgentWorkspace", () => {
   beforeEach(() => {
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentMessages).mockResolvedValue([]);
+    vi.mocked(api.agentProjectSubscriptions).mockResolvedValue([1]);
     vi.mocked(api.agentProjectWorktrees).mockResolvedValue([
       {
         agent_id: agent.id,
@@ -82,6 +85,7 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.sendAgentMessage).mockResolvedValue(agent);
     vi.mocked(api.setAgentScopes).mockResolvedValue(["approve_review"]);
     vi.mocked(api.setAgentChannelSubscriptions).mockResolvedValue(["general"]);
+    vi.mocked(api.setAgentProjectSubscriptions).mockResolvedValue([]);
     vi.mocked(api.setAgentWakeSettings).mockResolvedValue(agent);
   });
 
@@ -106,7 +110,7 @@ describe("AgentWorkspace", () => {
     fireEvent.click(
       await screen.findByRole("checkbox", { name: /approve_review/i }),
     );
-    expect(screen.getByText("Board")).toBeTruthy();
+    expect(screen.getAllByText("Board")).toHaveLength(2);
     expect(screen.getAllByText("/repo/reviewer")).toHaveLength(2);
     await waitFor(() =>
       expect(api.setAgentScopes).toHaveBeenCalledWith(1, ["approve_review"]),
@@ -137,6 +141,33 @@ describe("AgentWorkspace", () => {
       expect(api.setAgentChannelSubscriptions).toHaveBeenCalledWith(1, [
         "general",
       ]),
+    );
+  });
+
+  it("persists project subscriptions", async () => {
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        projects={[
+          { id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 },
+          { id: 2, name: "API", path: "/api", default_branch: "main", archived_at: null, updated_at: 0 },
+        ]}
+        selectedAgentId={agent.id}
+        view="settings"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: /API/i }));
+    await waitFor(() =>
+      expect(api.setAgentProjectSubscriptions).toHaveBeenCalledWith(1, [1, 2]),
     );
   });
 

@@ -113,6 +113,11 @@ pub struct SetAgentChannelSubscriptionsRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct SetAgentProjectSubscriptionsRequest {
+    pub project_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ReviewRevisionRequest {
     pub expected_revision: Option<i64>,
 }

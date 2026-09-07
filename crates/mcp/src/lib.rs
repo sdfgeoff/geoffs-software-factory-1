@@ -252,6 +252,26 @@ fn tools() -> Value {
             channel_list_schema()
         ),
         tool(
+            "list_my_project_subscriptions",
+            "List this agent's preferred project roots",
+            json!({"type":"object","properties":{}})
+        ),
+        tool(
+            "add_my_project_subscriptions",
+            "Add preferred project roots for this agent",
+            project_list_schema()
+        ),
+        tool(
+            "remove_my_project_subscriptions",
+            "Remove preferred project roots for this agent",
+            project_list_schema()
+        ),
+        tool(
+            "replace_my_project_subscriptions",
+            "Replace all preferred project roots for this agent",
+            project_list_schema()
+        ),
+        tool(
             "read_message_board_channel",
             "Read messages in an optional inclusive time range",
             json!({"type":"object","properties":{"channel_name":{"type":"string"},"start_time":{"type":"integer"},"end_time":{"type":"integer"}},"required":["channel_name"]})
@@ -294,6 +314,10 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 
 fn channel_list_schema() -> Value {
     json!({"type":"object","properties":{"channels":{"type":"array","items":{"type":"string"}}},"required":["channels"]})
+}
+
+fn project_list_schema() -> Value {
+    json!({"type":"object","properties":{"project_ids":{"type":"array","items":{"type":"integer"}}},"required":["project_ids"]})
 }
 
 async fn call_tool(
@@ -438,6 +462,38 @@ async fn call_tool(
                 )
                 .await?
         }
+        "list_my_project_subscriptions" => {
+            board
+                .request(Method::GET, "/agent/project-subscriptions", None)
+                .await?
+        }
+        "add_my_project_subscriptions" => {
+            board
+                .request(
+                    Method::POST,
+                    "/agent/project-subscriptions/add",
+                    Some(project_list_request(&args)?),
+                )
+                .await?
+        }
+        "remove_my_project_subscriptions" => {
+            board
+                .request(
+                    Method::POST,
+                    "/agent/project-subscriptions/remove",
+                    Some(project_list_request(&args)?),
+                )
+                .await?
+        }
+        "replace_my_project_subscriptions" => {
+            board
+                .request(
+                    Method::PUT,
+                    "/agent/project-subscriptions",
+                    Some(project_list_request(&args)?),
+                )
+                .await?
+        }
         "read_message_board_channel" => {
             let channel = string(&args, "channel_name")?;
             let mut query = Vec::new();
@@ -556,6 +612,15 @@ fn channel_list_request(args: &Value) -> Result<Value, McpError> {
         .filter(|channels| channels.iter().all(Value::is_string))
         .ok_or_else(|| McpError::bad_request("channels must be an array of strings"))?;
     Ok(json!({"channels": channels}))
+}
+
+fn project_list_request(args: &Value) -> Result<Value, McpError> {
+    let project_ids = args
+        .get("project_ids")
+        .and_then(Value::as_array)
+        .filter(|project_ids| project_ids.iter().all(Value::is_i64))
+        .ok_or_else(|| McpError::bad_request("project_ids must be an array of integers"))?;
+    Ok(json!({"project_ids": project_ids}))
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {

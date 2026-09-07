@@ -382,6 +382,74 @@ async fn mcp_manages_only_the_calling_agents_channel_subscriptions() {
 }
 
 #[tokio::test]
+async fn mcp_manages_only_the_calling_agents_project_subscriptions() {
+    let store = Store::memory().await.unwrap();
+    let first_project = store.project().await.unwrap().unwrap();
+    let second_project = store.set_project("/tmp/second-project").await.unwrap();
+    let first = store.create_agent("first", "/tmp/first").await.unwrap();
+    let second = store.create_agent("second", "/tmp/second").await.unwrap();
+    store
+        .set_agent_project_subscriptions(second.id, &[])
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store.clone(), agents);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+
+    let added = mcp_tool(
+        &base_url,
+        first.id,
+        1,
+        "add_my_project_subscriptions",
+        json!({"project_ids":[first_project.id]}),
+    )
+    .await;
+    assert_eq!(
+        tool_content(&added),
+        json!([first_project.id, second_project.id])
+    );
+    let removed = mcp_tool(
+        &base_url,
+        first.id,
+        2,
+        "remove_my_project_subscriptions",
+        json!({"project_ids":[second_project.id]}),
+    )
+    .await;
+    assert_eq!(tool_content(&removed), json!([first_project.id]));
+    let replaced = mcp_tool(
+        &base_url,
+        first.id,
+        3,
+        "replace_my_project_subscriptions",
+        json!({"project_ids":[second_project.id], "agent_id":second.id}),
+    )
+    .await;
+    assert_eq!(tool_content(&replaced), json!([second_project.id]));
+    let listed = mcp_tool(
+        &base_url,
+        first.id,
+        4,
+        "list_my_project_subscriptions",
+        json!({"agent_id":second.id}),
+    )
+    .await;
+    assert_eq!(tool_content(&listed), json!([second_project.id]));
+    assert_eq!(
+        store.agent_project_subscriptions(second.id).await.unwrap(),
+        Vec::<i64>::new()
+    );
+}
+
+#[tokio::test]
 async fn mcp_creates_and_describes_empty_channels() {
     let store = Store::memory().await.unwrap();
     let agent = store.create_agent("first", "/tmp/first").await.unwrap();
