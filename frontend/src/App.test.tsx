@@ -263,6 +263,19 @@ describe("App agent routes", () => {
 
     act(() => {
       latestEventSource.onmessage?.({
+        data: JSON.stringify({ kind: "refresh" }),
+      } as MessageEvent);
+    });
+
+    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
+    expect(api.project).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(2);
+    expect(api.channels).toHaveBeenCalledTimes(2);
+    expect(api.settings).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      latestEventSource.onmessage?.({
         data: JSON.stringify({ agent_id: 0, kind: "mystery", data: {} }),
       } as MessageEvent);
       latestEventSource.onmessage?.({
@@ -270,13 +283,78 @@ describe("App agent routes", () => {
       } as MessageEvent);
     });
 
-    expect(api.agents).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
-    expect(api.project).toHaveBeenCalledTimes(2);
-    expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(2);
-    expect(api.channels).toHaveBeenCalledTimes(2);
-    expect(api.settings).toHaveBeenCalledTimes(2);
+    expect(api.agents).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(3));
+    expect(api.project).toHaveBeenCalledTimes(3);
+    expect(api.projects).toHaveBeenCalledTimes(3);
+    expect(api.tickets).toHaveBeenCalledTimes(3);
+    expect(api.channels).toHaveBeenCalledTimes(3);
+    expect(api.settings).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes the current channel for a remote message without clearing its draft", async () => {
+    window.history.replaceState(null, "", "#messages/general");
+    vi.mocked(api.channels).mockResolvedValue([
+      { name: "general", description: "", most_recent_message_at: 0 },
+    ]);
+    vi.mocked(api.messages)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 4,
+          channel_name: "general",
+          agent_id: null,
+          author: "human",
+          body: "Remote post",
+          created_at: 0,
+        },
+      ]);
+    render(<App />);
+    await screen.findByText("No messages in #general yet.");
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Unsent reply" },
+    });
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ agent_id: agent.id, kind: "message", data: {} }),
+      } as MessageEvent);
+    });
+
+    expect(await screen.findByText("Remote post")).toBeTruthy();
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+      "Unsent reply",
+    );
+    expect(api.messages).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes agent details for the project_subscriptions event", async () => {
+    window.history.replaceState(null, "", "#agents/1/settings");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.agentProjectSubscriptions)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([project.id]);
+    render(<App />);
+    const subscription = await screen.findByRole("checkbox", {
+      name: new RegExp(project.name),
+    });
+    expect((subscription as HTMLInputElement).checked).toBe(false);
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: agent.id,
+          kind: "project_subscriptions",
+          data: [project.id],
+        }),
+      } as MessageEvent);
+    });
+
+    await waitFor(() =>
+      expect((subscription as HTMLInputElement).checked).toBe(true),
+    );
+    expect(api.agentProjectSubscriptions).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a settings draft when switching views", async () => {

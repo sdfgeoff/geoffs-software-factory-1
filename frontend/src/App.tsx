@@ -97,6 +97,7 @@ export function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [messageBoardRefresh, setMessageBoardRefresh] = useState(0);
   const [agentMessageRefresh, setAgentMessageRefresh] = useState(0);
   const [agentDetailRefresh, setAgentDetailRefresh] = useState(0);
   const [deltas, setDeltas] = useState<Record<number, string>>({});
@@ -134,6 +135,9 @@ export function App() {
       setChannels(nextChannels);
       setAgents(nextAgents);
       setSettings(nextSettings);
+      setMessageBoardRefresh((value) => value + 1);
+      setAgentMessageRefresh((value) => value + 1);
+      setAgentDetailRefresh((value) => value + 1);
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -207,8 +211,12 @@ export function App() {
         setSettings(event.data as Settings);
       } else if (event.kind === "message") {
         setDeltas((current) => ({ ...current, [event.agent_id]: "" }));
+        setMessageBoardRefresh((value) => value + 1);
         setAgentMessageRefresh((value) => value + 1);
-      } else if (event.kind === "channel_subscriptions") {
+      } else if (
+        event.kind === "channel_subscriptions" ||
+        event.kind === "project_subscriptions"
+      ) {
         setAgentDetailRefresh((value) => value + 1);
       } else if (event.kind !== "codex_event" && event.kind !== "approval_declined") {
         scheduleReload();
@@ -387,7 +395,7 @@ export function App() {
           agents={agents}
           channels={channels}
           selectedChannelName={route.view === "messages" ? route.channel : lastMessageChannel}
-          refresh={0}
+          refresh={messageBoardRefresh}
           onSelectChannel={(channel) => navigate({ view: "messages", channel })}
           onSelectAgent={(agentId) =>
             navigate({ view: "agents", agentId, agentView: "chat" })
