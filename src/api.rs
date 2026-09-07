@@ -7,20 +7,18 @@ use axum::{
     routing::get,
 };
 use jiff::Timestamp;
+use multi_agent_board_protocol::{self as protocol, Patch};
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
     CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, RegisterProjectRequest,
     ReserveTicketsRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
-    SetAgentProjectSubscriptionsRequest, SetProjectRequest,
+    SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetProjectRequest,
+    UpdateTicketRequest,
 };
-use serde::Deserialize;
 
 use crate::{
     agent_runtime::AgentManager,
-    domain::{
-        BoardSettings, Channel, Message, Project, Reminder, Ticket, TicketActivity,
-        TicketClaimResponse, TicketState, WakeDeliveryPolicy, WakeEvent, WakeEventData,
-    },
+    domain::{TicketClaimResponse, WakeDeliveryPolicy, WakeEvent, WakeEventData},
     error::AppError,
     store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges},
 };
@@ -87,29 +85,32 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
 
 async fn get_settings(
     Extension(agents): Extension<AgentManager>,
-) -> Result<Json<BoardSettings>, AppError> {
-    Ok(Json(agents.settings().await?))
+) -> Result<Json<protocol::BoardSettings>, AppError> {
+    Ok(Json(agents.settings().await?.into()))
 }
 
 async fn set_settings(
     Extension(agents): Extension<AgentManager>,
-    Json(input): Json<BoardSettings>,
-) -> Result<Json<BoardSettings>, AppError> {
+    Json(input): Json<SetBoardSettingsRequest>,
+) -> Result<Json<protocol::BoardSettings>, AppError> {
     Ok(Json(
         agents
             .set_settings(input.merge_notification_channel.as_deref())
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
-async fn get_project(State(store): State<Store>) -> Result<Json<Option<Project>>, AppError> {
-    Ok(Json(store.project().await?))
+async fn get_project(
+    State(store): State<Store>,
+) -> Result<Json<Option<protocol::Project>>, AppError> {
+    Ok(Json(store.project().await?.map(Into::into)))
 }
 
 async fn set_project(
     State(store): State<Store>,
     Json(input): Json<SetProjectRequest>,
-) -> Result<Json<Project>, AppError> {
+) -> Result<Json<protocol::Project>, AppError> {
     let canonical = canonical_git_root(&input.path).await?;
     let path = canonical
         .to_str()
@@ -125,17 +126,26 @@ async fn set_project(
         let project = store.register_project(name, path, &default_branch).await?;
         store.select_project(project.id).await?
     };
-    Ok(Json(project))
+    Ok(Json(project.into()))
 }
 
-async fn list_projects(State(store): State<Store>) -> Result<Json<Vec<Project>>, AppError> {
-    Ok(Json(store.projects().await?))
+async fn list_projects(
+    State(store): State<Store>,
+) -> Result<Json<Vec<protocol::Project>>, AppError> {
+    Ok(Json(
+        store
+            .projects()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 async fn register_project(
     State(store): State<Store>,
     Json(input): Json<RegisterProjectRequest>,
-) -> Result<Json<Project>, AppError> {
+) -> Result<Json<protocol::Project>, AppError> {
     let canonical = canonical_git_root(&input.path).await?;
     validate_default_branch(&canonical, &input.default_branch).await?;
     let path = canonical
@@ -144,15 +154,16 @@ async fn register_project(
     Ok(Json(
         store
             .register_project(&input.name, path, &input.default_branch)
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
 async fn archive_project(
     State(store): State<Store>,
     Path(id): Path<i64>,
-) -> Result<Json<Project>, AppError> {
-    Ok(Json(store.archive_project(id).await?))
+) -> Result<Json<protocol::Project>, AppError> {
+    Ok(Json(store.archive_project(id).await?.into()))
 }
 
 async fn canonical_git_root(path: &str) -> Result<PathBuf, AppError> {
@@ -225,13 +236,13 @@ async fn current_branch(root: &std::path::Path) -> Result<String, AppError> {
 async fn list_tickets(
     State(store): State<Store>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Ticket>>, AppError> {
+) -> Result<Json<Vec<protocol::Ticket>>, AppError> {
     let mut tickets = store.tickets().await?;
     if let Some(agent_id) = agent_header(&headers)? {
         let subscriptions = store.agent_project_subscriptions(agent_id).await?;
         tickets.sort_by_key(|ticket| !subscriptions.contains(&ticket.project_id));
     }
-    Ok(Json(tickets))
+    Ok(Json(tickets.into_iter().map(Into::into).collect()))
 }
 
 async fn create_ticket(
@@ -239,7 +250,7 @@ async fn create_ticket(
     Extension(agents): Extension<AgentManager>,
     headers: HeaderMap,
     Json(input): Json<CreateTicketRequest>,
-) -> Result<Json<Ticket>, AppError> {
+) -> Result<Json<protocol::Ticket>, AppError> {
     let (ticket, wake_agent_ids) = store
         .create_ticket_for_project_with_wakes(
             NewTicket {
@@ -254,25 +265,32 @@ async fn create_ticket(
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
-    Ok(Json(ticket))
+    Ok(Json(ticket.into()))
 }
 
 async fn get_ticket(
     State(store): State<Store>,
     Path(id): Path<i64>,
-) -> Result<Json<Ticket>, AppError> {
+) -> Result<Json<protocol::Ticket>, AppError> {
     store
         .ticket(id)
         .await?
-        .map(Json)
+        .map(|ticket| Json(ticket.into()))
         .ok_or_else(|| AppError::not_found("ticket not found"))
 }
 
 async fn ticket_activity(
     State(store): State<Store>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<TicketActivity>>, AppError> {
-    Ok(Json(store.ticket_activity(id).await?))
+) -> Result<Json<Vec<protocol::TicketActivity>>, AppError> {
+    Ok(Json(
+        store
+            .ticket_activity(id)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 async fn reserve_tickets(
@@ -280,7 +298,7 @@ async fn reserve_tickets(
     Extension(agents): Extension<AgentManager>,
     headers: HeaderMap,
     Json(input): Json<ReserveTicketsRequest>,
-) -> Result<Json<Vec<Ticket>>, AppError> {
+) -> Result<Json<Vec<protocol::Ticket>>, AppError> {
     let caller = agent_header(&headers)?;
     let agent_id = match caller {
         Some(caller_id) => {
@@ -311,27 +329,7 @@ async fn reserve_tickets(
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
-    Ok(Json(tickets))
-}
-
-#[derive(Deserialize)]
-struct UpdateTicket {
-    title: Option<String>,
-    description: Option<String>,
-    state: Option<TicketState>,
-    #[serde(default, deserialize_with = "deserialize_present_value")]
-    assignee_id: Option<serde_json::Value>,
-    #[serde(default, deserialize_with = "deserialize_present_value")]
-    reserved_for_agent_id: Option<serde_json::Value>,
-    blocker_ids: Option<Vec<i64>>,
-    expected_revision: Option<i64>,
-}
-
-fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde_json::Value::deserialize(deserializer).map(Some)
+    Ok(Json(tickets.into_iter().map(Into::into).collect()))
 }
 
 async fn update_ticket(
@@ -339,39 +337,37 @@ async fn update_ticket(
     Extension(agents): Extension<AgentManager>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<UpdateTicket>,
-) -> Result<Json<Ticket>, AppError> {
+    Json(input): Json<UpdateTicketRequest>,
+) -> Result<Json<protocol::Ticket>, AppError> {
     let caller = agent_header(&headers)?;
     if caller.is_some()
         && matches!(
             input.state,
-            Some(TicketState::Review | TicketState::Done | TicketState::Cancelled)
+            Some(
+                protocol::TicketState::Review
+                    | protocol::TicketState::Done
+                    | protocol::TicketState::Cancelled
+            )
         )
     {
         return Err(AppError::forbidden(
             "agents cannot directly set review, done, or cancelled states",
         ));
     }
-    if caller.is_some() && input.reserved_for_agent_id.is_some() {
+    if caller.is_some() && !input.reserved_for_agent_id.is_missing() {
         return Err(AppError::forbidden(
             "agents cannot clear ticket reservations through ticket updates",
         ));
     }
-    if input
-        .reserved_for_agent_id
-        .as_ref()
-        .is_some_and(|value| !value.is_null())
-    {
+    if matches!(input.reserved_for_agent_id, Patch::Value(_)) {
         return Err(AppError::bad_request(
             "reserved_for_agent_id can only be cleared; use reservations to set it",
         ));
     }
     let assignee_id = match input.assignee_id {
-        None => None,
-        Some(value) if value.is_null() => Some(None),
-        Some(value) => Some(Some(value.as_i64().ok_or_else(|| {
-            AppError::bad_request("assignee_id must be an integer or null")
-        })?)),
+        Patch::Missing => None,
+        Patch::Null => Some(None),
+        Patch::Value(value) => Some(Some(value)),
     };
     let (ticket, wake_agent_ids) = store
         .update_ticket_with_wakes(
@@ -379,9 +375,13 @@ async fn update_ticket(
             TicketChanges {
                 title: input.title,
                 description: input.description,
-                state: input.state,
+                state: input.state.map(Into::into),
                 assignee_id,
-                reserved_for_agent_id: input.reserved_for_agent_id.map(|_| None),
+                reserved_for_agent_id: match input.reserved_for_agent_id {
+                    Patch::Missing => None,
+                    Patch::Null => Some(None),
+                    Patch::Value(_) => unreachable!("non-null reservation rejected above"),
+                },
                 blocker_ids: input.blocker_ids,
                 expected_revision: input.expected_revision,
             },
@@ -390,7 +390,7 @@ async fn update_ticket(
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
-    Ok(Json(ticket))
+    Ok(Json(ticket.into()))
 }
 
 async fn claim_ticket(
@@ -399,7 +399,7 @@ async fn claim_ticket(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ClaimTicketRequest>,
-) -> Result<Json<TicketClaimResponse>, AppError> {
+) -> Result<Json<protocol::TicketClaimResponse>, AppError> {
     let caller = agent_header(&headers)?;
     let agent_id = caller
         .or(input.agent_id)
@@ -424,10 +424,13 @@ async fn claim_ticket(
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
-    Ok(Json(TicketClaimResponse {
-        ticket,
-        project_transition,
-    }))
+    Ok(Json(
+        TicketClaimResponse {
+            ticket,
+            project_transition,
+        }
+        .into(),
+    ))
 }
 
 async fn list_wake_events(
@@ -460,7 +463,7 @@ async fn schedule_self_reminder(
     State(store): State<Store>,
     headers: HeaderMap,
     Json(input): Json<ScheduleSelfReminderRequest>,
-) -> Result<Json<Reminder>, AppError> {
+) -> Result<Json<protocol::Reminder>, AppError> {
     let agent_id = calling_agent(&headers)?;
     let now = Timestamp::now().as_second();
     let deliver_at = match (input.deliver_at, input.delay_seconds) {
@@ -485,24 +488,35 @@ async fn schedule_self_reminder(
     Ok(Json(
         store
             .create_reminder(agent_id, &input.message, deliver_at, now)
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
 async fn list_my_reminders(
     State(store): State<Store>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Reminder>>, AppError> {
-    Ok(Json(store.reminders(calling_agent(&headers)?).await?))
+) -> Result<Json<Vec<protocol::Reminder>>, AppError> {
+    Ok(Json(
+        store
+            .reminders(calling_agent(&headers)?)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 async fn cancel_my_reminder(
     State(store): State<Store>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-) -> Result<Json<Reminder>, AppError> {
+) -> Result<Json<protocol::Reminder>, AppError> {
     Ok(Json(
-        store.cancel_reminder(calling_agent(&headers)?, id).await?,
+        store
+            .cancel_reminder(calling_agent(&headers)?, id)
+            .await?
+            .into(),
     ))
 }
 
@@ -617,18 +631,27 @@ fn agent_header(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
         .transpose()
 }
 
-async fn list_channels(State(store): State<Store>) -> Result<Json<Vec<Channel>>, AppError> {
-    Ok(Json(store.channels().await?))
+async fn list_channels(
+    State(store): State<Store>,
+) -> Result<Json<Vec<protocol::Channel>>, AppError> {
+    Ok(Json(
+        store
+            .channels()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 async fn get_channel(
     State(store): State<Store>,
     Path(name): Path<String>,
-) -> Result<Json<Channel>, AppError> {
+) -> Result<Json<protocol::Channel>, AppError> {
     store
         .channel(&name)
         .await?
-        .map(Json)
+        .map(|channel| Json(channel.into()))
         .ok_or_else(|| AppError::not_found("channel not found"))
 }
 
@@ -636,7 +659,7 @@ async fn create_channel(
     State(store): State<Store>,
     headers: HeaderMap,
     Json(input): Json<CreateChannelRequest>,
-) -> Result<Json<Channel>, AppError> {
+) -> Result<Json<protocol::Channel>, AppError> {
     if let Some(agent_id) = agent_header(&headers)?
         && store.agent(agent_id).await?.is_none()
     {
@@ -645,7 +668,8 @@ async fn create_channel(
     Ok(Json(
         store
             .create_channel(&input.name, &input.description)
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
@@ -653,11 +677,14 @@ async fn read_messages(
     State(store): State<Store>,
     Path(name): Path<String>,
     Query(range): Query<MessageRangeQuery>,
-) -> Result<Json<Vec<Message>>, AppError> {
+) -> Result<Json<Vec<protocol::Message>>, AppError> {
     Ok(Json(
         store
             .messages(&name, range.start_time, range.end_time)
-            .await?,
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     ))
 }
 
@@ -667,7 +694,7 @@ async fn post_message(
     Path(name): Path<String>,
     headers: HeaderMap,
     Json(input): Json<PostMessageRequest>,
-) -> Result<Json<Message>, AppError> {
+) -> Result<Json<protocol::Message>, AppError> {
     let agent_id = agent_header(&headers)?;
     let author = if let Some(agent_id) = agent_id {
         store
@@ -685,7 +712,7 @@ async fn post_message(
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
-    Ok(Json(message))
+    Ok(Json(message.into()))
 }
 
 #[cfg(test)]
@@ -698,6 +725,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::domain::TicketState;
 
     fn initialize_repository(path: &std::path::Path) -> String {
         std::fs::create_dir_all(path).unwrap();

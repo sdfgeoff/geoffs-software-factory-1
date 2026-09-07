@@ -1,13 +1,21 @@
 use reqwest::Method;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, CreateChannelRequest, ErrorResponse, PostMessageRequest,
+    AGENT_ID_HEADER, Channel, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
+    ErrorResponse, Message, MessageRangeQuery, PostBoardMessageRequest, PostMessageRequest,
+    Project, ProjectIdRequest, ReadChannelRequest, ReadChannelResponse, RegisterProjectRequest,
+    Reminder, ReminderIdRequest, RequestChangesRequest, ReserveTicketsRequest,
+    ReviewRevisionRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
+    SetAgentProjectSubscriptionsRequest, SetTicketDetailsRequest, Ticket, TicketActivity,
+    TicketChangesRequest, TicketClaimResponse, TicketIdRequest, TicketRevisionRequest,
+    UpdateTicketRequest,
 };
 
 #[derive(Debug)]
-struct McpError(String);
+pub struct McpError(String);
 
 impl McpError {
     fn bad_request(message: impl Into<String>) -> Self {
@@ -28,14 +36,14 @@ impl std::fmt::Display for McpError {
 impl std::error::Error for McpError {}
 
 #[derive(Clone)]
-struct BoardClient {
+pub struct BoardClient {
     base_url: String,
     agent_id: i64,
     client: reqwest::Client,
 }
 
 impl BoardClient {
-    fn new(base_url: String, agent_id: i64) -> Self {
+    pub fn new(base_url: String, agent_id: i64) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').into(),
             agent_id,
@@ -46,12 +54,12 @@ impl BoardClient {
         }
     }
 
-    async fn request(
+    async fn request<B: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
-        body: Option<Value>,
-    ) -> Result<Value, McpError> {
+        body: Option<&B>,
+    ) -> Result<R, McpError> {
         let mut request = self
             .client
             .request(method, format!("{}{path}", self.base_url))
@@ -74,7 +82,292 @@ impl BoardClient {
                 .unwrap_or_else(|_| "board request failed".into());
             return Err(McpError::internal(error));
         }
-        Ok(body)
+        serde_json::from_value(body)
+            .map_err(|error| McpError::internal(format!("invalid board response: {error}")))
+    }
+
+    async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, McpError> {
+        self.request::<(), _>(Method::GET, path, None).await
+    }
+
+    pub async fn list_tickets(&self) -> Result<Vec<Ticket>, McpError> {
+        self.get("/tickets").await
+    }
+
+    pub async fn list_projects(&self) -> Result<Vec<Project>, McpError> {
+        self.get("/projects").await
+    }
+
+    pub async fn register_project(
+        &self,
+        request: &RegisterProjectRequest,
+    ) -> Result<Project, McpError> {
+        self.request(Method::POST, "/projects", Some(request)).await
+    }
+
+    pub async fn archive_project(&self, project_id: i64) -> Result<Project, McpError> {
+        self.request::<(), _>(
+            Method::POST,
+            &format!("/projects/{project_id}/archive"),
+            None,
+        )
+        .await
+    }
+
+    pub async fn create_ticket(&self, request: &CreateTicketRequest) -> Result<Ticket, McpError> {
+        self.request(Method::POST, "/tickets", Some(request)).await
+    }
+
+    pub async fn ticket(&self, ticket_id: i64) -> Result<Ticket, McpError> {
+        self.get(&format!("/tickets/{ticket_id}")).await
+    }
+
+    pub async fn ticket_activity(&self, ticket_id: i64) -> Result<Vec<TicketActivity>, McpError> {
+        self.get(&format!("/tickets/{ticket_id}/activity")).await
+    }
+
+    pub async fn reserve_tickets(
+        &self,
+        request: &ReserveTicketsRequest,
+    ) -> Result<Vec<Ticket>, McpError> {
+        self.request(Method::POST, "/ticket-reservations", Some(request))
+            .await
+    }
+
+    pub async fn update_ticket(
+        &self,
+        ticket_id: i64,
+        request: &UpdateTicketRequest,
+    ) -> Result<Ticket, McpError> {
+        self.request(
+            Method::PATCH,
+            &format!("/tickets/{ticket_id}"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn claim_ticket(
+        &self,
+        ticket_id: i64,
+        request: &multi_agent_board_protocol::ClaimTicketRequest,
+    ) -> Result<TicketClaimResponse, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/claim"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn submit_review(
+        &self,
+        ticket_id: i64,
+        request: &ReviewRevisionRequest,
+    ) -> Result<Ticket, McpError> {
+        self.review(ticket_id, "submit-review", request).await
+    }
+
+    pub async fn claim_review(
+        &self,
+        ticket_id: i64,
+        request: &ReviewRevisionRequest,
+    ) -> Result<TicketClaimResponse, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/claim-review"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn request_changes(
+        &self,
+        ticket_id: i64,
+        request: &RequestChangesRequest,
+    ) -> Result<Ticket, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/request-changes"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn approve_review(
+        &self,
+        ticket_id: i64,
+        request: &ReviewRevisionRequest,
+    ) -> Result<Ticket, McpError> {
+        self.review(ticket_id, "approve-review", request).await
+    }
+
+    async fn review(
+        &self,
+        ticket_id: i64,
+        action: &str,
+        request: &ReviewRevisionRequest,
+    ) -> Result<Ticket, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/{action}"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn list_channels(&self) -> Result<Vec<Channel>, McpError> {
+        self.get("/channels").await
+    }
+
+    pub async fn create_channel(
+        &self,
+        request: &CreateChannelRequest,
+    ) -> Result<Channel, McpError> {
+        self.request(Method::POST, "/channels", Some(request)).await
+    }
+
+    pub async fn channel(&self, name: &str) -> Result<Channel, McpError> {
+        self.get(&format!("/channels/{name}")).await
+    }
+
+    pub async fn messages(
+        &self,
+        name: &str,
+        range: &MessageRangeQuery,
+    ) -> Result<Vec<Message>, McpError> {
+        let mut query = Vec::new();
+        if let Some(start) = range.start_time {
+            query.push(format!("start_time={start}"));
+        }
+        if let Some(end) = range.end_time {
+            query.push(format!("end_time={end}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/channels/{name}/messages{suffix}"))
+            .await
+    }
+
+    pub async fn post_message(
+        &self,
+        channel: &str,
+        request: &PostMessageRequest,
+    ) -> Result<Message, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/channels/{channel}/messages"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn channel_subscriptions(&self) -> Result<Vec<String>, McpError> {
+        self.get("/agent/channel-subscriptions").await
+    }
+
+    async fn change_channel_subscriptions(
+        &self,
+        method: Method,
+        action: &str,
+        request: &SetAgentChannelSubscriptionsRequest,
+    ) -> Result<Vec<String>, McpError> {
+        self.request(
+            method,
+            &format!("/agent/channel-subscriptions{action}"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn add_channel_subscriptions(
+        &self,
+        request: &SetAgentChannelSubscriptionsRequest,
+    ) -> Result<Vec<String>, McpError> {
+        self.change_channel_subscriptions(Method::POST, "/add", request)
+            .await
+    }
+
+    pub async fn remove_channel_subscriptions(
+        &self,
+        request: &SetAgentChannelSubscriptionsRequest,
+    ) -> Result<Vec<String>, McpError> {
+        self.change_channel_subscriptions(Method::POST, "/remove", request)
+            .await
+    }
+
+    pub async fn replace_channel_subscriptions(
+        &self,
+        request: &SetAgentChannelSubscriptionsRequest,
+    ) -> Result<Vec<String>, McpError> {
+        self.change_channel_subscriptions(Method::PUT, "", request)
+            .await
+    }
+
+    pub async fn project_subscriptions(&self) -> Result<Vec<i64>, McpError> {
+        self.get("/agent/project-subscriptions").await
+    }
+
+    async fn change_project_subscriptions(
+        &self,
+        method: Method,
+        action: &str,
+        request: &SetAgentProjectSubscriptionsRequest,
+    ) -> Result<Vec<i64>, McpError> {
+        self.request(
+            method,
+            &format!("/agent/project-subscriptions{action}"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn add_project_subscriptions(
+        &self,
+        request: &SetAgentProjectSubscriptionsRequest,
+    ) -> Result<Vec<i64>, McpError> {
+        self.change_project_subscriptions(Method::POST, "/add", request)
+            .await
+    }
+
+    pub async fn remove_project_subscriptions(
+        &self,
+        request: &SetAgentProjectSubscriptionsRequest,
+    ) -> Result<Vec<i64>, McpError> {
+        self.change_project_subscriptions(Method::POST, "/remove", request)
+            .await
+    }
+
+    pub async fn replace_project_subscriptions(
+        &self,
+        request: &SetAgentProjectSubscriptionsRequest,
+    ) -> Result<Vec<i64>, McpError> {
+        self.change_project_subscriptions(Method::PUT, "", request)
+            .await
+    }
+
+    pub async fn schedule_reminder(
+        &self,
+        request: &ScheduleSelfReminderRequest,
+    ) -> Result<Reminder, McpError> {
+        self.request(Method::POST, "/agent/reminders", Some(request))
+            .await
+    }
+
+    pub async fn reminders(&self) -> Result<Vec<Reminder>, McpError> {
+        self.get("/agent/reminders").await
+    }
+
+    pub async fn cancel_reminder(&self, reminder_id: i64) -> Result<Reminder, McpError> {
+        self.request::<(), _>(
+            Method::DELETE,
+            &format!("/agent/reminders/{reminder_id}"),
+            None,
+        )
+        .await
     }
 }
 
@@ -328,299 +621,168 @@ async fn call_tool(
     let name = name.ok_or_else(|| McpError::bad_request("missing tool name"))?;
     let args = arguments.cloned().unwrap_or_else(|| json!({}));
     let value = match name {
-        "list_tickets" => board.request(Method::GET, "/tickets", None).await?,
-        "list_projects" => board.request(Method::GET, "/projects", None).await?,
-        "register_project" => {
-            string(&args, "name")?;
-            string(&args, "path")?;
-            string(&args, "default_branch")?;
-            board.request(Method::POST, "/projects", Some(args)).await?
-        }
+        "list_tickets" => encode(board.list_tickets().await?)?,
+        "list_projects" => encode(board.list_projects().await?)?,
+        "register_project" => encode(board.register_project(&decode(&args)?).await?)?,
         "archive_project" => {
-            let project_id = integer(&args, "project_id")?;
-            board
-                .request(
-                    Method::POST,
-                    &format!("/projects/{project_id}/archive"),
-                    None,
-                )
-                .await?
+            let request: ProjectIdRequest = decode(&args)?;
+            encode(board.archive_project(request.project_id).await?)?
         }
-        "create_ticket" => {
-            string(&args, "title")?;
-            board.request(Method::POST, "/tickets", Some(args)).await?
-        }
+        "create_ticket" => encode(board.create_ticket(&decode(&args)?).await?)?,
         "get_ticket_details" => {
-            let ticket_id = integer(&args, "ticket_id")?;
-            board
-                .request(Method::GET, &format!("/tickets/{ticket_id}"), None)
-                .await?
+            let request: TicketIdRequest = decode(&args)?;
+            encode(board.ticket(request.ticket_id).await?)?
         }
         "get_ticket_activity" => {
-            let ticket_id = integer(&args, "ticket_id")?;
-            board
-                .request(Method::GET, &format!("/tickets/{ticket_id}/activity"), None)
-                .await?
+            let request: TicketIdRequest = decode(&args)?;
+            encode(board.ticket_activity(request.ticket_id).await?)?
         }
-        "reserve_tickets" => {
-            let ticket_ids = args
-                .get("ticket_ids")
-                .and_then(Value::as_array)
-                .filter(|ids| !ids.is_empty() && ids.iter().all(Value::is_i64))
-                .ok_or_else(|| {
-                    McpError::bad_request("ticket_ids must be a non-empty array of integers")
-                })?;
-            board
-                .request(
-                    Method::POST,
-                    "/ticket-reservations",
-                    Some(json!({"ticket_ids": ticket_ids})),
-                )
-                .await?
-        }
+        "reserve_tickets" => encode(board.reserve_tickets(&decode(&args)?).await?)?,
         "set_ticket_details" => {
-            let ticket_id = integer(&args, "ticket_id")?;
-            let mut body = args;
-            body.as_object_mut()
-                .ok_or_else(|| McpError::bad_request("tool arguments must be an object"))?
-                .remove("ticket_id");
-            board
-                .request(Method::PATCH, &format!("/tickets/{ticket_id}"), Some(body))
-                .await?
+            let request: SetTicketDetailsRequest = decode(&args)?;
+            encode(
+                board
+                    .update_ticket(request.ticket_id, &request.changes)
+                    .await?,
+            )?
         }
         "claim_ticket" => {
-            let ticket_id = integer(&args, "ticket_id")?;
-            let mut body = args;
-            body.as_object_mut()
-                .ok_or_else(|| McpError::bad_request("tool arguments must be an object"))?
-                .remove("ticket_id");
-            board
-                .request(
-                    Method::POST,
-                    &format!("/tickets/{ticket_id}/claim"),
-                    Some(body),
-                )
-                .await?
+            let request: TicketRevisionRequest = decode(&args)?;
+            encode(
+                board
+                    .claim_ticket(
+                        request.ticket_id,
+                        &ClaimTicketRequest {
+                            agent_id: None,
+                            expected_revision: request.expected_revision,
+                        },
+                    )
+                    .await?,
+            )?
         }
         "submit_ticket_for_review" => {
-            review_request(board, Method::POST, &args, "submit-review").await?
+            let request: TicketRevisionRequest = decode(&args)?;
+            encode(
+                board
+                    .submit_review(
+                        request.ticket_id,
+                        &ReviewRevisionRequest {
+                            expected_revision: request.expected_revision,
+                        },
+                    )
+                    .await?,
+            )?
         }
-        "claim_ticket_review" => review_request(board, Method::POST, &args, "claim-review").await?,
+        "claim_ticket_review" => {
+            let request: TicketRevisionRequest = decode(&args)?;
+            encode(
+                board
+                    .claim_review(
+                        request.ticket_id,
+                        &ReviewRevisionRequest {
+                            expected_revision: request.expected_revision,
+                        },
+                    )
+                    .await?,
+            )?
+        }
         "request_ticket_changes" => {
-            review_request(board, Method::POST, &args, "request-changes").await?
+            let request: TicketChangesRequest = decode(&args)?;
+            encode(
+                board
+                    .request_changes(
+                        request.ticket_id,
+                        &RequestChangesRequest {
+                            feedback: request.feedback,
+                            expected_revision: request.expected_revision,
+                        },
+                    )
+                    .await?,
+            )?
         }
         "approve_ticket_review" => {
-            review_request(board, Method::POST, &args, "approve-review").await?
+            let request: TicketRevisionRequest = decode(&args)?;
+            encode(
+                board
+                    .approve_review(
+                        request.ticket_id,
+                        &ReviewRevisionRequest {
+                            expected_revision: request.expected_revision,
+                        },
+                    )
+                    .await?,
+            )?
         }
-        "list_message_board_channels" => board.request(Method::GET, "/channels", None).await?,
-        "create_message_board_channel" => {
-            let name = string(&args, "name")?;
-            let description = optional_string(&args, "description").unwrap_or_default();
-            board
-                .request(
-                    Method::POST,
-                    "/channels",
-                    Some(
-                        serde_json::to_value(CreateChannelRequest {
-                            name: name.into(),
-                            description: description.into(),
-                        })
-                        .expect("channel request is serializable"),
-                    ),
-                )
-                .await?
-        }
-        "list_my_channel_subscriptions" => {
-            board
-                .request(Method::GET, "/agent/channel-subscriptions", None)
-                .await?
-        }
+        "list_message_board_channels" => encode(board.list_channels().await?)?,
+        "create_message_board_channel" => encode(board.create_channel(&decode(&args)?).await?)?,
+        "list_my_channel_subscriptions" => encode(board.channel_subscriptions().await?)?,
         "add_my_channel_subscriptions" => {
-            board
-                .request(
-                    Method::POST,
-                    "/agent/channel-subscriptions/add",
-                    Some(channel_list_request(&args)?),
-                )
-                .await?
+            encode(board.add_channel_subscriptions(&decode(&args)?).await?)?
         }
         "remove_my_channel_subscriptions" => {
-            board
-                .request(
-                    Method::POST,
-                    "/agent/channel-subscriptions/remove",
-                    Some(channel_list_request(&args)?),
-                )
-                .await?
+            encode(board.remove_channel_subscriptions(&decode(&args)?).await?)?
         }
         "replace_my_channel_subscriptions" => {
-            board
-                .request(
-                    Method::PUT,
-                    "/agent/channel-subscriptions",
-                    Some(channel_list_request(&args)?),
-                )
-                .await?
+            encode(board.replace_channel_subscriptions(&decode(&args)?).await?)?
         }
-        "list_my_project_subscriptions" => {
-            board
-                .request(Method::GET, "/agent/project-subscriptions", None)
-                .await?
-        }
+        "list_my_project_subscriptions" => encode(board.project_subscriptions().await?)?,
         "add_my_project_subscriptions" => {
-            board
-                .request(
-                    Method::POST,
-                    "/agent/project-subscriptions/add",
-                    Some(project_list_request(&args)?),
-                )
-                .await?
+            encode(board.add_project_subscriptions(&decode(&args)?).await?)?
         }
         "remove_my_project_subscriptions" => {
-            board
-                .request(
-                    Method::POST,
-                    "/agent/project-subscriptions/remove",
-                    Some(project_list_request(&args)?),
-                )
-                .await?
+            encode(board.remove_project_subscriptions(&decode(&args)?).await?)?
         }
         "replace_my_project_subscriptions" => {
-            board
-                .request(
-                    Method::PUT,
-                    "/agent/project-subscriptions",
-                    Some(project_list_request(&args)?),
-                )
-                .await?
+            encode(board.replace_project_subscriptions(&decode(&args)?).await?)?
         }
         "read_message_board_channel" => {
-            let channel = string(&args, "channel_name")?;
-            let mut query = Vec::new();
-            if let Some(start) = optional_integer(&args, "start_time")? {
-                query.push(format!("start_time={start}"));
-            }
-            if let Some(end) = optional_integer(&args, "end_time")? {
-                query.push(format!("end_time={end}"));
-            }
-            let suffix = if query.is_empty() {
-                String::new()
-            } else {
-                format!("?{}", query.join("&"))
-            };
-            let channel_details = board
-                .request(Method::GET, &format!("/channels/{channel}"), None)
-                .await?;
-            let messages = board
-                .request(
-                    Method::GET,
-                    &format!("/channels/{channel}/messages{suffix}"),
-                    None,
-                )
-                .await?;
-            json!({"channel": channel_details, "messages": messages})
+            let request: ReadChannelRequest = decode(&args)?;
+            encode(ReadChannelResponse {
+                channel: board.channel(&request.channel_name).await?,
+                messages: board
+                    .messages(
+                        &request.channel_name,
+                        &MessageRangeQuery {
+                            start_time: request.start_time,
+                            end_time: request.end_time,
+                        },
+                    )
+                    .await?,
+            })?
         }
         "post_to_message_board" => {
-            let channel = string(&args, "channel_name")?.to_owned();
-            let author = string(&args, "author")?;
-            let message = string(&args, "message")?;
-            board
-                .request(
-                    Method::POST,
-                    &format!("/channels/{channel}/messages"),
-                    Some(
-                        serde_json::to_value(PostMessageRequest {
-                            author: author.into(),
-                            body: message.into(),
-                        })
-                        .expect("message request is serializable"),
-                    ),
-                )
-                .await?
+            let request: PostBoardMessageRequest = decode(&args)?;
+            encode(
+                board
+                    .post_message(
+                        &request.channel_name,
+                        &PostMessageRequest {
+                            author: request.author,
+                            body: request.message,
+                        },
+                    )
+                    .await?,
+            )?
         }
-        "schedule_self_reminder" => {
-            string(&args, "message")?;
-            board
-                .request(Method::POST, "/agent/reminders", Some(args))
-                .await?
-        }
-        "list_my_reminders" => board.request(Method::GET, "/agent/reminders", None).await?,
+        "schedule_self_reminder" => encode(board.schedule_reminder(&decode(&args)?).await?)?,
+        "list_my_reminders" => encode(board.reminders().await?)?,
         "cancel_my_reminder" => {
-            let reminder_id = integer(&args, "reminder_id")?;
-            board
-                .request(
-                    Method::DELETE,
-                    &format!("/agent/reminders/{reminder_id}"),
-                    None,
-                )
-                .await?
+            let request: ReminderIdRequest = decode(&args)?;
+            encode(board.cancel_reminder(request.reminder_id).await?)?
         }
         _ => return Err(McpError::bad_request(format!("unknown tool: {name}"))),
     };
     Ok(json!({"content": [{"type": "text", "text": value.to_string()}]}))
 }
 
-async fn review_request(
-    board: &BoardClient,
-    method: Method,
-    args: &Value,
-    action: &str,
-) -> Result<Value, McpError> {
-    let ticket_id = integer(args, "ticket_id")?;
-    let mut body = args.clone();
-    body.as_object_mut()
-        .ok_or_else(|| McpError::bad_request("tool arguments must be an object"))?
-        .remove("ticket_id");
-    board
-        .request(
-            method,
-            &format!("/tickets/{ticket_id}/{action}"),
-            Some(body),
-        )
-        .await
+fn decode<T: DeserializeOwned>(value: &Value) -> Result<T, McpError> {
+    serde_json::from_value(value.clone())
+        .map_err(|error| McpError::bad_request(format!("invalid tool arguments: {error}")))
 }
 
-fn string<'a>(args: &'a Value, name: &str) -> Result<&'a str, McpError> {
-    optional_string(args, name)
-        .ok_or_else(|| McpError::bad_request(format!("{name} must be a string")))
-}
-
-fn optional_string<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
-    args.get(name).and_then(Value::as_str)
-}
-
-fn integer(args: &Value, name: &str) -> Result<i64, McpError> {
-    args.get(name)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| McpError::bad_request(format!("{name} must be an integer")))
-}
-
-fn optional_integer(args: &Value, name: &str) -> Result<Option<i64>, McpError> {
-    match args.get(name) {
-        None => Ok(None),
-        Some(value) => value
-            .as_i64()
-            .map(Some)
-            .ok_or_else(|| McpError::bad_request(format!("{name} must be an integer"))),
-    }
-}
-
-fn channel_list_request(args: &Value) -> Result<Value, McpError> {
-    let channels = args
-        .get("channels")
-        .and_then(Value::as_array)
-        .filter(|channels| channels.iter().all(Value::is_string))
-        .ok_or_else(|| McpError::bad_request("channels must be an array of strings"))?;
-    Ok(json!({"channels": channels}))
-}
-
-fn project_list_request(args: &Value) -> Result<Value, McpError> {
-    let project_ids = args
-        .get("project_ids")
-        .and_then(Value::as_array)
-        .filter(|project_ids| project_ids.iter().all(Value::is_i64))
-        .ok_or_else(|| McpError::bad_request("project_ids must be an array of integers"))?;
-    Ok(json!({"project_ids": project_ids}))
+fn encode<T: Serialize>(value: T) -> Result<Value, McpError> {
+    serde_json::to_value(value)
+        .map_err(|error| McpError::internal(format!("invalid typed response: {error}")))
 }
 
 fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
@@ -630,6 +792,11 @@ fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
 
     #[tokio::test]
     async fn protocol_lists_tools_without_http() {
@@ -649,5 +816,62 @@ mod tests {
                 .len()
                 >= 8
         );
+    }
+
+    #[tokio::test]
+    async fn typed_client_decodes_protocol_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = serde_json::to_string(&vec![Ticket {
+            id: 47,
+            project_id: 1,
+            title: "Typed response".into(),
+            description: String::new(),
+            state: multi_agent_board_protocol::TicketState::Todo,
+            created_by_agent_id: None,
+            reserved_for_agent_id: None,
+            assignee_id: None,
+            implementation_branch: None,
+            review_commit: None,
+            review_target_branch: None,
+            review_project_id: None,
+            review_project_path: None,
+            reviewer_id: None,
+            review_feedback: None,
+            blocker_ids: Vec::new(),
+            unresolved_blockers: Vec::new(),
+            revision: 1,
+            created_at: 10,
+            updated_at: 10,
+        }])
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(request.starts_with("GET /tickets HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-multi-agent-board-agent-id: 2")
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .unwrap();
+        });
+
+        let tickets = BoardClient::new(format!("http://{address}"), 2)
+            .list_tickets()
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].id, 47);
+        assert_eq!(tickets[0].title, "Typed response");
     }
 }

@@ -5,6 +5,7 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
+use multi_agent_board_protocol as protocol;
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, CreateAgentRequest, RenameAgentRequest, RequestChangesRequest,
     ReviewRevisionRequest, SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
@@ -14,7 +15,6 @@ use std::{convert::Infallible, time::Duration};
 
 use crate::{
     agent_runtime::{AgentEvent, AgentManager},
-    domain::{Agent, AgentMessage, AgentProjectWorktree},
     error::AppError,
 };
 
@@ -56,59 +56,78 @@ pub fn router(manager: AgentManager) -> Router {
         .with_state(manager)
 }
 
-async fn list_agents(State(manager): State<AgentManager>) -> Result<Json<Vec<Agent>>, AppError> {
-    Ok(Json(manager.list().await?))
+async fn list_agents(
+    State(manager): State<AgentManager>,
+) -> Result<Json<Vec<protocol::Agent>>, AppError> {
+    Ok(Json(
+        manager.list().await?.into_iter().map(Into::into).collect(),
+    ))
 }
 
 async fn create_agent(
     State(manager): State<AgentManager>,
     Json(input): Json<CreateAgentRequest>,
-) -> Result<Json<Agent>, AppError> {
-    Ok(Json(manager.create(&input.name).await?))
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(manager.create(&input.name).await?.into()))
 }
 
 async fn rename_agent(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     Json(input): Json<RenameAgentRequest>,
-) -> Result<Json<Agent>, AppError> {
-    Ok(Json(manager.rename(id, &input.name).await?))
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(manager.rename(id, &input.name).await?.into()))
 }
 
 async fn agent_project_worktrees(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<AgentProjectWorktree>>, AppError> {
-    Ok(Json(manager.project_worktrees(id).await?))
+) -> Result<Json<Vec<protocol::AgentProjectWorktree>>, AppError> {
+    Ok(Json(
+        manager
+            .project_worktrees(id)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 async fn list_messages(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<AgentMessage>>, AppError> {
-    Ok(Json(manager.messages(id).await?))
+) -> Result<Json<Vec<protocol::AgentMessage>>, AppError> {
+    Ok(Json(
+        manager
+            .messages(id)
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<_, _>>()
+            .map_err(AppError::internal)?,
+    ))
 }
 
 async fn send_message(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     Json(input): Json<SendAgentMessageRequest>,
-) -> Result<Json<Agent>, AppError> {
-    Ok(Json(manager.send_message(id, &input.message).await?))
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(manager.send_message(id, &input.message).await?.into()))
 }
 
 async fn pause_agent(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-) -> Result<Json<Agent>, AppError> {
-    Ok(Json(manager.pause(id).await?))
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(manager.pause(id).await?.into()))
 }
 
 async fn resume_agent(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-) -> Result<Json<Agent>, AppError> {
-    Ok(Json(manager.resume(id).await?))
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(manager.resume(id).await?.into()))
 }
 
 async fn agent_scopes(
@@ -130,7 +149,7 @@ async fn set_agent_wake_settings(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
     Json(input): Json<SetAgentWakeSettingsRequest>,
-) -> Result<Json<Agent>, AppError> {
+) -> Result<Json<protocol::Agent>, AppError> {
     Ok(Json(
         manager
             .set_wake_settings(
@@ -139,7 +158,8 @@ async fn set_agent_wake_settings(
                 input.wake_on_pending_review,
                 input.idle_heartbeat_minutes,
             )
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
@@ -186,11 +206,12 @@ async fn submit_review(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ReviewRevisionRequest>,
-) -> Result<Json<crate::domain::Ticket>, AppError> {
+) -> Result<Json<protocol::Ticket>, AppError> {
     Ok(Json(
         manager
             .submit_review(id, caller_agent(&headers)?, input.expected_revision)
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
@@ -199,11 +220,12 @@ async fn claim_review(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ReviewRevisionRequest>,
-) -> Result<Json<crate::domain::TicketClaimResponse>, AppError> {
+) -> Result<Json<protocol::TicketClaimResponse>, AppError> {
     Ok(Json(
         manager
             .claim_review_with_transition(id, caller_agent(&headers)?, input.expected_revision)
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
@@ -212,7 +234,7 @@ async fn request_changes(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<RequestChangesRequest>,
-) -> Result<Json<crate::domain::Ticket>, AppError> {
+) -> Result<Json<protocol::Ticket>, AppError> {
     Ok(Json(
         manager
             .request_changes(
@@ -221,7 +243,8 @@ async fn request_changes(
                 &input.feedback,
                 input.expected_revision,
             )
-            .await?,
+            .await?
+            .into(),
     ))
 }
 
@@ -230,11 +253,12 @@ async fn approve_review(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ReviewRevisionRequest>,
-) -> Result<Json<crate::domain::Ticket>, AppError> {
+) -> Result<Json<protocol::Ticket>, AppError> {
     Ok(Json(
         manager
             .approve_review(id, caller_agent(&headers)?, input.expected_revision)
-            .await?,
+            .await?
+            .into(),
     ))
 }
 

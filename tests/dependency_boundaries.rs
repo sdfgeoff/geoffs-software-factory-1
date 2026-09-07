@@ -29,6 +29,7 @@ fn isolated_crates_have_only_allowed_dependencies() {
         &[
             "multi-agent-board-protocol",
             "reqwest",
+            "serde",
             "serde_json",
             "tokio",
         ],

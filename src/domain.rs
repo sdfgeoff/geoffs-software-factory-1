@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-pub use multi_agent_board_protocol::AgentProjectWorktree;
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BoardSettings {
     pub merge_notification_channel: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
+pub struct AgentProjectWorktree {
+    pub agent_id: i64,
+    pub project_id: i64,
+    pub path: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
@@ -420,6 +427,239 @@ pub enum WakeEventState {
     Delivered,
 }
 
+use multi_agent_board_protocol as wire;
+
+impl From<BoardSettings> for wire::BoardSettings {
+    fn from(value: BoardSettings) -> Self {
+        Self {
+            merge_notification_channel: value.merge_notification_channel,
+        }
+    }
+}
+
+impl From<Project> for wire::Project {
+    fn from(value: Project) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            path: value.path,
+            default_branch: value.default_branch,
+            archived_at: value.archived_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<TicketState> for wire::TicketState {
+    fn from(value: TicketState) -> Self {
+        match value {
+            TicketState::Todo => Self::Todo,
+            TicketState::InProgress => Self::InProgress,
+            TicketState::Review => Self::Review,
+            TicketState::Done => Self::Done,
+            TicketState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<wire::TicketState> for TicketState {
+    fn from(value: wire::TicketState) -> Self {
+        match value {
+            wire::TicketState::Todo => Self::Todo,
+            wire::TicketState::InProgress => Self::InProgress,
+            wire::TicketState::Review => Self::Review,
+            wire::TicketState::Done => Self::Done,
+            wire::TicketState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<TicketBlocker> for wire::TicketBlocker {
+    fn from(value: TicketBlocker) -> Self {
+        Self {
+            id: value.id,
+            title: value.title,
+        }
+    }
+}
+
+impl From<Ticket> for wire::Ticket {
+    fn from(value: Ticket) -> Self {
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            title: value.title,
+            description: value.description,
+            state: value.state.into(),
+            created_by_agent_id: value.created_by_agent_id,
+            reserved_for_agent_id: value.reserved_for_agent_id,
+            assignee_id: value.assignee_id,
+            implementation_branch: value.implementation_branch,
+            review_commit: value.review_commit,
+            review_target_branch: value.review_target_branch,
+            review_project_id: value.review_project_id,
+            review_project_path: value.review_project_path,
+            reviewer_id: value.reviewer_id,
+            review_feedback: value.review_feedback,
+            blocker_ids: value.blocker_ids,
+            unresolved_blockers: value
+                .unresolved_blockers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            revision: value.revision,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<TicketActivity> for wire::TicketActivity {
+    fn from(value: TicketActivity) -> Self {
+        Self {
+            id: value.id,
+            ticket_id: value.ticket_id,
+            action: value.action,
+            actor_agent_id: value.actor_agent_id,
+            previous_reserved_for_agent_id: value.previous_reserved_for_agent_id,
+            reserved_for_agent_id: value.reserved_for_agent_id,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<ProjectTransition> for wire::ProjectTransition {
+    fn from(value: ProjectTransition) -> Self {
+        Self {
+            agent_id: value.agent_id,
+            ticket_id: value.ticket_id,
+            previous_project_id: value.previous_project_id,
+            project_id: value.project_id,
+            project_name: value.project_name,
+            worktree_path: value.worktree_path,
+            message: value.message,
+        }
+    }
+}
+
+impl From<TicketClaimResponse> for wire::TicketClaimResponse {
+    fn from(value: TicketClaimResponse) -> Self {
+        Self {
+            ticket: value.ticket.into(),
+            project_transition: value.project_transition.map(Into::into),
+        }
+    }
+}
+
+impl From<Channel> for wire::Channel {
+    fn from(value: Channel) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            most_recent_message_at: value.most_recent_message_at,
+        }
+    }
+}
+
+impl From<Message> for wire::Message {
+    fn from(value: Message) -> Self {
+        Self {
+            id: value.id,
+            channel_name: value.channel_name,
+            agent_id: value.agent_id,
+            author: value.author,
+            body: value.body,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<AgentState> for wire::AgentState {
+    fn from(value: AgentState) -> Self {
+        match value {
+            AgentState::Paused => Self::Paused,
+            AgentState::Idle => Self::Idle,
+            AgentState::Running => Self::Running,
+            AgentState::AwaitingApproval => Self::AwaitingApproval,
+            AgentState::Error => Self::Error,
+        }
+    }
+}
+
+impl From<Agent> for wire::Agent {
+    fn from(value: Agent) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            state: value.state.into(),
+            thread_id: value.thread_id,
+            home_path: value.home_path,
+            active_project_id: value.active_project_id,
+            active_turn_id: value.active_turn_id,
+            last_error: value.last_error,
+            wake_on_pending_work: value.wake_on_pending_work,
+            wake_on_pending_review: value.wake_on_pending_review,
+            idle_heartbeat_minutes: value.idle_heartbeat_minutes,
+            idle_since: value.idle_since,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<AgentProjectWorktree> for wire::AgentProjectWorktree {
+    fn from(value: AgentProjectWorktree) -> Self {
+        Self {
+            agent_id: value.agent_id,
+            project_id: value.project_id,
+            path: value.path,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl TryFrom<AgentMessage> for wire::AgentMessage {
+    type Error = String;
+
+    fn try_from(value: AgentMessage) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            agent_id: value.agent_id,
+            role: wire::AgentMessageRole::try_from(value.role.as_str())?,
+            body: value.body,
+            created_at: value.created_at,
+        })
+    }
+}
+
+impl From<ReminderState> for wire::ReminderState {
+    fn from(value: ReminderState) -> Self {
+        match value {
+            ReminderState::Scheduled => Self::Scheduled,
+            ReminderState::Enqueued => Self::Enqueued,
+            ReminderState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<Reminder> for wire::Reminder {
+    fn from(value: Reminder) -> Self {
+        Self {
+            id: value.id,
+            agent_id: value.agent_id,
+            message: value.message,
+            deliver_at: value.deliver_at,
+            state: value.state.into(),
+            wake_event_id: value.wake_event_id,
+            enqueued_at: value.enqueued_at,
+            cancelled_at: value.cancelled_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +722,29 @@ mod tests {
         assert!(WakeEventData::from_parts("unknown", serde_json::json!({})).is_err());
         assert!(
             WakeEventData::from_parts("notification", serde_json::json!({"wrong": true})).is_err()
+        );
+    }
+
+    #[test]
+    fn ticket_state_converts_across_the_wire_boundary() {
+        let wire_state = wire::TicketState::from(TicketState::InProgress);
+        assert_eq!(wire_state, wire::TicketState::InProgress);
+        assert_eq!(TicketState::from(wire_state), TicketState::InProgress);
+    }
+
+    #[test]
+    fn invalid_persisted_agent_message_role_is_rejected() {
+        let message = AgentMessage {
+            id: 1,
+            agent_id: 2,
+            role: "assistant".into(),
+            body: "hello".into(),
+            created_at: 3,
+        };
+
+        assert_eq!(
+            wire::AgentMessage::try_from(message).unwrap_err(),
+            "invalid agent message role: assistant"
         );
     }
 }

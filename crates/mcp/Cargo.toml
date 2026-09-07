@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 multi-agent-board-protocol = { path = "../protocol" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util"] }
 
