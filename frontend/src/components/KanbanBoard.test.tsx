@@ -246,6 +246,22 @@ describe("KanbanBoard", () => {
     expect(screen.getByDisplayValue("Unsaved title")).toBeTruthy();
   });
 
+  it("keeps separate drafts while switching tickets", () => {
+    const other = { ...ticket, id: 8, title: "Second ticket" };
+    render(<KanbanBoard {...baseProps} tickets={[ticket, other]} />);
+    openTicket();
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "First draft" },
+    });
+    fireEvent.click(screen.getByText("Second ticket").closest("button")!);
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "Second draft" },
+    });
+    fireEvent.click(screen.getByText("Build the board").closest("button")!);
+
+    expect(screen.getByDisplayValue("First draft")).toBeTruthy();
+  });
+
   it("makes replacing an existing reservation an explicit override", async () => {
     vi.mocked(api.reserveTickets).mockResolvedValue([]);
     const changed = vi.fn().mockResolvedValue(undefined);

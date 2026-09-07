@@ -10,7 +10,7 @@ import type { BoardSettings as Settings, Channel } from "../types";
 interface Props {
   settings: Settings;
   channels: Channel[];
-  onChanged: () => Promise<void>;
+  onChanged: (settings: Settings) => void | Promise<void>;
   onError: (error: unknown) => void;
 }
 
@@ -34,8 +34,7 @@ export function BoardSettings({
     event.preventDefault();
     if (!valid) return;
     try {
-      await api.setSettings(channel || null);
-      await onChanged();
+      await onChanged(await api.setSettings(channel || null));
     } catch (error) {
       onError(error);
     }

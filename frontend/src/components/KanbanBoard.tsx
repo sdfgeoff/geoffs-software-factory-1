@@ -1,7 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Agent, Project, Ticket, TicketState } from "../types";
-import { TicketDetailPanel } from "./TicketDetailPanel";
+import {
+  TicketDetailPanel,
+  type TicketDraft,
+} from "./TicketDetailPanel";
 
 const columns: { state: TicketState; label: string }[] = [
   { state: "todo", label: "To do" },
@@ -19,7 +22,7 @@ interface Props {
   selectedTicketId?: number | null;
   onFilterProject?: (projectId: number | null) => void;
   onSelectTicket?: (ticketId: number | null) => void;
-  onChanged: () => Promise<void>;
+  onChanged: (tickets: Ticket | Ticket[]) => void | Promise<void>;
   onError: (error: unknown) => void;
 }
 
@@ -42,6 +45,7 @@ export function KanbanBoard({
   );
   const [showCancelled, setShowCancelled] = useState(false);
   const [localTicketId, setLocalTicketId] = useState<number | null>(null);
+  const [ticketDrafts, setTicketDrafts] = useState<Record<number, TicketDraft>>({});
   const selectedTicketId =
     routedTicketId === undefined ? localTicketId : routedTicketId;
   const selectTicket = onSelectTicket ?? setLocalTicketId;
@@ -69,9 +73,9 @@ export function KanbanBoard({
   async function create(event: FormEvent) {
     event.preventDefault();
     try {
-      await api.createTicket(title, Number(projectId));
+      const created = await api.createTicket(title, Number(projectId));
       setTitle("");
-      await onChanged();
+      await onChanged(created);
     } catch (error) {
       onError(error);
     }
@@ -165,6 +169,13 @@ export function KanbanBoard({
           )}
           onClose={() => selectTicket(null)}
           onChanged={onChanged}
+          draft={ticketDrafts[selectedTicket.id]}
+          onDraftChange={(draft) =>
+            setTicketDrafts((current) => ({
+              ...current,
+              [selectedTicket.id]: draft,
+            }))
+          }
           onError={onError}
         />
       )}

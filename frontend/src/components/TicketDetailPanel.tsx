@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, type FormEvent } from "react";
 import { api } from "../api";
 import type { Agent, Project, Ticket, TicketState } from "../types";
 
@@ -8,8 +8,34 @@ interface Props {
   agents: Agent[];
   project?: Project;
   onClose: () => void;
-  onChanged: () => Promise<void>;
+  onChanged: (tickets: Ticket | Ticket[]) => void | Promise<void>;
+  draft?: TicketDraft;
+  onDraftChange: (draft: TicketDraft) => void;
   onError: (error: unknown) => void;
+}
+
+export interface TicketDraft {
+  title: string;
+  description: string;
+  assignee: string;
+  reservation: string;
+  blockerIds: number[];
+  blockerQuery: string;
+  baseRevision: number;
+  dirty: boolean;
+}
+
+export function ticketDraft(ticket: Ticket): TicketDraft {
+  return {
+    title: ticket.title,
+    description: ticket.description,
+    assignee: ticket.assignee_id?.toString() ?? "",
+    reservation: ticket.reserved_for_agent_id?.toString() ?? "",
+    blockerIds: ticket.blocker_ids,
+    blockerQuery: "",
+    baseRevision: ticket.revision,
+    dirty: false,
+  };
 }
 
 const stateLabels: Record<TicketState, string> = {
@@ -27,18 +53,11 @@ export function TicketDetailPanel({
   project,
   onClose,
   onChanged,
+  draft: savedDraft,
+  onDraftChange,
   onError,
 }: Props) {
-  const [title, setTitle] = useState(ticket.title);
-  const [description, setDescription] = useState(ticket.description);
-  const [assignee, setAssignee] = useState(
-    ticket.assignee_id?.toString() ?? "",
-  );
-  const [reservation, setReservation] = useState(
-    ticket.reserved_for_agent_id?.toString() ?? "",
-  );
-  const [blockerIds, setBlockerIds] = useState(ticket.blocker_ids);
-  const [blockerQuery, setBlockerQuery] = useState("");
+  const draft = savedDraft ?? ticketDraft(ticket);
   const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
   const reservedFor = agents.find(
     (agent) => agent.id === ticket.reserved_for_agent_id,
@@ -47,49 +66,51 @@ export function TicketDetailPanel({
   const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
   const matchingBlockers = tickets.filter((candidate) => {
     if (candidate.id === ticket.id) return false;
-    const query = blockerQuery.trim().toLowerCase();
+    const query = draft.blockerQuery.trim().toLowerCase();
     return (
-      blockerIds.includes(candidate.id) ||
+      draft.blockerIds.includes(candidate.id) ||
       !query ||
       `#${candidate.id} ${candidate.title}`.toLowerCase().includes(query)
     );
   });
 
   useEffect(() => {
-    setTitle(ticket.title);
-    setDescription(ticket.description);
-    setAssignee(ticket.assignee_id?.toString() ?? "");
-    setReservation(ticket.reserved_for_agent_id?.toString() ?? "");
-    setBlockerIds(ticket.blocker_ids);
-    setBlockerQuery("");
-  }, [ticket.id, ticket.revision]);
+    if (!savedDraft || (!draft.dirty && draft.baseRevision !== ticket.revision)) {
+      onDraftChange(ticketDraft(ticket));
+    }
+  }, [draft.baseRevision, draft.dirty, onDraftChange, savedDraft, ticket]);
+
+  const updatedElsewhere = draft.dirty && ticket.revision !== draft.baseRevision;
+  const updateDraft = (changes: Partial<TicketDraft>, dirty = true) =>
+    onDraftChange({ ...draft, ...changes, dirty: dirty || draft.dirty });
 
   async function save(event: FormEvent) {
     event.preventDefault();
     try {
-      await api.updateTicket(ticket, {
-        title,
-        description,
-        assignee_id: assignee ? Number(assignee) : null,
-        blocker_ids: blockerIds,
+      const updated = await api.updateTicket({ ...ticket, revision: draft.baseRevision }, {
+        title: draft.title,
+        description: draft.description,
+        assignee_id: draft.assignee ? Number(draft.assignee) : null,
+        blocker_ids: draft.blockerIds,
       });
-      await onChanged();
+      onDraftChange(ticketDraft(updated));
+      await onChanged(updated);
     } catch (error) {
       onError(error);
     }
   }
 
   async function reserve() {
-    if (!reservation) return;
+    if (!draft.reservation) return;
     try {
-      const agentId = Number(reservation);
-      await api.reserveTickets(
+      const agentId = Number(draft.reservation);
+      const updated = await api.reserveTickets(
         [ticket.id],
         agentId,
         ticket.reserved_for_agent_id !== null &&
           ticket.reserved_for_agent_id !== agentId,
       );
-      await onChanged();
+      await onChanged(updated);
     } catch (error) {
       onError(error);
     }
@@ -97,8 +118,7 @@ export function TicketDetailPanel({
 
   async function transition(state: TicketState) {
     try {
-      await api.updateTicket(ticket, { state });
-      await onChanged();
+      await onChanged(await api.updateTicket(ticket, { state }));
     } catch (error) {
       onError(error);
     }
@@ -118,11 +138,11 @@ export function TicketDetailPanel({
         : [];
 
   return (
-    <aside className="ticket-detail-panel" aria-labelledby="ticket-detail-title">
+    <aside className="ticket-detail-panel" aria-labelledby={`ticket-detail-title-${ticket.id}`}>
       <div className="ticket-detail-header">
         <div>
           <span className="ticket-number">Ticket #{ticket.id}</span>
-          <h2 id="ticket-detail-title">{ticket.title}</h2>
+          <h2 id={`ticket-detail-title-${ticket.id}`}>{ticket.title}</h2>
         </div>
         <button type="button" className="ghost" onClick={onClose}>
           Close
@@ -188,11 +208,19 @@ export function TicketDetailPanel({
       )}
 
       <form className="ticket-detail-form" onSubmit={save}>
+        {updatedElsewhere && (
+          <p className="inline-error" role="status">
+            This ticket was updated elsewhere. Your draft has been preserved;
+            review the latest changes before saving.
+          </p>
+        )}
         <label>
           Title
           <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
+            value={draft.title}
+            onChange={(event) => {
+              updateDraft({ title: event.target.value });
+            }}
             maxLength={200}
             required
           />
@@ -200,16 +228,20 @@ export function TicketDetailPanel({
         <label>
           Description
           <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
+            value={draft.description}
+            onChange={(event) => {
+              updateDraft({ description: event.target.value });
+            }}
             rows={7}
           />
         </label>
         <label>
           Active assignee
           <select
-            value={assignee}
-            onChange={(event) => setAssignee(event.target.value)}
+            value={draft.assignee}
+            onChange={(event) => {
+              updateDraft({ assignee: event.target.value });
+            }}
           >
             <option value="">Unassigned</option>
             {agents.map((agent) => (
@@ -225,8 +257,8 @@ export function TicketDetailPanel({
             Search tickets
             <input
               type="search"
-              value={blockerQuery}
-              onChange={(event) => setBlockerQuery(event.target.value)}
+              value={draft.blockerQuery}
+              onChange={(event) => updateDraft({ blockerQuery: event.target.value }, false)}
               placeholder="Search by ID or title"
             />
           </label>
@@ -238,14 +270,15 @@ export function TicketDetailPanel({
               <label key={candidate.id}>
                 <input
                   type="checkbox"
-                  checked={blockerIds.includes(candidate.id)}
-                  onChange={(event) =>
-                    setBlockerIds((current) =>
+                  checked={draft.blockerIds.includes(candidate.id)}
+                  onChange={(event) => {
+                    updateDraft({
+                      blockerIds:
                       event.target.checked
-                        ? [...current, candidate.id]
-                        : current.filter((id) => id !== candidate.id),
-                    )
-                  }
+                        ? [...draft.blockerIds, candidate.id]
+                        : draft.blockerIds.filter((id) => id !== candidate.id),
+                    });
+                  }}
                 />
                 <span>
                   <strong>
@@ -265,8 +298,8 @@ export function TicketDetailPanel({
           <label>
             Reservation
             <select
-              value={reservation}
-              onChange={(event) => setReservation(event.target.value)}
+              value={draft.reservation}
+              onChange={(event) => updateDraft({ reservation: event.target.value }, false)}
             >
               <option value="">Not reserved</option>
               {agents.map((agent) => (
@@ -280,13 +313,13 @@ export function TicketDetailPanel({
             type="button"
             onClick={reserve}
             disabled={
-              !reservation ||
-              reservation ===
+              !draft.reservation ||
+              draft.reservation ===
                 (ticket.reserved_for_agent_id?.toString() ?? "")
             }
           >
             {ticket.reserved_for_agent_id &&
-            reservation !== ticket.reserved_for_agent_id.toString()
+            draft.reservation !== ticket.reserved_for_agent_id.toString()
               ? "Override reservation"
               : "Reserve"}
           </button>

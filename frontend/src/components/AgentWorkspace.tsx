@@ -20,11 +20,20 @@ interface Props {
   selectedAgentId: number | null;
   view: AgentView;
   refresh: number;
+  detailRefresh?: number;
   deltas: Record<number, string>;
   onSelectAgent: (id: number) => void;
   onViewChange: (view: AgentView) => void;
-  onChanged: () => Promise<void>;
+  onChanged: (agent: Agent) => void | Promise<void>;
   onError: (error: unknown) => void;
+}
+
+interface AgentSettingsDraft {
+  name: string;
+  wakeOnPendingWork: boolean;
+  wakeOnPendingReview: boolean;
+  heartbeatEnabled: boolean;
+  heartbeatMinutes: string;
 }
 
 export function AgentWorkspace({
@@ -35,6 +44,7 @@ export function AgentWorkspace({
   selectedAgentId,
   view,
   refresh,
+  detailRefresh = 0,
   deltas,
   onSelectAgent,
   onViewChange,
@@ -42,18 +52,29 @@ export function AgentWorkspace({
   onError,
 }: Props) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesAgentId, setMessagesAgentId] = useState<number | null>(null);
   const [worktrees, setWorktrees] = useState<AgentProjectWorktree[]>([]);
+  const [detailsAgentId, setDetailsAgentId] = useState<number | null>(null);
   const [name, setName] = useState("");
-  const [renamedName, setRenamedName] = useState("");
-  const [prompt, setPrompt] = useState("");
+  const [prompts, setPrompts] = useState<Record<number, string>>({});
+  const [settingsDrafts, setSettingsDrafts] = useState<
+    Record<number, AgentSettingsDraft>
+  >({});
   const [scopes, setScopes] = useState<string[]>([]);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
-  const [wakeOnPendingWork, setWakeOnPendingWork] = useState(false);
-  const [wakeOnPendingReview, setWakeOnPendingReview] = useState(false);
-  const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
-  const [heartbeatMinutes, setHeartbeatMinutes] = useState("20");
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const prompt = selected ? prompts[selected.id] ?? "" : "";
+  const settingsDraft = selected
+    ? settingsDrafts[selected.id] ?? {
+        name: selected.name,
+        wakeOnPendingWork: selected.wake_on_pending_work,
+        wakeOnPendingReview: selected.wake_on_pending_review,
+        heartbeatEnabled: selected.idle_heartbeat_minutes !== null,
+        heartbeatMinutes: String(selected.idle_heartbeat_minutes ?? 20),
+      }
+    : null;
   const currentTicket = tickets.find(
     (ticket) =>
       ticket.assignee_id === selected?.id &&
@@ -62,53 +83,92 @@ export function AgentWorkspace({
   const activeProject = projects.find(
     (project) => project.id === selected?.active_project_id,
   );
-  const activeWorktree = worktrees.find(
+  const currentWorktrees = detailsAgentId === selectedAgentId ? worktrees : [];
+  const currentScopes = detailsAgentId === selectedAgentId ? scopes : [];
+  const currentSubscriptions =
+    detailsAgentId === selectedAgentId ? subscriptions : [];
+  const activeWorktree = currentWorktrees.find(
     (worktree) => worktree.project_id === selected?.active_project_id,
   );
   useEffect(() => {
-    if (!selected && agents[0]) onSelectAgent(agents[0].id);
-  }, [agents, selected, onSelectAgent]);
-  useEffect(() => setRenamedName(selected?.name ?? ""), [selected?.name]);
+    if (selectedAgentId === null && agents[0]) onSelectAgent(agents[0].id);
+  }, [agents, selectedAgentId, onSelectAgent]);
   useEffect(() => {
-    setWakeOnPendingWork(selected?.wake_on_pending_work ?? false);
-    setWakeOnPendingReview(selected?.wake_on_pending_review ?? false);
-    setHeartbeatEnabled(selected?.idle_heartbeat_minutes !== null);
-    setHeartbeatMinutes(String(selected?.idle_heartbeat_minutes ?? 20));
-  }, [
-    selected?.id,
-    selected?.idle_heartbeat_minutes,
-    selected?.wake_on_pending_work,
-    selected?.wake_on_pending_review,
-  ]);
+    if (!selected) return;
+    setSettingsDrafts((current) =>
+      current[selected.id]
+        ? current
+        : {
+            ...current,
+            [selected.id]: {
+              name: selected.name,
+              wakeOnPendingWork: selected.wake_on_pending_work,
+              wakeOnPendingReview: selected.wake_on_pending_review,
+              heartbeatEnabled: selected.idle_heartbeat_minutes !== null,
+              heartbeatMinutes: String(selected.idle_heartbeat_minutes ?? 20),
+            },
+          },
+    );
+  }, [selected]);
   useEffect(() => {
-    if (selectedAgentId)
-      void api.agentMessages(selectedAgentId).then(setMessages).catch(onError);
-  }, [selectedAgentId, refresh, onError]);
-  useEffect(() => {
-    if (selectedAgentId)
+    let current = true;
+    setMessages([]);
+    setMessagesLoading(Boolean(selectedAgentId));
+    if (selectedAgentId) {
       void api
-        .agentProjectWorktrees(selectedAgentId)
-        .then(setWorktrees)
-        .catch(onError);
+        .agentMessages(selectedAgentId)
+        .then((next) => {
+          if (current) {
+            setMessages(next);
+            setMessagesAgentId(selectedAgentId);
+          }
+        })
+        .catch(onError)
+        .finally(() => {
+          if (current) setMessagesLoading(false);
+        });
+    }
+    return () => {
+      current = false;
+    };
   }, [selectedAgentId, refresh, onError]);
   useEffect(() => {
-    if (selectedAgentId)
-      void api.agentScopes(selectedAgentId).then(setScopes).catch(onError);
-  }, [selectedAgentId, refresh, onError]);
-  useEffect(() => {
-    if (selectedAgentId)
-      void api
-        .agentChannelSubscriptions(selectedAgentId)
-        .then(setSubscriptions)
-        .catch(onError);
-  }, [selectedAgentId, refresh, onError]);
+    let current = true;
+    setWorktrees([]);
+    setScopes([]);
+    setSubscriptions([]);
+    setDetailsAgentId(null);
+    if (selectedAgentId) {
+      void Promise.all([
+        api.agentProjectWorktrees(selectedAgentId),
+        api.agentScopes(selectedAgentId),
+        api.agentChannelSubscriptions(selectedAgentId),
+      ]).then(([nextWorktrees, nextScopes, nextSubscriptions]) => {
+        if (!current) return;
+        setWorktrees(nextWorktrees);
+        setScopes(nextScopes);
+        setSubscriptions(nextSubscriptions);
+        setDetailsAgentId(selectedAgentId);
+      }).catch(onError);
+    }
+    return () => {
+      current = false;
+    };
+  }, [selectedAgentId, detailRefresh, onError]);
+  function updateSettings(changes: Partial<AgentSettingsDraft>) {
+    if (!selected || !settingsDraft) return;
+    setSettingsDrafts((current) => ({
+      ...current,
+      [selected.id]: { ...settingsDraft, ...changes },
+    }));
+  }
   async function create(event: FormEvent) {
     event.preventDefault();
     try {
       const agent = await api.createAgent(name);
       setName("");
       onSelectAgent(agent.id);
-      await onChanged();
+      await onChanged(agent);
     } catch (error) {
       onError(error);
     }
@@ -117,9 +177,9 @@ export function AgentWorkspace({
     event.preventDefault();
     if (!selected) return;
     try {
-      await api.sendAgentMessage(selected.id, prompt);
-      setPrompt("");
-      await onChanged();
+      const updated = await api.sendAgentMessage(selected.id, prompt);
+      setPrompts((current) => ({ ...current, [selected.id]: "" }));
+      await onChanged(updated);
     } catch (error) {
       onError(error);
     }
@@ -128,8 +188,9 @@ export function AgentWorkspace({
     event.preventDefault();
     if (!selected) return;
     try {
-      await api.renameAgent(selected.id, renamedName);
-      await onChanged();
+      const updated = await api.renameAgent(selected.id, settingsDraft!.name);
+      updateSettings({ name: updated.name });
+      await onChanged(updated);
     } catch (error) {
       onError(error);
     }
@@ -137,10 +198,10 @@ export function AgentWorkspace({
   async function toggle() {
     if (!selected) return;
     try {
-      selected.state === "paused" || selected.state === "error"
+      const updated = selected.state === "paused" || selected.state === "error"
         ? await api.resumeAgent(selected.id)
         : await api.pauseAgent(selected.id);
-      await onChanged();
+      await onChanged(updated);
     } catch (error) {
       onError(error);
     }
@@ -148,11 +209,10 @@ export function AgentWorkspace({
   async function setScope(scope: string, enabled: boolean) {
     if (!selected) return;
     const next = enabled
-      ? [...new Set([...scopes, scope])]
-      : scopes.filter((item) => item !== scope);
+      ? [...new Set([...currentScopes, scope])]
+      : currentScopes.filter((item) => item !== scope);
     try {
       setScopes(await api.setAgentScopes(selected.id, next));
-      await onChanged();
     } catch (error) {
       onError(error);
     }
@@ -160,13 +220,12 @@ export function AgentWorkspace({
   async function setSubscription(channel: string, enabled: boolean) {
     if (!selected) return;
     const next = enabled
-      ? [...new Set([...subscriptions, channel])]
-      : subscriptions.filter((item) => item !== channel);
+      ? [...new Set([...currentSubscriptions, channel])]
+      : currentSubscriptions.filter((item) => item !== channel);
     try {
       setSubscriptions(
         await api.setAgentChannelSubscriptions(selected.id, next),
       );
-      await onChanged();
     } catch (error) {
       onError(error);
     }
@@ -175,13 +234,15 @@ export function AgentWorkspace({
     event.preventDefault();
     if (!selected) return;
     try {
-      await api.setAgentWakeSettings(
+      const updated = await api.setAgentWakeSettings(
         selected.id,
-        wakeOnPendingWork,
-        wakeOnPendingReview,
-        heartbeatEnabled ? Number(heartbeatMinutes) : null,
+        settingsDraft!.wakeOnPendingWork,
+        settingsDraft!.wakeOnPendingReview,
+        settingsDraft!.heartbeatEnabled
+          ? Number(settingsDraft!.heartbeatMinutes)
+          : null,
       );
-      await onChanged();
+      await onChanged(updated);
     } catch (error) {
       onError(error);
     }
@@ -269,7 +330,7 @@ export function AgentWorkspace({
               <section>
                 <h4>Project worktrees</h4>
                 <dl>
-                  {worktrees.map((worktree) => (
+                  {currentWorktrees.map((worktree) => (
                     <div key={worktree.project_id}>
                       <dt>{projects.find((project) => project.id === worktree.project_id)?.name ?? `Project #${worktree.project_id}`}</dt>
                       <dd className="worktree-path">{worktree.path}</dd>
@@ -281,8 +342,8 @@ export function AgentWorkspace({
                 <label>
                   Agent name
                   <input
-                    value={renamedName}
-                    onChange={(event) => setRenamedName(event.target.value)}
+                    value={settingsDraft?.name ?? ""}
+                    onChange={(event) => updateSettings({ name: event.target.value })}
                     pattern="[A-Za-z0-9_-]+"
                     maxLength={50}
                     required
@@ -291,7 +352,7 @@ export function AgentWorkspace({
                 <button
                   type="submit"
                   disabled={
-                    renamedName === selected.name ||
+                    settingsDraft?.name === selected.name ||
                     selected.state === "running" ||
                     selected.state === "awaiting_approval"
                   }
@@ -304,7 +365,7 @@ export function AgentWorkspace({
                 <label>
                   <input
                     type="checkbox"
-                    checked={scopes.includes("approve_review")}
+                      checked={currentScopes.includes("approve_review")}
                     onChange={(event) =>
                       void setScope("approve_review", event.target.checked)
                     }
@@ -321,9 +382,9 @@ export function AgentWorkspace({
                   <label>
                     <input
                       type="checkbox"
-                      checked={wakeOnPendingWork}
+                      checked={settingsDraft?.wakeOnPendingWork ?? false}
                       onChange={(event) =>
-                        setWakeOnPendingWork(event.target.checked)
+                        updateSettings({ wakeOnPendingWork: event.target.checked })
                       }
                     />
                     <span>
@@ -334,9 +395,9 @@ export function AgentWorkspace({
                   <label>
                     <input
                       type="checkbox"
-                      checked={wakeOnPendingReview}
+                      checked={settingsDraft?.wakeOnPendingReview ?? false}
                       onChange={(event) =>
-                        setWakeOnPendingReview(event.target.checked)
+                        updateSettings({ wakeOnPendingReview: event.target.checked })
                       }
                     />
                     <span>
@@ -347,9 +408,9 @@ export function AgentWorkspace({
                   <label>
                     <input
                       type="checkbox"
-                      checked={heartbeatEnabled}
+                      checked={settingsDraft?.heartbeatEnabled ?? false}
                       onChange={(event) =>
-                        setHeartbeatEnabled(event.target.checked)
+                        updateSettings({ heartbeatEnabled: event.target.checked })
                       }
                     />
                     <span>
@@ -363,11 +424,11 @@ export function AgentWorkspace({
                       type="number"
                       min="1"
                       max="10080"
-                      required={heartbeatEnabled}
-                      disabled={!heartbeatEnabled}
-                      value={heartbeatMinutes}
+                      required={settingsDraft?.heartbeatEnabled ?? false}
+                      disabled={!settingsDraft?.heartbeatEnabled}
+                      value={settingsDraft?.heartbeatMinutes ?? "20"}
                       onChange={(event) =>
-                        setHeartbeatMinutes(event.target.value)
+                        updateSettings({ heartbeatMinutes: event.target.value })
                       }
                     />
                   </label>
@@ -380,7 +441,7 @@ export function AgentWorkspace({
                   <label key={channel.name}>
                     <input
                       type="checkbox"
-                      checked={subscriptions.includes(channel.name)}
+                      checked={currentSubscriptions.includes(channel.name)}
                       onChange={(event) =>
                         void setSubscription(channel.name, event.target.checked)
                       }
@@ -395,7 +456,10 @@ export function AgentWorkspace({
             </section>
             <section className="agent-chat-panel" hidden={view !== "chat"}>
               <div className="message-list agent-chat">
-                {messages.map((message) => (
+                {(messagesLoading || messagesAgentId !== selected.id) && (
+                  <p className="empty">Loading messages…</p>
+                )}
+                {messagesAgentId === selected.id && messages.map((message) => (
                   <article className={message.role} key={message.id}>
                     <strong>{message.role}</strong>
                     <MessageContent source={message.body} />
@@ -413,7 +477,12 @@ export function AgentWorkspace({
                   Message
                   <textarea
                     value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
+                    onChange={(event) =>
+                      setPrompts((current) => ({
+                        ...current,
+                        [selected.id]: event.target.value,
+                      }))
+                    }
                     required
                   />
                 </label>

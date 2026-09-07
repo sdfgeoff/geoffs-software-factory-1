@@ -17,7 +17,7 @@ interface Props {
   refresh: number;
   onSelectChannel?: (name: string) => void;
   onSelectAgent: (id: number) => void;
-  onChanged: () => Promise<void>;
+  onChanged: (channel?: Channel) => void | Promise<void>;
   onError: (error: unknown) => void;
 }
 
@@ -33,7 +33,9 @@ export function MessageBoard({
 }: Props) {
   const [channel, setChannel] = useState(selectedChannelName ?? "general");
   const [messages, setMessages] = useState<BoardMessage[]>([]);
-  const [body, setBody] = useState("");
+  const [messagesChannel, setMessagesChannel] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [newChannel, setNewChannel] = useState("");
   const [newDescription, setNewDescription] = useState("");
@@ -41,18 +43,36 @@ export function MessageBoard({
   const validDescription =
     [...newDescription].length <= channelDescriptionMaxLength;
   const selectedChannel = channels.find((item) => item.name === channel);
+  const body = drafts[channel] ?? "";
   useEffect(() => {
     if (selectedChannelName) setChannel(selectedChannelName);
   }, [selectedChannelName]);
   useEffect(() => {
-    void api.messages(channel).then(setMessages).catch(onError);
+    let current = true;
+    setMessages([]);
+    setLoading(true);
+    void api
+      .messages(channel)
+      .then((next) => {
+        if (current) {
+          setMessages(next);
+          setMessagesChannel(channel);
+        }
+      })
+      .catch(onError)
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
   }, [channel, refresh, onError]);
   async function post(event: FormEvent) {
     event.preventDefault();
     try {
-      await api.postMessage(channel, body);
-      setBody("");
-      await onChanged();
+      const created = await api.postMessage(channel, body);
+      setMessages((current) => [...current, created]);
+      setDrafts((current) => ({ ...current, [channel]: "" }));
     } catch (error) {
       onError(error);
     }
@@ -68,7 +88,7 @@ export function MessageBoard({
       setCreatingChannel(false);
       setNewChannel("");
       setNewDescription("");
-      await onChanged();
+      await onChanged(created);
     } catch (error) {
       onError(error);
     }
@@ -167,10 +187,13 @@ export function MessageBoard({
           <p className="channel-description">{selectedChannel.description}</p>
         )}
         <div className="message-list">
-          {messages.length === 0 && (
+          {(loading || messagesChannel !== channel) && (
+            <p className="empty">Loading messages…</p>
+          )}
+          {!loading && messagesChannel === channel && messages.length === 0 && (
             <p className="empty">No messages in #{channel} yet.</p>
           )}
-          {messages.map((message) => {
+          {messagesChannel === channel && messages.map((message) => {
             const agent = agents.find(
               (item) =>
                 item.id === message.agent_id ||
@@ -202,7 +225,12 @@ export function MessageBoard({
             Message
             <textarea
               value={body}
-              onChange={(event) => setBody(event.target.value)}
+              onChange={(event) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [channel]: event.target.value,
+                }))
+              }
               required
             />
           </label>

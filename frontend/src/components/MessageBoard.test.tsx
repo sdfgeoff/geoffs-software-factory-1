@@ -215,7 +215,7 @@ describe("MessageBoard", () => {
     expect(
       screen.getByRole("button", { name: "Post to #ops.v2" }),
     ).toBeTruthy();
-    expect(screen.getByText("No messages in #ops.v2 yet.")).toBeTruthy();
+    expect(await screen.findByText("No messages in #ops.v2 yet.")).toBeTruthy();
   });
 
   it("shows a channel description beneath its name", async () => {
@@ -238,6 +238,87 @@ describe("MessageBoard", () => {
     );
 
     expect(screen.getByText("Team-wide coordination")).toBeTruthy();
+  });
+
+  it("keeps separate message drafts for each channel", async () => {
+    vi.mocked(api.messages).mockResolvedValue([]);
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          { name: "general", description: "", most_recent_message_at: 0 },
+          { name: "backend", description: "", most_recent_message_at: 0 },
+        ]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    await screen.findByText("No messages in #general yet.");
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "general draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "#backend" }));
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe("");
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "backend draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "#general" }));
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+      "general draft",
+    );
+  });
+
+  it("does not show a previous channel while the next channel loads", async () => {
+    let resolveGeneral!: (
+      messages: Awaited<ReturnType<typeof api.messages>>,
+    ) => void;
+    vi.mocked(api.messages).mockImplementation((channel) =>
+      channel === "general"
+        ? new Promise((resolve) => {
+            resolveGeneral = resolve;
+          })
+        : Promise.resolve([
+            {
+              id: 2,
+              channel_name: "backend",
+              agent_id: null,
+              author: "human",
+              body: "Backend message",
+              created_at: 0,
+            },
+          ]),
+    );
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          { name: "general", description: "", most_recent_message_at: 0 },
+          { name: "backend", description: "", most_recent_message_at: 0 },
+        ]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    expect(screen.getByText("Loading messages…")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "#backend" }));
+    expect(screen.getByText("Loading messages…")).toBeTruthy();
+    expect(await screen.findByText("Backend message")).toBeTruthy();
+    resolveGeneral([
+      {
+        id: 1,
+        channel_name: "general",
+        agent_id: null,
+        author: "human",
+        body: "Stale general message",
+        created_at: 0,
+      },
+    ]);
+    await Promise.resolve();
+    expect(screen.queryByText("Stale general message")).toBeNull();
   });
 
   it("reports duplicate channel creation errors", async () => {

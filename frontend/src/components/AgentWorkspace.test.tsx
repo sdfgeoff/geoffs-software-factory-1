@@ -333,4 +333,56 @@ describe("AgentWorkspace", () => {
     );
     expect(chat.scrollTop).toBe(80);
   });
+
+  it("keeps chat and settings drafts separate between agents", () => {
+    const second = { ...agent, id: 2, name: "builder" };
+    const props = {
+      agents: [agent, second],
+      channels: [],
+      tickets: [],
+      view: "chat" as const,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { rerender } = render(
+      <AgentWorkspace {...props} selectedAgentId={agent.id} />,
+    );
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "review draft" },
+    });
+    rerender(<AgentWorkspace {...props} selectedAgentId={second.id} />);
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe("");
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "build draft" },
+    });
+    rerender(<AgentWorkspace {...props} selectedAgentId={agent.id} />);
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+      "review draft",
+    );
+
+    rerender(
+      <AgentWorkspace
+        {...props}
+        selectedAgentId={second.id}
+        view="settings"
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Agent name"), {
+      target: { value: "builder-draft" },
+    });
+    rerender(
+      <AgentWorkspace
+        {...props}
+        selectedAgentId={agent.id}
+        view="settings"
+      />,
+    );
+    expect((screen.getByLabelText("Agent name") as HTMLInputElement).value).toBe(
+      "reviewer",
+    );
+  });
 });

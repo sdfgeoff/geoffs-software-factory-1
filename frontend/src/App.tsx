@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import {
   AgentWorkspace,
@@ -97,9 +97,25 @@ export function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [refresh, setRefresh] = useState(0);
+  const [agentMessageRefresh, setAgentMessageRefresh] = useState(0);
+  const [agentDetailRefresh, setAgentDetailRefresh] = useState(0);
   const [deltas, setDeltas] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const reloadTimer = useRef<number | null>(null);
+  const [visitedViews, setVisitedViews] = useState(() => new Set([route.view]));
+  const [lastBoardRoute, setLastBoardRoute] = useState(() =>
+    route.view === "board"
+      ? route
+      : { view: "board", projectId: null, ticketId: null } as const,
+  );
+  const [lastMessageChannel, setLastMessageChannel] = useState(() =>
+    route.view === "messages" ? route.channel : "general",
+  );
+  const [lastAgentRoute, setLastAgentRoute] = useState(() =>
+    route.view === "agents"
+      ? route
+      : { view: "agents", agentId: null, agentView: "chat" } as const,
+  );
 
   const reload = useCallback(async () => {
     try {
@@ -118,36 +134,91 @@ export function App() {
       setChannels(nextChannels);
       setAgents(nextAgents);
       setSettings(nextSettings);
-      setRefresh((value) => value + 1);
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
 
+  const reloadProjects = useCallback(async () => {
+    try {
+      const [nextProject, nextProjects] = await Promise.all([
+        api.project(),
+        api.projects(),
+      ]);
+      setProject(nextProject);
+      setProjects(nextProjects);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  const mergeTickets = useCallback((updates: Ticket | Ticket[]) => {
+    const next = Array.isArray(updates) ? updates : [updates];
+    setTickets((current) => {
+      const byId = new Map(current.map((ticket) => [ticket.id, ticket]));
+      next.forEach((ticket) => byId.set(ticket.id, ticket));
+      return [...byId.values()];
+    });
+  }, []);
+  const mergeAgent = useCallback((updated: Agent) => {
+    setAgents((current) => {
+      const index = current.findIndex((agent) => agent.id === updated.id);
+      if (index < 0) return [...current, updated];
+      return current.map((agent) => agent.id === updated.id ? updated : agent);
+    });
+  }, []);
+  const mergeChannel = useCallback((updated?: Channel) => {
+    if (!updated) return;
+    setChannels((current) =>
+      current.some((channel) => channel.name === updated.name)
+        ? current.map((channel) =>
+            channel.name === updated.name ? updated : channel,
+          )
+        : [...current, updated],
+    );
+  }, []);
+  const scheduleReload = useCallback(() => {
+    if (reloadTimer.current !== null) return;
+    reloadTimer.current = window.setTimeout(() => {
+      reloadTimer.current = null;
+      void reload();
+    }, 50);
+  }, [reload]);
+
   useEffect(() => {
     void reload();
     const source = new EventSource("/api/events");
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as AgentEvent;
-      if (
-        event.kind === "agent_message_delta" &&
-        event.agent_id &&
-        event.data?.delta
-      ) {
+      const data = event.data as Record<string, unknown> | null;
+      if (event.kind === "agent_message_delta" && typeof data?.delta === "string") {
+        const delta = data.delta;
         setDeltas((current) => ({
           ...current,
-          [event.agent_id!]:
-            (current[event.agent_id!] ?? "") + event.data!.delta,
+          [event.agent_id]:
+            (current[event.agent_id] ?? "") + delta,
         }));
-      } else {
-        if (event.kind === "message" && event.agent_id)
-          setDeltas((current) => ({ ...current, [event.agent_id!]: "" }));
-        void reload();
+      } else if (event.kind === "agent_updated" || event.kind === "agent_created") {
+        mergeAgent(event.data as Agent);
+      } else if (event.kind === "ticket_updated") {
+        mergeTickets(event.data as Ticket);
+      } else if (event.kind === "settings_updated") {
+        setSettings(event.data as Settings);
+      } else if (event.kind === "message") {
+        setDeltas((current) => ({ ...current, [event.agent_id]: "" }));
+        setAgentMessageRefresh((value) => value + 1);
+      } else if (event.kind === "channel_subscriptions") {
+        setAgentDetailRefresh((value) => value + 1);
+      } else if (event.kind !== "codex_event" && event.kind !== "approval_declined") {
+        scheduleReload();
       }
     };
-    return () => source.close();
-  }, [reload]);
+    return () => {
+      source.close();
+      if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
+    };
+  }, [mergeAgent, mergeTickets, reload, scheduleReload]);
 
   useEffect(() => {
     const followRoute = () => setRoute(parseRoute(window.location.hash));
@@ -158,6 +229,14 @@ export function App() {
       window.removeEventListener("hashchange", followRoute);
     };
   }, []);
+
+  useEffect(() => {
+    if (route.view === "not_found") return;
+    setVisitedViews((current) => new Set(current).add(route.view));
+    if (route.view === "board") setLastBoardRoute(route);
+    if (route.view === "messages") setLastMessageChannel(route.channel);
+    if (route.view === "agents") setLastAgentRoute(route);
+  }, [route]);
 
   const navigate = useCallback((nextRoute: Route) => {
     const hash = routeHash(nextRoute);
@@ -172,8 +251,10 @@ export function App() {
     [],
   );
   const activeView = route.view === "not_found" ? null : route.view;
-  const selectedAgentId = route.view === "agents" ? route.agentId : null;
-  const agentView = route.view === "agents" ? route.agentView : "chat";
+  const selectedAgentId =
+    route.view === "agents" ? route.agentId : lastAgentRoute.agentId;
+  const agentView =
+    route.view === "agents" ? route.agentView : lastAgentRoute.agentView;
   const selectedTicket =
     route.view === "board" && route.ticketId
       ? tickets.find((ticket) => ticket.id === route.ticketId)
@@ -203,21 +284,18 @@ export function App() {
   );
 
   function navigationRoute(view: "board" | "messages" | "agents" | "settings"): Route {
-    if (view === "board") return { view, projectId: null, ticketId: null };
+    if (view === "board") return lastBoardRoute;
     if (view === "messages") {
       return {
         view,
-        channel:
-          route.view === "messages"
-            ? route.channel
-            : channels[0]?.name ?? "general",
+        channel: route.view === "messages" ? route.channel : lastMessageChannel,
       };
     }
     if (view === "agents") {
       return {
         view,
         agentId: selectedAgentId ?? agents[0]?.id ?? null,
-        agentView: "chat",
+        agentView: route.view === "agents" ? route.agentView : lastAgentRoute.agentView,
       };
     }
     return { view };
@@ -233,7 +311,7 @@ export function App() {
         <ProjectPicker
           project={project}
           projects={projects}
-          onChanged={reload}
+          onChanged={reloadProjects}
           onError={report}
         />
       </header>
@@ -279,37 +357,48 @@ export function App() {
           </a>
         </section>
       )}
-      {loaded && !missingEntity && route.view === "board" && (
+      {loaded && visitedViews.has("board") && (
+        <div hidden={route.view !== "board" || Boolean(missingEntity)}>
         <KanbanBoard
           tickets={tickets}
           agents={agents}
           projects={projects}
           currentProjectId={project?.id ?? null}
-          filterProjectId={route.projectId}
-          selectedTicketId={route.ticketId}
+          filterProjectId={route.view === "board" ? route.projectId : lastBoardRoute.projectId}
+          selectedTicketId={route.view === "board" ? route.ticketId : lastBoardRoute.ticketId}
           onFilterProject={(projectId) =>
-            navigate({ ...route, projectId, ticketId: null })
+            navigate({ view: "board", projectId, ticketId: null })
           }
-          onSelectTicket={(ticketId) => navigate({ ...route, ticketId })}
-          onChanged={reload}
+          onSelectTicket={(ticketId) =>
+            navigate({
+              view: "board",
+              projectId: route.view === "board" ? route.projectId : lastBoardRoute.projectId,
+              ticketId,
+            })
+          }
+          onChanged={mergeTickets}
           onError={report}
         />
+        </div>
       )}
-      {loaded && !missingEntity && route.view === "messages" && (
+      {loaded && visitedViews.has("messages") && (
+        <div hidden={route.view !== "messages" || Boolean(missingEntity)}>
         <MessageBoard
           agents={agents}
           channels={channels}
-          selectedChannelName={route.channel}
-          refresh={refresh}
+          selectedChannelName={route.view === "messages" ? route.channel : lastMessageChannel}
+          refresh={0}
           onSelectChannel={(channel) => navigate({ view: "messages", channel })}
           onSelectAgent={(agentId) =>
             navigate({ view: "agents", agentId, agentView: "chat" })
           }
-          onChanged={reload}
+          onChanged={mergeChannel}
           onError={report}
         />
+        </div>
       )}
-      {loaded && !missingEntity && route.view === "agents" && (
+      {loaded && visitedViews.has("agents") && (
+        <div hidden={route.view !== "agents" || Boolean(missingEntity)}>
         <AgentWorkspace
           agents={agents}
           channels={channels}
@@ -317,7 +406,8 @@ export function App() {
           projects={projects}
           selectedAgentId={selectedAgentId}
           view={agentView}
-          refresh={refresh}
+          refresh={agentMessageRefresh}
+          detailRefresh={agentDetailRefresh}
           deltas={deltas}
           onSelectAgent={(agentId) =>
             navigate({ view: "agents", agentId, agentView: "chat" })
@@ -331,17 +421,20 @@ export function App() {
               });
             }
           }}
-          onChanged={reload}
+          onChanged={mergeAgent}
           onError={report}
         />
+        </div>
       )}
-      {loaded && !missingEntity && route.view === "settings" && settings && (
+      {loaded && visitedViews.has("settings") && settings && (
+        <div hidden={route.view !== "settings" || Boolean(missingEntity)}>
         <BoardSettings
           settings={settings}
           channels={channels}
-          onChanged={reload}
+          onChanged={setSettings}
           onError={report}
         />
+        </div>
       )}
     </div>
   );

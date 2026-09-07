@@ -78,11 +78,16 @@ const ticket: Ticket = {
 
 class MockEventSource {
   onmessage: ((event: MessageEvent) => void) | null = null;
+  constructor() {
+    latestEventSource = this;
+  }
   close() {}
 }
+let latestEventSource: MockEventSource;
 
 describe("App agent routes", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.stubGlobal("EventSource", MockEventSource);
     window.history.replaceState(null, "", "#agents/1/settings");
     vi.mocked(api.project).mockResolvedValue(null);
@@ -217,5 +222,98 @@ describe("App agent routes", () => {
       await screen.findByRole("heading", { name: "Agent not found" }),
     ).toBeTruthy();
     expect(screen.getByRole("link", { name: "Return to board" })).toBeTruthy();
+  });
+
+  it("applies known events locally and coalesces unknown invalidations", async () => {
+    window.history.replaceState(null, "", "#agents/1");
+    render(<App />);
+    await screen.findByRole("heading", { name: "worker" });
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: agent.id,
+          kind: "agent_updated",
+          data: { ...agent, name: "architect" },
+        }),
+      } as MessageEvent);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: agent.id,
+          kind: "ticket_updated",
+          data: ticket,
+        }),
+      } as MessageEvent);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 0,
+          kind: "settings_updated",
+          data: { merge_notification_channel: "general" },
+        }),
+      } as MessageEvent);
+    });
+
+    expect(screen.getByRole("heading", { name: "architect" })).toBeTruthy();
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
+    expect(api.agents).toHaveBeenCalledTimes(1);
+    expect(api.tickets).toHaveBeenCalledTimes(1);
+    expect(api.settings).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ agent_id: 0, kind: "mystery", data: {} }),
+      } as MessageEvent);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ agent_id: 0, kind: "another_mystery", data: {} }),
+      } as MessageEvent);
+    });
+
+    expect(api.agents).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
+    expect(api.project).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(2);
+    expect(api.channels).toHaveBeenCalledTimes(2);
+    expect(api.settings).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a settings draft when switching views", async () => {
+    window.history.replaceState(null, "", "#settings");
+    render(<App />);
+    fireEvent.change(
+      await screen.findByLabelText("Merge notification channel"),
+      { target: { value: "release-draft" } },
+    );
+    fireEvent.click(screen.getByRole("link", { name: "agents" }));
+    await screen.findByRole("heading", { name: "worker" });
+    fireEvent.click(screen.getByRole("link", { name: "settings" }));
+
+    expect(
+      (screen.getByLabelText("Merge notification channel") as HTMLInputElement)
+        .value,
+    ).toBe("release-draft");
+  });
+
+  it("preserves a dirty ticket when that ticket changes remotely", async () => {
+    window.history.replaceState(null, "", "#board?project=2&ticket=7");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.tickets).mockResolvedValue([ticket]);
+    render(<App />);
+    const title = await screen.findByDisplayValue(ticket.title);
+    fireEvent.change(title, { target: { value: "My unfinished title" } });
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 1,
+          kind: "ticket_updated",
+          data: { ...ticket, title: "Remote title", revision: 2 },
+        }),
+      } as MessageEvent);
+    });
+
+    expect(screen.getByDisplayValue("My unfinished title")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("updated elsewhere");
+    expect(api.tickets).toHaveBeenCalledTimes(1);
   });
 });
