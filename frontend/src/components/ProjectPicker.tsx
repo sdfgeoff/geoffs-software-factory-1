@@ -13,7 +13,7 @@ export function ProjectPicker({ project, projects, onChanged, onError }: Props) 
   const [path, setPath] = useState(project?.path ?? "");
   const [name, setName] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
-  useEffect(() => setPath(project?.path ?? ""), [project]);
+  useEffect(() => setPath(project?.path ?? ""), [project?.path]);
   async function register(event: FormEvent) {
     event.preventDefault();
     try {

@@ -37,3 +37,21 @@ it("selects registers and archives project roots", async () => {
   fireEvent.click(screen.getAllByRole("button", { name: "Archive" })[1]);
   await waitFor(() => expect(api.archiveProject).toHaveBeenCalledWith(2));
 });
+
+it("preserves a path draft when an equivalent project is refreshed", () => {
+  const project: Project = {
+    id: 1,
+    name: "Board",
+    path: "/board",
+    default_branch: "main",
+    archived_at: null,
+    updated_at: 0,
+  };
+  const props = { projects: [project], onChanged: vi.fn(), onError: vi.fn() };
+  const { rerender } = render(<ProjectPicker {...props} project={project} />);
+
+  fireEvent.change(screen.getByLabelText("Git root"), { target: { value: "/draft" } });
+  rerender(<ProjectPicker {...props} project={{ ...project }} />);
+
+  expect((screen.getByLabelText("Git root") as HTMLInputElement).value).toBe("/draft");
+});
