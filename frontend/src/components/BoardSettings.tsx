@@ -18,11 +18,12 @@ export function BoardSettings({
   settings,
   channels,
   onChanged,
-  onError,
 }: Props) {
   const [channel, setChannel] = useState(
     settings.merge_notification_channel ?? "",
   );
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");
   const valid = channel === "" || channelNamePattern.test(channel);
 
   useEffect(
@@ -32,11 +33,18 @@ export function BoardSettings({
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!valid) return;
+    if (!valid || saving) return;
+    setSaving(true);
+    setStatus("Saving…");
     try {
       await onChanged(await api.setSettings(channel || null));
+      setStatus("Saved");
     } catch (error) {
-      onError(error);
+      setStatus(
+        `Could not save: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -51,7 +59,10 @@ export function BoardSettings({
           id="merge-notification-channel"
           list="merge-notification-channels"
           value={channel}
-          onChange={(event) => setChannel(event.target.value)}
+          onChange={(event) => {
+            setChannel(event.target.value);
+            setStatus("");
+          }}
           pattern={channelNameInputPattern}
           maxLength={64}
           aria-describedby="merge-channel-help merge-channel-rules"
@@ -72,9 +83,16 @@ export function BoardSettings({
             {channelNameRules}
           </p>
         )}
-        <button type="submit" disabled={!valid}>
-          Save settings
+        <button type="submit" disabled={!valid || saving}>
+          {saving ? "Saving…" : "Save settings"}
         </button>
+        <p
+          className={status.startsWith("Could not") ? "inline-error" : undefined}
+          role="status"
+          aria-live="polite"
+        >
+          {status}
+        </p>
       </form>
     </section>
   );

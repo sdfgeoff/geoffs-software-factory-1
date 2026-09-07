@@ -1,4 +1,10 @@
-import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+} from "react";
 import { api } from "../api";
 import type { Agent, Project, Ticket, TicketState } from "../types";
 
@@ -63,6 +69,8 @@ export function TicketDetailPanel({
   const [reservationStatus, setReservationStatus] = useState("");
   const [transitioning, setTransitioning] = useState(false);
   const [transitionStatus, setTransitionStatus] = useState("");
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const reservationSelectRef = useRef<HTMLSelectElement>(null);
   const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
   const reservedFor = agents.find(
     (agent) => agent.id === ticket.reserved_for_agent_id,
@@ -139,6 +147,7 @@ export function TicketDetailPanel({
       );
       await onChanged(updated);
       setReservationStatus(overriding ? "Reservation overridden." : "Ticket reserved.");
+      reservationSelectRef.current?.focus();
     } catch (error) {
       setReservationStatus(error instanceof Error ? error.message : "Could not update reservation");
       button.focus();
@@ -157,6 +166,7 @@ export function TicketDetailPanel({
       updateDraft({ reservation: "" }, false);
       await onChanged(updated);
       setReservationStatus("Reservation cleared.");
+      reservationSelectRef.current?.focus();
     } catch (error) {
       setReservationStatus(error instanceof Error ? error.message : "Could not clear reservation");
       button.focus();
@@ -165,13 +175,27 @@ export function TicketDetailPanel({
     }
   }
 
-  async function transition(state: TicketState) {
+  async function transition(
+    state: TicketState,
+    event: MouseEvent<HTMLButtonElement>,
+  ) {
+    if (
+      state === "cancelled" &&
+      !window.confirm(
+        `Cancel ticket #${ticket.id}? Cancelled tickets are terminal and cannot be reopened.`,
+      )
+    ) {
+      setTransitionStatus("Cancellation abandoned; ticket unchanged.");
+      event.currentTarget.focus();
+      return;
+    }
     if (transitioning) return;
     setTransitioning(true);
     setTransitionStatus("Updating ticket…");
     try {
       await onChanged(await api.updateTicket(ticket, { state }));
       setTransitionStatus("Ticket updated.");
+      closeButtonRef.current?.focus();
     } catch (error) {
       setTransitionStatus(error instanceof Error ? error.message : "Could not update ticket");
     } finally {
@@ -199,7 +223,7 @@ export function TicketDetailPanel({
           <span className="ticket-number">Ticket #{ticket.id}</span>
           <h2 id={`ticket-detail-title-${ticket.id}`}>{ticket.title}</h2>
         </div>
-        <button type="button" className="ghost" onClick={onClose}>
+        <button ref={closeButtonRef} type="button" className="ghost" onClick={onClose}>
           Close
         </button>
       </div>
@@ -356,6 +380,7 @@ export function TicketDetailPanel({
           <label>
             Reservation
             <select
+              ref={reservationSelectRef}
               value={draft.reservation}
               onChange={(event) => updateDraft({ reservation: event.target.value }, false)}
             >
@@ -406,7 +431,7 @@ export function TicketDetailPanel({
               className={action.state === "cancelled" ? "danger" : "secondary"}
               key={action.state}
               disabled={transitioning}
-              onClick={() => void transition(action.state)}
+              onClick={(event) => void transition(action.state, event)}
             >
               {action.label}
             </button>

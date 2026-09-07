@@ -11,6 +11,7 @@ vi.mock("../api", () => ({
     agentProjectSubscriptions: vi.fn(),
     agentProjectWorktrees: vi.fn(),
     agentScopes: vi.fn(),
+    createAgent: vi.fn(),
     pauseAgent: vi.fn(),
     renameAgent: vi.fn(),
     resumeAgent: vi.fn(),
@@ -80,6 +81,7 @@ describe("AgentWorkspace", () => {
       },
     ]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
+    vi.mocked(api.createAgent).mockResolvedValue(agent);
     vi.mocked(api.pauseAgent).mockResolvedValue(agent);
     vi.mocked(api.renameAgent).mockResolvedValue(agent);
     vi.mocked(api.resumeAgent).mockResolvedValue(agent);
@@ -349,7 +351,7 @@ describe("AgentWorkspace", () => {
         "Could not save: Network unavailable",
       ),
     );
-    expect(onError).toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("sends a message while an agent is running", async () => {
@@ -380,6 +382,49 @@ describe("AgentWorkspace", () => {
         "Check the failing test",
       ),
     );
+  });
+
+  it("prevents duplicate sends and preserves a failed message for retry", async () => {
+    let rejectSend: (error: Error) => void = () => {};
+    vi.mocked(api.sendAgentMessage).mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    const onError = vi.fn();
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={onError}
+      />,
+    );
+
+    const draft = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(draft, { target: { value: "Retry this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const sending = screen.getByRole("button", { name: "Sending…" });
+    expect((sending as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(sending);
+    expect(api.sendAgentMessage).toHaveBeenCalledTimes(1);
+
+    rejectSend(new Error("Agent unavailable"));
+    expect(await screen.findByText("Could not send: Agent unavailable")).toBeTruthy();
+    expect((draft as HTMLTextAreaElement).value).toBe("Retry this");
+    expect(onError).not.toHaveBeenCalled();
+
+    vi.mocked(api.sendAgentMessage).mockResolvedValueOnce(agent);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("Sent")).toBeTruthy();
+    expect((draft as HTMLTextAreaElement).value).toBe("");
   });
 
   it("requires an explicit resume for an error-state agent", async () => {

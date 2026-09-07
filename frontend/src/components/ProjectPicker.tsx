@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Project } from "../types";
 
@@ -19,6 +19,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
   const [selectionStatus, setSelectionStatus] = useState("");
   const [registerStatus, setRegisterStatus] = useState("");
   const [archiveStatus, setArchiveStatus] = useState("");
+  const summaryRef = useRef<HTMLElement>(null);
   useEffect(() => setPath(project?.path ?? ""), [project?.path]);
   async function register(event: FormEvent) {
     event.preventDefault();
@@ -51,6 +52,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       await api.archiveProject(item.id);
       await onChanged();
       setArchiveStatus(`${item.name} archived.`);
+      summaryRef.current?.focus();
     } catch (error) {
       setArchiveStatus(error instanceof Error ? error.message : "Could not archive project");
       button.focus();
@@ -75,7 +77,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
   }
   return (
     <details className="project-picker">
-      <summary>{project?.name ?? "Choose project"}</summary>
+      <summary ref={summaryRef}>{project?.name ?? "Choose project"}</summary>
       <label htmlFor="active-project">
         Active project
         <select

@@ -75,6 +75,12 @@ export function AgentWorkspace({
   const [scopes, setScopes] = useState<string[]>([]);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
   const [projectSubscriptions, setProjectSubscriptions] = useState<number[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [createStatus, setCreateStatus] = useState("");
+  const [sendingAgentId, setSendingAgentId] = useState<number | null>(null);
+  const [sendStatuses, setSendStatuses] = useState<Record<number, string>>({});
+  const [togglingAgentId, setTogglingAgentId] = useState<number | null>(null);
+  const [toggleStatuses, setToggleStatuses] = useState<Record<number, string>>({});
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const prompt = selected ? prompts[selected.id] ?? "" : "";
@@ -204,35 +210,68 @@ export function AgentWorkspace({
   }
   async function create(event: FormEvent) {
     event.preventDefault();
+    if (creating) return;
+    setCreating(true);
+    setCreateStatus("Creating…");
     try {
       const agent = await api.createAgent(name);
       setName("");
       onSelectAgent(agent.id);
       await onChanged(agent);
+      setCreateStatus("Agent created");
     } catch (error) {
-      onError(error);
+      setCreateStatus(
+        `Could not create agent: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    } finally {
+      setCreating(false);
     }
   }
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!selected) return;
+    if (!selected || sendingAgentId === selected.id) return;
+    const agentId = selected.id;
+    setSendingAgentId(agentId);
+    setSendStatuses((current) => ({ ...current, [agentId]: "Sending…" }));
     try {
-      const updated = await api.sendAgentMessage(selected.id, prompt);
-      setPrompts((current) => ({ ...current, [selected.id]: "" }));
+      const updated = await api.sendAgentMessage(agentId, prompt);
+      setPrompts((current) => ({ ...current, [agentId]: "" }));
       await onChanged(updated);
+      setSendStatuses((current) => ({ ...current, [agentId]: "Sent" }));
     } catch (error) {
-      onError(error);
+      setSendStatuses((current) => ({
+        ...current,
+        [agentId]: `Could not send: ${error instanceof Error ? error.message : "Unknown error"}`,
+      }));
+    } finally {
+      setSendingAgentId((current) => current === agentId ? null : current);
     }
   }
   async function toggle() {
-    if (!selected) return;
+    if (!selected || togglingAgentId === selected.id) return;
+    const agentId = selected.id;
+    const action = selected.state === "paused" || selected.state === "error"
+      ? "Resuming"
+      : "Pausing";
+    const actionVerb = action === "Resuming" ? "resume" : "pause";
+    setTogglingAgentId(agentId);
+    setToggleStatuses((current) => ({ ...current, [agentId]: `${action}…` }));
     try {
       const updated = selected.state === "paused" || selected.state === "error"
-        ? await api.resumeAgent(selected.id)
-        : await api.pauseAgent(selected.id);
+        ? await api.resumeAgent(agentId)
+        : await api.pauseAgent(agentId);
       await onChanged(updated);
+      setToggleStatuses((current) => ({
+        ...current,
+        [agentId]: action === "Resuming" ? "Resumed" : "Paused",
+      }));
     } catch (error) {
-      onError(error);
+      setToggleStatuses((current) => ({
+        ...current,
+        [agentId]: `Could not ${actionVerb}: ${error instanceof Error ? error.message : "Unknown error"}`,
+      }));
+    } finally {
+      setTogglingAgentId((current) => current === agentId ? null : current);
     }
   }
   async function saveSettings(event: FormEvent) {
@@ -292,7 +331,6 @@ export function AgentWorkspace({
         ...current,
         [agentId]: error instanceof Error ? error.message : "Could not save settings",
       }));
-      onError(error);
     }
   }
   return (
@@ -321,13 +359,27 @@ export function AgentWorkspace({
             New agent
             <input
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setName(event.target.value);
+                setCreateStatus("");
+              }}
               placeholder="backend"
               pattern="[A-Za-z0-9_-]+"
               required
             />
           </label>
-          <button type="submit">Create agent</button>
+          <button type="submit" disabled={creating}>
+            {creating ? "Creating…" : "Create agent"}
+          </button>
+          {createStatus && (
+            <p
+              className={createStatus.startsWith("Could not") ? "inline-error" : undefined}
+              role="status"
+              aria-live="polite"
+            >
+              {createStatus}
+            </p>
+          )}
         </form>
       </aside>
       <div className="conversation">
@@ -358,14 +410,29 @@ export function AgentWorkspace({
                   {activeProject ? ` · ${activeProject.name}` : ""}
                 </p>
               </div>
-              <button className="secondary" onClick={toggle}>
-                {selected.state === "paused" || selected.state === "error"
+              <button
+                className="secondary"
+                onClick={toggle}
+                disabled={togglingAgentId === selected.id}
+              >
+                {togglingAgentId === selected.id
+                  ? "Working…"
+                  : selected.state === "paused" || selected.state === "error"
                   ? "Resume"
                   : "Pause"}
               </button>
             </div>
             {selected.last_error && (
               <p className="inline-error">{selected.last_error}</p>
+            )}
+            {toggleStatuses[selected.id] && (
+              <p
+                className={toggleStatuses[selected.id].startsWith("Could not") ? "inline-error" : undefined}
+                role="status"
+                aria-live="polite"
+              >
+                {toggleStatuses[selected.id]}
+              </p>
             )}
             <section hidden={view !== "settings"}>
               <h3>Agent settings</h3>
@@ -579,15 +646,35 @@ export function AgentWorkspace({
                   <textarea
                     value={prompt}
                     onChange={(event) =>
-                      setPrompts((current) => ({
-                        ...current,
-                        [selected.id]: event.target.value,
-                      }))
+                      {
+                        setPrompts((current) => ({
+                          ...current,
+                          [selected.id]: event.target.value,
+                        }));
+                        setSendStatuses((current) => ({
+                          ...current,
+                          [selected.id]: "",
+                        }));
+                      }
                     }
                     required
                   />
                 </label>
-                <button type="submit">Send</button>
+                <button
+                  type="submit"
+                  disabled={sendingAgentId === selected.id}
+                >
+                  {sendingAgentId === selected.id ? "Sending…" : "Send"}
+                </button>
+                {sendStatuses[selected.id] && (
+                  <p
+                    className={sendStatuses[selected.id].startsWith("Could not") ? "inline-error" : undefined}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {sendStatuses[selected.id]}
+                  </p>
+                )}
               </form>
             </section>
           </>

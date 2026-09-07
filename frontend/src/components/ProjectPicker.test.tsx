@@ -41,6 +41,7 @@ it("selects registers and archives project roots", async () => {
   await waitFor(() => expect(api.registerProject).toHaveBeenCalledWith("New", "/new", "develop"));
   fireEvent.click(screen.getAllByRole("button", { name: "Archive" })[1]);
   await waitFor(() => expect(api.archiveProject).toHaveBeenCalledWith(2));
+  expect(document.activeElement).toBe(screen.getByText("Board", { selector: "summary" }));
 });
 
 it("preserves a path draft when an equivalent project is refreshed", () => {

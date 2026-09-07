@@ -41,6 +41,10 @@ export function MessageBoard({
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [newChannel, setNewChannel] = useState("");
   const [newDescription, setNewDescription] = useState("");
+  const [postingChannel, setPostingChannel] = useState<string | null>(null);
+  const [postStatuses, setPostStatuses] = useState<Record<string, string>>({});
+  const [channelSaving, setChannelSaving] = useState(false);
+  const [channelStatus, setChannelStatus] = useState("");
   const validNewChannel = channelNamePattern.test(newChannel);
   const validDescription =
     [...newDescription].length <= channelDescriptionMaxLength;
@@ -79,17 +83,29 @@ export function MessageBoard({
   }, [channel, refresh, onError]);
   async function post(event: FormEvent) {
     event.preventDefault();
+    if (postingChannel === channel) return;
+    const targetChannel = channel;
+    setPostingChannel(targetChannel);
+    setPostStatuses((current) => ({ ...current, [targetChannel]: "Posting…" }));
     try {
-      const created = await api.postMessage(channel, body);
+      const created = await api.postMessage(targetChannel, body);
       setMessages((current) => [...current, created]);
-      setDrafts((current) => ({ ...current, [channel]: "" }));
+      setDrafts((current) => ({ ...current, [targetChannel]: "" }));
+      setPostStatuses((current) => ({ ...current, [targetChannel]: "Posted" }));
     } catch (error) {
-      onError(error);
+      setPostStatuses((current) => ({
+        ...current,
+        [targetChannel]: `Could not post: ${error instanceof Error ? error.message : "Unknown error"}`,
+      }));
+    } finally {
+      setPostingChannel((current) => current === targetChannel ? null : current);
     }
   }
   async function createChannel(event: FormEvent) {
     event.preventDefault();
-    if (!validNewChannel || !validDescription) return;
+    if (!validNewChannel || !validDescription || channelSaving) return;
+    setChannelSaving(true);
+    setChannelStatus("Creating channel…");
     try {
       const created = await api.createChannel(newChannel, newDescription);
       setChannel(created.name);
@@ -100,7 +116,11 @@ export function MessageBoard({
       setNewDescription("");
       await onChanged(created);
     } catch (error) {
-      onError(error);
+      setChannelStatus(
+        `Could not create channel: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    } finally {
+      setChannelSaving(false);
     }
   }
   function selectChannel(name: string) {
@@ -121,7 +141,10 @@ export function MessageBoard({
               <input
                 autoFocus
                 value={newChannel}
-                onChange={(event) => setNewChannel(event.target.value)}
+                onChange={(event) => {
+                  setNewChannel(event.target.value);
+                  setChannelStatus("");
+                }}
                 pattern={channelNameInputPattern}
                 maxLength={64}
                 aria-describedby="channel-name-rules"
@@ -138,7 +161,10 @@ export function MessageBoard({
               Description
               <textarea
                 value={newDescription}
-                onChange={(event) => setNewDescription(event.target.value)}
+                onChange={(event) => {
+                  setNewDescription(event.target.value);
+                  setChannelStatus("");
+                }}
                 maxLength={channelDescriptionMaxLength}
                 aria-describedby="channel-description-rules"
               />
@@ -154,13 +180,14 @@ export function MessageBoard({
             <div className="field-row">
               <button
                 type="submit"
-                disabled={!validNewChannel || !validDescription}
+                disabled={!validNewChannel || !validDescription || channelSaving}
               >
-                Save
+                {channelSaving ? "Creating…" : "Save"}
               </button>
               <button
                 type="button"
                 className="ghost"
+                disabled={channelSaving}
                 onClick={() => {
                   setCreatingChannel(false);
                   setNewChannel("");
@@ -170,6 +197,15 @@ export function MessageBoard({
                 Cancel
               </button>
             </div>
+            {channelStatus && (
+              <p
+                className={channelStatus.startsWith("Could not") ? "inline-error" : undefined}
+                role="status"
+                aria-live="polite"
+              >
+                {channelStatus}
+              </p>
+            )}
           </form>
         ) : (
           <button
@@ -236,15 +272,29 @@ export function MessageBoard({
             <textarea
               value={body}
               onChange={(event) =>
-                setDrafts((current) => ({
-                  ...current,
-                  [channel]: event.target.value,
-                }))
+                {
+                  setDrafts((current) => ({
+                    ...current,
+                    [channel]: event.target.value,
+                  }));
+                  setPostStatuses((current) => ({ ...current, [channel]: "" }));
+                }
               }
               required
             />
           </label>
-          <button type="submit">Post to #{channel}</button>
+          <button type="submit" disabled={postingChannel === channel}>
+            {postingChannel === channel ? "Posting…" : `Post to #${channel}`}
+          </button>
+          {postStatuses[channel] && (
+            <p
+              className={postStatuses[channel].startsWith("Could not") ? "inline-error" : undefined}
+              role="status"
+              aria-live="polite"
+            >
+              {postStatuses[channel]}
+            </p>
+          )}
         </form>
       </div>
     </section>

@@ -326,7 +326,6 @@ describe("MessageBoard", () => {
     vi.mocked(api.createChannel).mockRejectedValue(
       new Error("channel already exists"),
     );
-    const onError = vi.fn();
     render(
       <MessageBoard
         agents={[]}
@@ -336,7 +335,7 @@ describe("MessageBoard", () => {
         refresh={0}
         onSelectAgent={() => {}}
         onChanged={async () => {}}
-        onError={onError}
+        onError={vi.fn()}
       />,
     );
 
@@ -346,10 +345,54 @@ describe("MessageBoard", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() =>
-      expect(onError).toHaveBeenCalledWith(
-        expect.objectContaining({ message: "channel already exists" }),
-      ),
+    expect(
+      await screen.findByText("Could not create channel: channel already exists"),
+    ).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value)
+      .toBe("general");
+  });
+
+  it("prevents duplicate posts and preserves a failed draft for retry", async () => {
+    vi.mocked(api.messages).mockResolvedValue([]);
+    let rejectPost: (error: Error) => void = () => {};
+    vi.mocked(api.postMessage).mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectPost = reject;
+      }),
     );
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={vi.fn()}
+      />,
+    );
+
+    const draft = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(draft, { target: { value: "Please retry me" } });
+    fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
+    const posting = screen.getByRole("button", { name: "Posting…" });
+    expect((posting as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(posting);
+    expect(api.postMessage).toHaveBeenCalledTimes(1);
+
+    rejectPost(new Error("Network unavailable"));
+    expect(await screen.findByText("Could not post: Network unavailable")).toBeTruthy();
+    expect((draft as HTMLTextAreaElement).value).toBe("Please retry me");
+
+    vi.mocked(api.postMessage).mockResolvedValueOnce({
+      id: 1,
+      channel_name: "general",
+      agent_id: null,
+      author: "human",
+      body: "Please retry me",
+      created_at: 0,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
+    expect(await screen.findByText("Posted")).toBeTruthy();
+    expect((draft as HTMLTextAreaElement).value).toBe("");
   });
 });

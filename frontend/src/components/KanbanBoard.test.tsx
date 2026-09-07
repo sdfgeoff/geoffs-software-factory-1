@@ -337,6 +337,7 @@ describe("KanbanBoard", () => {
 
     await waitFor(() => expect(api.clearTicketReservation).toHaveBeenCalledWith(reserved));
     expect(screen.getByText("Reservation cleared.")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByLabelText("Reservation"));
   });
 
   it("prevents duplicate saves and preserves a failed ticket draft", async () => {
@@ -385,6 +386,7 @@ describe("KanbanBoard", () => {
   });
 
   it("offers only valid state-specific actions", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
     vi.mocked(api.updateTicket).mockResolvedValue(ticket);
     render(
       <KanbanBoard
@@ -408,6 +410,27 @@ describe("KanbanBoard", () => {
         state: "cancelled",
       }),
     );
+  });
+
+  it("confirms before cancelling a ticket", () => {
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+      />,
+    );
+
+    const cancel = screen.getByRole("button", { name: "Cancel ticket" });
+    fireEvent.click(cancel);
+
+    expect(confirm).toHaveBeenCalledWith(
+      `Cancel ticket #${ticket.id}? Cancelled tickets are terminal and cannot be reopened.`,
+    );
+    expect(api.updateTicket).not.toHaveBeenCalled();
+    expect(screen.getByText("Cancellation abandoned; ticket unchanged.")).toBeTruthy();
+    expect(document.activeElement).toBe(cancel);
   });
 
   it("hides cancelled tickets unless requested or directly selected", () => {
