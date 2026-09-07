@@ -1,7 +1,7 @@
 use sqlx::{Sqlite, Transaction};
 
 use crate::{
-    domain::{Channel, Message},
+    domain::{Channel, ChannelMessageWakePayload, Message, WakeEventData},
     error::AppError,
 };
 
@@ -338,22 +338,24 @@ pub(super) async fn insert_message(
             "A message was posted in #{} by {}:\n{}",
             message.channel_name, message.author, message.body
         );
-        let payload = serde_json::to_string(&serde_json::json!({
-            "message": prompt,
-            "channel": message.channel_name,
-            "message_id": message.id,
-            "author": message.author,
-            "body": message.body,
-            "mentioned": mentioned,
-            "subscribed": subscribed,
-        }))
-        .map_err(|error| AppError::internal(format!("failed to encode wake event: {error}")))?;
+        let event = WakeEventData::ChannelMessage(ChannelMessageWakePayload {
+            message: prompt,
+            channel: message.channel_name.clone(),
+            message_id: message.id,
+            author: message.author.clone(),
+            body: message.body.clone(),
+            mentioned,
+            subscribed,
+        });
+        let payload = serde_json::to_string(&event.payload())
+            .map_err(|error| AppError::internal(format!("failed to encode wake event: {error}")))?;
         sqlx::query(
             "INSERT OR IGNORE INTO agent_wake_events \
              (agent_id, kind, payload, deduplication_key, delivery_policy) \
-             VALUES (?, 'channel.message', ?, ?, 'immediate')",
+             VALUES (?, ?, ?, ?, 'immediate')",
         )
         .bind(target_id)
+        .bind(event.kind())
         .bind(payload)
         .bind(format!("channel-message:{}", message.id))
         .execute(&mut **transaction)
@@ -542,13 +544,13 @@ mod tests {
         assert!(store.wake_events(partial.id).await.unwrap().is_empty());
         let subscriber_events = store.wake_events(subscriber.id).await.unwrap();
         let subscriber_event = &subscriber_events[0];
-        assert_eq!(subscriber_event.kind, "channel.message");
-        assert_eq!(subscriber_event.payload["channel"], "general");
-        assert_eq!(subscriber_event.payload["message_id"], message.id);
-        assert_eq!(subscriber_event.payload["subscribed"], true);
+        assert_eq!(subscriber_event.kind(), "channel.message");
+        assert_eq!(subscriber_event.payload()["channel"], "general");
+        assert_eq!(subscriber_event.payload()["message_id"], message.id);
+        assert_eq!(subscriber_event.payload()["subscribed"], true);
         let mention_events = store.wake_events(mentioned.id).await.unwrap();
         let mention_event = &mention_events[0];
-        assert_eq!(mention_event.payload["mentioned"], true);
+        assert_eq!(mention_event.payload()["mentioned"], true);
     }
 
     #[tokio::test]

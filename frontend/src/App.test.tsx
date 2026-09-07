@@ -235,6 +235,13 @@ describe("App agent routes", () => {
       latestEventSource.onmessage?.({
         data: JSON.stringify({
           agent_id: agent.id,
+          kind: "agent_message_delta",
+          data: { delta: "Working" },
+        }),
+      } as MessageEvent);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: agent.id,
           kind: "agent_updated",
           data: { ...agent, name: "architect" },
         }),
@@ -255,6 +262,7 @@ describe("App agent routes", () => {
       } as MessageEvent);
     });
 
+    expect(screen.getByText("Working")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "architect" })).toBeTruthy();
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
     expect(api.agents).toHaveBeenCalledTimes(1);

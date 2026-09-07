@@ -193,40 +193,49 @@ export function App() {
     const source = new EventSource("/api/events");
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as AgentEvent;
-      const data = event.data as Record<string, unknown> | null;
-      if (
-        event.kind === "agent_message_delta" &&
-        event.agent_id &&
-        typeof data?.delta === "string"
-      ) {
-        const delta = data.delta;
-        setDeltas((current) => ({
-          ...current,
-          [event.agent_id!]:
-            (current[event.agent_id!] ?? "") + delta,
-        }));
-      } else if (event.kind === "agent_updated" || event.kind === "agent_created") {
-        mergeAgent(event.data as Agent);
-      } else if (event.kind === "ticket_updated") {
-        mergeTickets(event.data as Ticket);
-      } else if (event.kind === "settings_updated") {
-        setSettings(event.data as Settings);
-      } else if (event.kind === "board_message") {
-        const boardMessage = event.data as BoardMessage;
-        setBoardMessages((current) => ({
-          ...current,
-          [boardMessage.id]: boardMessage,
-        }));
-      } else if (event.kind === "message" && event.agent_id) {
-        setDeltas((current) => ({ ...current, [event.agent_id!]: "" }));
-        setAgentMessageRefresh((value) => value + 1);
-      } else if (
-        event.kind === "channel_subscriptions" ||
-        event.kind === "project_subscriptions"
-      ) {
-        setAgentDetailRefresh((value) => value + 1);
-      } else if (event.kind !== "codex_event" && event.kind !== "approval_declined") {
-        scheduleReload();
+      switch (event.kind) {
+        case "agent_message_delta":
+          setDeltas((current) => ({
+            ...current,
+            [event.agent_id]:
+              (current[event.agent_id] ?? "") + event.data.delta,
+          }));
+          break;
+        case "agent_updated":
+        case "agent_created":
+          mergeAgent(event.data);
+          break;
+        case "ticket_updated":
+          mergeTickets(event.data);
+          break;
+        case "settings_updated":
+          setSettings(event.data);
+          break;
+        case "board_message":
+          setBoardMessages((current) => ({
+            ...current,
+            [event.data.id]: event.data,
+          }));
+          break;
+        case "message":
+          setDeltas((current) => ({ ...current, [event.agent_id]: "" }));
+          setAgentMessageRefresh((value) => value + 1);
+          break;
+        case "channel_subscriptions":
+        case "project_subscriptions":
+          setAgentDetailRefresh((value) => value + 1);
+          break;
+        case "refresh":
+          scheduleReload();
+          break;
+        case "codex_event":
+        case "approval_declined":
+          break;
+        default: {
+          const exhaustive: never = event;
+          void exhaustive;
+          scheduleReload();
+        }
       }
     };
     return () => {

@@ -19,7 +19,7 @@ use crate::{
     agent_runtime::AgentManager,
     domain::{
         BoardSettings, Channel, Message, Project, Reminder, Ticket, TicketActivity,
-        TicketClaimResponse, TicketState, WakeDeliveryPolicy, WakeEvent,
+        TicketClaimResponse, TicketState, WakeDeliveryPolicy, WakeEvent, WakeEventData,
     },
     error::AppError,
     store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges},
@@ -446,8 +446,9 @@ async fn create_wake_event(
         store
             .enqueue_wake_event(
                 id,
-                &input.kind,
-                input.payload,
+                WakeEventData::from_parts(&input.kind, input.payload).map_err(|error| {
+                    AppError::bad_request(format!("invalid wake event kind or payload: {error}"))
+                })?,
                 input.deduplication_key.as_deref(),
                 WakeDeliveryPolicy::Immediate,
             )
@@ -1141,7 +1142,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let events = store.wake_events(agent.id).await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "ticket.available");
+        assert_eq!(events[0].kind(), "ticket.available");
         assert_eq!(
             events[0].delivery_state,
             crate::domain::WakeEventState::Pending
@@ -1662,10 +1663,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let event = events.recv().await.unwrap();
-        assert_eq!(event.kind, "board_message");
-        assert_eq!(event.agent_id, 0);
-        assert_eq!(event.data["channel_name"], "general");
-        assert_eq!(event.data["body"], "No wake needed");
+        let crate::agent_runtime::AgentEvent::BoardMessage { agent_id, data } = event else {
+            panic!("expected board message event");
+        };
+        assert_eq!(agent_id, 0);
+        assert_eq!(data.channel_name, "general");
+        assert_eq!(data.body, "No wake needed");
     }
 
     #[tokio::test]
@@ -1698,7 +1701,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let events = store.wake_events(agent.id).await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "channel.message");
+        assert_eq!(events[0].kind(), "channel.message");
         assert_eq!(
             events[0].delivery_state,
             crate::domain::WakeEventState::Pending
@@ -1714,7 +1717,7 @@ mod tests {
             Request::post(format!("/agents/{}/wake-events", agent.id))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"kind":"channel.message","payload":{"channel":"general","message_id":9},"deduplication_key":"message:9"}"#,
+                    r#"{"kind":"channel.message","payload":{"message":"New message","channel":"general","message_id":9,"author":"human","body":"Hello","mentioned":false,"subscribed":true},"deduplication_key":"message:9"}"#,
                 ))
                 .unwrap()
         };
@@ -1729,6 +1732,23 @@ mod tests {
             serde_json::from_slice(&to_bytes(duplicate.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(duplicate["id"], first["id"]);
+
+        for body in [
+            r#"{"kind":"unknown","payload":{}}"#,
+            r#"{"kind":"channel.message","payload":{"message_id":9}}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(format!("/agents/{}/wake-events", agent.id))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
 
         let response = app
             .oneshot(

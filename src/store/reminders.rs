@@ -1,5 +1,5 @@
 use crate::{
-    domain::{Reminder, ReminderState, WakeDeliveryPolicy},
+    domain::{Reminder, ReminderState, ReminderWakePayload, WakeDeliveryPolicy, WakeEventData},
     error::AppError,
 };
 
@@ -99,18 +99,21 @@ impl Store {
         .await?;
         let mut agent_ids = Vec::new();
         for (id, agent_id, message, deliver_at) in due {
-            let payload = serde_json::to_string(&serde_json::json!({
-                "message": message,
-                "requested_delivery_at": deliver_at,
-            }))
-            .map_err(|error| AppError::internal(format!("failed to encode reminder: {error}")))?;
+            let event = WakeEventData::Reminder(ReminderWakePayload {
+                message,
+                requested_delivery_at: deliver_at,
+            });
+            let payload = serde_json::to_string(&event.payload()).map_err(|error| {
+                AppError::internal(format!("failed to encode reminder: {error}"))
+            })?;
             let key = format!("reminder:{id}");
             sqlx::query(
                 "INSERT OR IGNORE INTO agent_wake_events \
                  (agent_id, kind, payload, deduplication_key, delivery_policy) \
-                 VALUES (?, 'reminder', ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(agent_id)
+            .bind(event.kind())
             .bind(payload)
             .bind(&key)
             .bind(WakeDeliveryPolicy::Immediate)
@@ -188,7 +191,7 @@ mod tests {
         assert!(store.cancel_reminder(agent.id, due.id).await.is_err());
         let events = store.wake_events(agent.id).await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "reminder");
+        assert_eq!(events[0].kind(), "reminder");
         assert_eq!(events[0].delivery_policy, WakeDeliveryPolicy::Immediate);
     }
 

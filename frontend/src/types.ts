@@ -86,8 +86,19 @@ export interface AgentMessage {
   body: string;
   created_at: number;
 }
-export interface AgentEvent {
-  agent_id?: number;
-  kind: string;
-  data: unknown;
-}
+export type AgentEvent =
+  | { kind: "refresh" }
+  | {
+      kind: "agent_created" | "agent_updated";
+      agent_id: number;
+      data: Agent;
+    }
+  | { kind: "agent_message_delta"; agent_id: number; data: { delta: string } }
+  | { kind: "message"; agent_id: number; data: AgentMessage }
+  | { kind: "ticket_updated"; agent_id: number; data: Ticket }
+  | { kind: "settings_updated"; agent_id: number; data: BoardSettings }
+  | { kind: "board_message"; agent_id: number; data: BoardMessage }
+  | { kind: "channel_subscriptions"; agent_id: number; data: string[] }
+  | { kind: "project_subscriptions"; agent_id: number; data: number[] }
+  | { kind: "approval_declined"; agent_id: number }
+  | { kind: "codex_event"; agent_id: number; data: unknown };

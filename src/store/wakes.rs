@@ -1,5 +1,7 @@
 use crate::{
-    domain::{WakeDeliveryPolicy, WakeEvent, WakeEventState},
+    domain::{
+        NotificationWakePayload, WakeDeliveryPolicy, WakeEvent, WakeEventData, WakeEventState,
+    },
     error::AppError,
 };
 
@@ -45,16 +47,16 @@ impl Store {
     pub async fn enqueue_wake_event(
         &self,
         agent_id: i64,
-        kind: &str,
-        payload: serde_json::Value,
+        event: WakeEventData,
         deduplication_key: Option<&str>,
         delivery_policy: WakeDeliveryPolicy,
     ) -> Result<WakeEvent, AppError> {
         if self.agent(agent_id).await?.is_none() {
             return Err(AppError::not_found("agent not found"));
         }
-        validate_wake_event(kind, deduplication_key)?;
-        let payload = serde_json::to_string(&payload).map_err(|error| {
+        validate_deduplication_key(deduplication_key)?;
+        let kind = event.kind();
+        let payload = serde_json::to_string(&event.payload()).map_err(|error| {
             AppError::bad_request(format!("invalid wake event payload: {error}"))
         })?;
         if payload.len() > 100_000 {
@@ -108,6 +110,7 @@ impl Store {
         agent_id: i64,
         include_idle_only: bool,
     ) -> Result<Option<WakeEvent>, AppError> {
+        let mut transaction = self.pool.begin().await?;
         let row: Option<WakeEventRow> = sqlx::query_as(
             "UPDATE agent_wake_events SET delivery_state = 'delivering', \
              delivery_attempts = delivery_attempts + 1, last_attempt_at = unixepoch(), \
@@ -119,9 +122,11 @@ impl Store {
         )
         .bind(agent_id)
         .bind(include_idle_only)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        row.map(wake_event_from_row).transpose()
+        let event = row.map(wake_event_from_row).transpose()?;
+        transaction.commit().await?;
+        Ok(event)
     }
 
     pub async fn complete_wake_event(&self, id: i64) -> Result<(), AppError> {
@@ -181,8 +186,9 @@ impl Store {
         }
         self.enqueue_wake_event(
             agent_id,
-            "notification",
-            serde_json::json!({"message": body.trim()}),
+            WakeEventData::Notification(NotificationWakePayload {
+                message: body.trim().to_owned(),
+            }),
             None,
             WakeDeliveryPolicy::Immediate,
         )
@@ -209,12 +215,12 @@ impl Store {
         let event = row.map(wake_event_from_row).transpose()?;
         event
             .map(|event| {
-                let message = event
-                    .payload
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| AppError::internal("notification payload has no message"))?
-                    .to_owned();
+                let WakeEventData::Notification(payload) = event.event else {
+                    return Err(AppError::internal(
+                        "claimed wake event is not a notification",
+                    ));
+                };
+                let message = payload.message;
                 Ok((event.id, message))
             })
             .transpose()
@@ -225,15 +231,7 @@ impl Store {
     }
 }
 
-fn validate_wake_event(kind: &str, deduplication_key: Option<&str>) -> Result<(), AppError> {
-    if kind.is_empty()
-        || kind.len() > 100
-        || !kind
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
-    {
-        return Err(AppError::bad_request("invalid wake event kind"));
-    }
+fn validate_deduplication_key(deduplication_key: Option<&str>) -> Result<(), AppError> {
     if deduplication_key.is_some_and(|key| key.is_empty() || key.len() > 500) {
         return Err(AppError::bad_request(
             "invalid wake event deduplication key",
@@ -243,12 +241,15 @@ fn validate_wake_event(kind: &str, deduplication_key: Option<&str>) -> Result<()
 }
 
 fn wake_event_from_row(row: WakeEventRow) -> Result<WakeEvent, AppError> {
+    let payload = serde_json::from_str(&row.payload).map_err(|error| {
+        AppError::internal(format!("invalid stored wake event payload: {error}"))
+    })?;
+    let event = WakeEventData::from_parts(&row.kind, payload)
+        .map_err(|error| AppError::internal(format!("invalid stored wake event: {error}")))?;
     Ok(WakeEvent {
         id: row.id,
         agent_id: row.agent_id,
-        kind: row.kind,
-        payload: serde_json::from_str(&row.payload)
-            .map_err(|error| AppError::internal(format!("invalid stored wake event: {error}")))?,
+        event,
         deduplication_key: row.deduplication_key,
         delivery_policy: row.delivery_policy,
         delivery_state: row.delivery_state,
@@ -318,23 +319,28 @@ mod tests {
         store
             .enqueue_wake_event(
                 agent.id,
-                "channel.message",
-                serde_json::json!({"message_id": 1}),
+                WakeEventData::ChannelMessage(crate::domain::ChannelMessageWakePayload {
+                    message: "posted".into(),
+                    channel: "general".into(),
+                    message_id: 1,
+                    author: "human".into(),
+                    body: "posted".into(),
+                    mentioned: false,
+                    subscribed: true,
+                }),
                 None,
                 WakeDeliveryPolicy::Immediate,
             )
             .await
             .unwrap();
-        store
-            .enqueue_wake_event(
-                agent.id,
-                "notification",
-                serde_json::json!({"unexpected": true}),
-                None,
-                WakeDeliveryPolicy::Immediate,
-            )
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_wake_events (agent_id, kind, payload, delivery_policy) \
+             VALUES (?, 'notification', '{\"unexpected\":true}', 'immediate')",
+        )
+        .bind(agent.id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
         store
             .enqueue_notification(agent.id, "review requested")
             .await
@@ -342,13 +348,21 @@ mod tests {
 
         let notification = store.pending_notification(agent.id).await.unwrap().unwrap();
         assert_eq!(notification.1, "review requested");
-        let events = store.wake_events(agent.id).await.unwrap();
-        assert_eq!(events[0].kind, "channel.message");
-        assert_eq!(events[0].delivery_state, WakeEventState::Pending);
-        assert_eq!(events[1].kind, "notification");
-        assert_eq!(events[1].delivery_state, WakeEventState::Pending);
-        assert_eq!(events[2].id, notification.0);
-        assert_eq!(events[2].delivery_state, WakeEventState::Delivering);
+        let states: Vec<(String, WakeEventState)> =
+            sqlx::query_as("SELECT kind, delivery_state FROM agent_wake_events ORDER BY id")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            states[0],
+            ("channel.message".into(), WakeEventState::Pending)
+        );
+        assert_eq!(states[1], ("notification".into(), WakeEventState::Pending));
+        assert_eq!(
+            states[2],
+            ("notification".into(), WakeEventState::Delivering)
+        );
+        assert!(store.wake_events(agent.id).await.is_err());
     }
 
     #[tokio::test]
@@ -358,8 +372,9 @@ mod tests {
         let first = store
             .enqueue_wake_event(
                 agent.id,
-                "ticket.available",
-                serde_json::json!({"ticket_id": 3}),
+                WakeEventData::Notification(NotificationWakePayload {
+                    message: "first".into(),
+                }),
                 Some("ticket:3:available"),
                 WakeDeliveryPolicy::IdleOnly,
             )
@@ -368,15 +383,16 @@ mod tests {
         let duplicate = store
             .enqueue_wake_event(
                 agent.id,
-                "ticket.available",
-                serde_json::json!({"ticket_id": 3, "ignored": true}),
+                WakeEventData::Notification(NotificationWakePayload {
+                    message: "ignored".into(),
+                }),
                 Some("ticket:3:available"),
                 WakeDeliveryPolicy::IdleOnly,
             )
             .await
             .unwrap();
         assert_eq!(duplicate.id, first.id);
-        assert_eq!(duplicate.payload, first.payload);
+        assert_eq!(duplicate.event, first.event);
 
         let delivering = store
             .claim_pending_wake_event(agent.id, true)
@@ -406,5 +422,63 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn typed_wake_event_is_delivered_after_reopen() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mab-wakes-{unique}.sqlite3"));
+        let store = Store::open(&path).await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .enqueue_notification(agent.id, "Survive restart")
+            .await
+            .unwrap();
+        store.close().await;
+
+        let reopened = Store::open(&path).await.unwrap();
+        let event = reopened
+            .claim_pending_wake_event(agent.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event.event,
+            WakeEventData::Notification(NotificationWakePayload { ref message })
+                if message == "Survive restart"
+        ));
+        reopened.complete_wake_event(event.id).await.unwrap();
+        reopened.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_wake_is_rejected_without_stranding_it() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        sqlx::query(
+            "INSERT INTO agent_wake_events (agent_id, kind, payload, delivery_policy) \
+             VALUES (?, 'unknown', '{}', 'immediate')",
+        )
+        .bind(agent.id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        assert!(
+            store
+                .claim_pending_wake_event(agent.id, true)
+                .await
+                .is_err()
+        );
+        let state: WakeEventState =
+            sqlx::query_scalar("SELECT delivery_state FROM agent_wake_events")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(state, WakeEventState::Pending);
     }
 }

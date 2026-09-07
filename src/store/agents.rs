@@ -1,5 +1,8 @@
 use crate::{
-    domain::{Agent, AgentMessage, AgentProjectWorktree, AgentState},
+    domain::{
+        Agent, AgentMessage, AgentMessageWakePayload, AgentProjectWorktree, AgentState,
+        WakeEventData,
+    },
     error::AppError,
 };
 
@@ -549,13 +552,17 @@ impl Store {
         .bind(result.last_insert_rowid())
         .fetch_one(&mut *transaction)
         .await?;
-        let payload = serde_json::json!({"message": &message.body, "message_id": message.id});
+        let event = WakeEventData::Message(AgentMessageWakePayload {
+            message: message.body.clone(),
+            message_id: message.id,
+        });
         sqlx::query(
             "INSERT INTO agent_wake_events (agent_id, kind, payload, delivery_policy) \
-             VALUES (?, 'message', ?, 'immediate')",
+             VALUES (?, ?, ?, 'immediate')",
         )
         .bind(agent_id)
-        .bind(payload.to_string())
+        .bind(event.kind())
+        .bind(event.payload().to_string())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;

@@ -4,7 +4,8 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::{
     domain::{
-        Message, Project, Ticket, TicketActivity, TicketBlocker, TicketState, WakeDeliveryPolicy,
+        Message, Project, Ticket, TicketActivity, TicketBlocker, TicketState, TicketWakePayload,
+        TicketWakeTicket, WakeDeliveryPolicy, WakeEventData,
     },
     error::AppError,
 };
@@ -1127,9 +1128,8 @@ async fn insert_pending_ticket_wakes(
     ticket: &Ticket,
     reason: TicketWakeReason,
 ) -> Result<Vec<i64>, AppError> {
-    let (kind, message, agent_ids) = match reason {
+    let (message, agent_ids) = match reason {
         TicketWakeReason::Available => (
-            "ticket.available",
             format!(
                 "Ticket #{} '{}' is available. Claim it atomically before starting work.",
                 ticket.id, ticket.title
@@ -1144,7 +1144,6 @@ async fn insert_pending_ticket_wakes(
             .await?,
         ),
         TicketWakeReason::Assigned => (
-            "ticket.assigned",
             format!(
                 "Ticket #{} '{}' was assigned to you.",
                 ticket.id, ticket.title
@@ -1155,7 +1154,6 @@ async fn insert_pending_ticket_wakes(
                 .await?,
         ),
         TicketWakeReason::Reserved => (
-            "ticket.reserved",
             format!(
                 "Ticket #{} '{}' was reserved for you.",
                 ticket.id, ticket.title
@@ -1166,7 +1164,6 @@ async fn insert_pending_ticket_wakes(
                 .await?,
         ),
         TicketWakeReason::ReviewRequested => (
-            "ticket.review_requested",
             format!(
                 "Ticket #{} '{}' from branch '{}' is ready for review. Claim its review before inspecting it.",
                 ticket.id,
@@ -1185,30 +1182,26 @@ async fn insert_pending_ticket_wakes(
             .await?,
         ),
     };
-    let payload = serde_json::to_string(&serde_json::json!({
-        "message": message,
-        "ticket_id": ticket.id,
-        "revision": ticket.revision,
-        "changed_fields": ticket_changed_fields(previous, ticket),
-        "ticket": {
-            "project_id": ticket.project_id,
-            "title": ticket.title,
-            "state": ticket.state,
-            "assignee_id": ticket.assignee_id,
-            "created_by_agent_id": ticket.created_by_agent_id,
-            "reserved_for_agent_id": ticket.reserved_for_agent_id,
-            "implementation_branch": ticket.implementation_branch,
-            "review_commit": ticket.review_commit,
-            "review_target_branch": ticket.review_target_branch,
-            "review_project_id": ticket.review_project_id,
-            "review_project_path": ticket.review_project_path,
-            "reviewer_id": ticket.reviewer_id,
-            "blocker_ids": ticket.blocker_ids,
-            "unresolved_blockers": ticket.unresolved_blockers,
-        }
-    }))
-    .map_err(|error| AppError::internal(format!("failed to encode ticket wake event: {error}")))?;
-    let deduplication_key = format!("ticket:{}:{}:{kind}", ticket.id, ticket.revision);
+    let payload = TicketWakePayload {
+        message,
+        ticket_id: ticket.id,
+        revision: Some(ticket.revision),
+        changed_fields: ticket_changed_fields(previous, ticket)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ticket: TicketWakeTicket::from(ticket),
+    };
+    let event = match reason {
+        TicketWakeReason::Available => WakeEventData::TicketAvailable(payload),
+        TicketWakeReason::Assigned => WakeEventData::TicketAssigned(payload),
+        TicketWakeReason::Reserved => WakeEventData::TicketReserved(payload),
+        TicketWakeReason::ReviewRequested => WakeEventData::TicketReviewRequested(payload),
+    };
+    let payload = serde_json::to_string(&event.payload()).map_err(|error| {
+        AppError::internal(format!("failed to encode ticket wake event: {error}"))
+    })?;
+    let deduplication_key = format!("ticket:{}:{}:{}", ticket.id, ticket.revision, event.kind());
     let mut queued = Vec::new();
     for agent_id in agent_ids {
         let result = sqlx::query(
@@ -1216,7 +1209,7 @@ async fn insert_pending_ticket_wakes(
              (agent_id, kind, payload, deduplication_key, delivery_policy) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(agent_id)
-        .bind(kind)
+        .bind(event.kind())
         .bind(&payload)
         .bind(&deduplication_key)
         .bind(WakeDeliveryPolicy::IdleOnly)
@@ -1307,7 +1300,7 @@ mod tests {
 
         assert_eq!(ticket.project_id, project.id);
         assert_eq!(
-            store.wake_events(watcher.id).await.unwrap()[0].payload["ticket"]["project_id"],
+            store.wake_events(watcher.id).await.unwrap()[0].payload()["ticket"]["project_id"],
             project.id
         );
         let other = store.set_project("/tmp/another-project").await.unwrap();
@@ -1457,8 +1450,13 @@ mod tests {
         store
             .enqueue_wake_event(
                 worker.id,
-                "ticket.changes_requested",
-                serde_json::json!({"ticket_id": blocker.id}),
+                WakeEventData::TicketChangesRequested(TicketWakePayload {
+                    message: "Changes requested".into(),
+                    ticket_id: blocker.id,
+                    revision: None,
+                    changed_fields: Vec::new(),
+                    ticket: TicketWakeTicket::project(blocker.project_id),
+                }),
                 Some("cancel-test-changes-requested"),
                 WakeDeliveryPolicy::IdleOnly,
             )
@@ -1470,7 +1468,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .map(|event| event.kind.as_str())
+                .map(|event| event.kind())
                 .collect::<Vec<_>>(),
             vec!["ticket.available", "ticket.changes_requested"]
         );
@@ -1716,7 +1714,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .map(|event| event.kind.as_str())
+                .map(|event| event.kind())
                 .collect::<Vec<_>>(),
             vec!["ticket.reserved", "ticket.reserved"]
         );
@@ -1870,7 +1868,7 @@ mod tests {
             .unwrap();
         assert_eq!(assigned_targets, vec![implementer.id]);
         assert_eq!(
-            store.wake_events(implementer.id).await.unwrap()[0].kind,
+            store.wake_events(implementer.id).await.unwrap()[0].kind(),
             "ticket.assigned"
         );
         store
@@ -1878,7 +1876,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            store.wake_events(implementer.id).await.unwrap()[0].kind,
+            store.wake_events(implementer.id).await.unwrap()[0].kind(),
             "ticket.assigned"
         );
 
@@ -1900,12 +1898,12 @@ mod tests {
         assert_eq!(review_targets, vec![review_only.id, both.id]);
         assert_eq!(store.wake_events(work_only.id).await.unwrap().len(), 1);
         let reviewer_events = store.wake_events(review_only.id).await.unwrap();
-        assert_eq!(reviewer_events[0].kind, "ticket.review_requested");
+        assert_eq!(reviewer_events[0].kind(), "ticket.review_requested");
         assert_eq!(
             reviewer_events[0].delivery_policy,
             WakeDeliveryPolicy::IdleOnly
         );
-        assert_eq!(reviewer_events[0].payload["ticket_id"], ticket.id);
+        assert_eq!(reviewer_events[0].payload()["ticket_id"], ticket.id);
         assert_eq!(
             reviewer_events[0].deduplication_key.as_deref(),
             Some("ticket:1:3:ticket.review_requested")
@@ -1916,7 +1914,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .map(|event| event.kind.as_str())
+                .map(|event| event.kind())
                 .collect::<Vec<_>>(),
             vec!["ticket.available", "ticket.review_requested"]
         );

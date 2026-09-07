@@ -1,13 +1,12 @@
-use serde_json::json;
 use tokio::process::Command;
 
 use crate::{
-    domain::WakeDeliveryPolicy,
+    domain::{TicketWakePayload, TicketWakeTicket, WakeDeliveryPolicy, WakeEventData},
     error::AppError,
     store::{MergeNotification, ReviewSubmission},
 };
 
-use super::AgentManager;
+use super::{AgentEvent, AgentManager};
 
 impl AgentManager {
     pub async fn submit_review(
@@ -56,7 +55,10 @@ impl AgentManager {
                 expected_revision,
             )
             .await?;
-        self.emit(agent_id, "ticket_updated", json!(ticket));
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id,
+            data: ticket.clone(),
+        });
         for agent_id in wake_agent_ids {
             self.deliver_pending(agent_id).await;
         }
@@ -73,7 +75,10 @@ impl AgentManager {
             .store
             .claim_review(ticket_id, agent_id, expected_revision)
             .await?;
-        self.emit(agent_id, "ticket_updated", json!(ticket));
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id,
+            data: ticket.clone(),
+        });
         Ok(ticket)
     }
 
@@ -105,7 +110,10 @@ impl AgentManager {
             .store
             .request_changes(ticket_id, agent_id, feedback, expected_revision)
             .await?;
-        self.emit(agent_id, "ticket_updated", json!(ticket));
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id,
+            data: ticket.clone(),
+        });
         if let Some(worker_id) = ticket.assignee_id {
             let branch_instruction = ticket
                 .implementation_branch
@@ -115,14 +123,15 @@ impl AgentManager {
             self.store
                 .enqueue_wake_event(
                     worker_id,
-                    "ticket.changes_requested",
-                    json!({
-                        "message": format!(
+                    WakeEventData::TicketChangesRequested(TicketWakePayload {
+                        message: format!(
                             "Changes were requested on ticket #{} '{}'.{} Feedback: {}",
                             ticket.id, ticket.title, branch_instruction, feedback
                         ),
-                        "ticket_id": ticket.id,
-                        "ticket": {"project_id": ticket.project_id},
+                        ticket_id: ticket.id,
+                        revision: None,
+                        changed_fields: Vec::new(),
+                        ticket: TicketWakeTicket::project(ticket.project_id),
                     }),
                     Some(&format!(
                         "ticket:{}:{}:changes-requested",
@@ -282,7 +291,10 @@ impl AgentManager {
         for agent_id in wake_agent_ids {
             self.deliver_pending(agent_id).await;
         }
-        self.emit(reviewer_id, "ticket_updated", json!(ticket));
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id: reviewer_id,
+            data: ticket.clone(),
+        });
         Ok(ticket)
     }
 }
@@ -345,7 +357,7 @@ mod tests {
     };
 
     use crate::{
-        agent_runtime::{AgentManager, RpcPeer, RunningAgent},
+        agent_runtime::{AgentEvent, AgentManager, RpcPeer, RunningAgent},
         domain::{AgentState, TicketState},
         store::{NewTicket, ReviewSubmission, Store},
     };
@@ -439,7 +451,7 @@ mod tests {
         );
         let reviewer_events = store.wake_events(reviewer.id).await.unwrap();
         assert_eq!(reviewer_events.len(), 1);
-        assert_eq!(reviewer_events[0].kind, "ticket.review_requested");
+        assert_eq!(reviewer_events[0].kind(), "ticket.review_requested");
         assert_eq!(
             reviewer_events[0].delivery_state,
             crate::domain::WakeEventState::Pending
@@ -543,7 +555,10 @@ mod tests {
             .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
             .await
             .unwrap();
-        while events.recv().await.unwrap().kind != "ticket_updated" {}
+        while !matches!(
+            events.recv().await.unwrap(),
+            AgentEvent::TicketUpdated { .. }
+        ) {}
         assert_eq!(ticket.state, TicketState::Done);
         assert_eq!(
             std::fs::read_to_string(repository.join("work.txt")).unwrap(),
@@ -566,7 +581,7 @@ mod tests {
         }
         let subscriber_events = store.wake_events(subscriber.id).await.unwrap();
         assert_eq!(subscriber_events.len(), 1);
-        assert_eq!(subscriber_events[0].kind, "channel.message");
+        assert_eq!(subscriber_events[0].kind(), "channel.message");
         assert_eq!(
             subscriber_events[0].delivery_state,
             crate::domain::WakeEventState::Delivered
@@ -627,7 +642,7 @@ mod tests {
                 .unwrap()
                 .last()
                 .unwrap()
-                .kind,
+                .kind(),
             "ticket.changes_requested"
         );
         let second = manager

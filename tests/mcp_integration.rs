@@ -200,7 +200,7 @@ async fn mcp_calls_the_server_without_database_access() {
             .await
             .unwrap()
             .iter()
-            .any(|event| event.kind == "ticket.assigned"
+            .any(|event| event.kind() == "ticket.assigned"
                 && event.delivery_state == multi_agent_board::domain::WakeEventState::Delivered)
     );
 

@@ -9,11 +9,15 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, AgentState, WakeDeliveryPolicy, WakeEvent},
+    domain::{
+        Agent, AgentState, IdleHeartbeatWakePayload, WakeDeliveryPolicy, WakeEvent, WakeEventData,
+    },
     error::AppError,
 };
 
-use super::{AgentManager, RpcPeer, RunningAgent, validate_agent_name};
+use super::{
+    AgentEvent, AgentManager, AgentMessageDelta, RpcPeer, RunningAgent, validate_agent_name,
+};
 
 const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it, commit cohesive changes, and submit it for review when ready. If you have approve_review scope, claim reviews before reviewing them. Keep ticket state accurate. Do not modify another agent's worktree or the primary worktree.";
 
@@ -70,8 +74,11 @@ impl AgentManager {
                     .store
                     .enqueue_wake_event(
                         agent.id,
-                        "idle.heartbeat",
-                        json!({"message": message, "minutes": minutes, "occurred_at": now.to_string()}),
+                        WakeEventData::IdleHeartbeat(IdleHeartbeatWakePayload {
+                            message,
+                            minutes,
+                            occurred_at: now.to_string(),
+                        }),
                         None,
                         WakeDeliveryPolicy::IdleOnly,
                     )
@@ -114,7 +121,10 @@ impl AgentManager {
         if let Some(running) = self.processes.lock().await.remove(&agent_id) {
             let _ = running.child.lock().await.kill().await;
         }
-        self.emit(agent.id, "agent_updated", json!(agent));
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id: agent.id,
+            data: agent.clone(),
+        });
         Ok(agent)
     }
 
@@ -132,7 +142,10 @@ impl AgentManager {
                 return Err(AppError::not_found("agent not found"));
             }
             let user_message = self.store.enqueue_agent_message(agent_id, message).await?;
-            self.emit(agent_id, "message", json!(user_message));
+            self.emit(AgentEvent::Message {
+                agent_id,
+                data: user_message,
+            });
         }
         self.deliver_pending(agent_id).await;
         self.store
@@ -246,13 +259,16 @@ impl AgentManager {
                 let _ = self.store.retry_wake_event(event.id).await;
                 return;
             }
-            if event.kind != "message"
+            if !matches!(event.event, WakeEventData::Message(_))
                 && let Ok(message) = self
                     .store
                     .add_agent_message(agent_id, "system", &message)
                     .await
             {
-                self.emit(agent_id, "message", json!(message));
+                self.emit(AgentEvent::Message {
+                    agent_id,
+                    data: message,
+                });
             }
             if self.store.complete_wake_event(event.id).await.is_err() {
                 return;
@@ -285,7 +301,10 @@ impl AgentManager {
             }
             let _ = running.child.lock().await.kill().await;
         }
-        self.emit(agent_id, "agent_updated", json!(agent));
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id,
+            data: agent.clone(),
+        });
         Ok(agent)
     }
 
@@ -295,7 +314,10 @@ impl AgentManager {
             .store
             .update_agent_runtime(agent_id, AgentState::Idle, None, None, None)
             .await?;
-        self.emit(agent_id, "agent_updated", json!(agent));
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id,
+            data: agent.clone(),
+        });
         drop(operation);
         let manager = self.clone();
         tokio::spawn(async move { manager.deliver_pending(agent_id).await });
@@ -414,7 +436,7 @@ impl AgentManager {
                 .store
                 .update_agent_runtime(agent_id, AgentState::AwaitingApproval, None, None, None)
                 .await;
-            self.emit(agent_id, "approval_declined", event.clone());
+            self.emit(AgentEvent::ApprovalDeclined { agent_id });
             let _ = rpc
                 .respond(event["id"].clone(), json!({"decision": "decline"}))
                 .await;
@@ -422,7 +444,14 @@ impl AgentManager {
         }
         match method {
             "item/agentMessage/delta" => {
-                self.emit(agent_id, "agent_message_delta", event["params"].clone())
+                if let Some(delta) = event.pointer("/params/delta").and_then(Value::as_str) {
+                    self.emit(AgentEvent::AgentMessageDelta {
+                        agent_id,
+                        data: AgentMessageDelta {
+                            delta: delta.to_owned(),
+                        },
+                    });
+                }
             }
             "item/completed"
                 if event.pointer("/params/item/type").and_then(Value::as_str)
@@ -431,7 +460,10 @@ impl AgentManager {
                 if let Some(text) = event.pointer("/params/item/text").and_then(Value::as_str)
                     && let Ok(message) = self.store.add_agent_message(agent_id, "agent", text).await
                 {
-                    self.emit(agent_id, "message", json!(message));
+                    self.emit(AgentEvent::Message {
+                        agent_id,
+                        data: message,
+                    });
                 }
             }
             "turn/completed" => {
@@ -455,7 +487,10 @@ impl AgentManager {
                     .finish_agent_turn(agent_id, turn_id, state, error)
                     .await
                 {
-                    self.emit(agent_id, "agent_updated", json!(agent));
+                    self.emit(AgentEvent::AgentUpdated {
+                        agent_id,
+                        data: agent,
+                    });
                     if state == AgentState::Idle {
                         let manager = self.clone();
                         tokio::spawn(async move { manager.deliver_pending(agent_id).await });
@@ -469,7 +504,10 @@ impl AgentManager {
                     .unwrap_or("Codex error");
                 self.fail_agent(agent_id, message).await;
             }
-            _ => self.emit(agent_id, "codex_event", event),
+            _ => self.emit(AgentEvent::CodexEvent {
+                agent_id,
+                data: event,
+            }),
         }
     }
 
@@ -479,7 +517,10 @@ impl AgentManager {
             .update_agent_runtime(agent_id, AgentState::Error, None, None, Some(message))
             .await
         {
-            self.emit(agent_id, "agent_updated", json!(agent));
+            self.emit(AgentEvent::AgentUpdated {
+                agent_id,
+                data: agent,
+            });
         }
     }
 
@@ -532,36 +573,20 @@ fn steer_params(thread_id: &str, turn_id: &str, message: &str) -> Value {
 }
 
 fn wake_event_message(event: &WakeEvent) -> String {
-    if event.kind == "reminder"
-        && let (Some(message), Some(requested)) = (
-            event.payload.get("message").and_then(Value::as_str),
-            event
-                .payload
-                .get("requested_delivery_at")
-                .and_then(Value::as_i64)
-                .and_then(|timestamp| Timestamp::from_second(timestamp).ok()),
-        )
+    if let WakeEventData::Reminder(payload) = &event.event
+        && let Ok(requested) = Timestamp::from_second(payload.requested_delivery_at)
     {
         return format!(
-            "Reminder scheduled for {requested}. Actual delivery time: {}.\n\n{message}",
-            Timestamp::now()
+            "Reminder scheduled for {requested}. Actual delivery time: {}.\n\n{}",
+            Timestamp::now(),
+            payload.message
         );
     }
-    event
-        .payload
-        .get("message")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("Agent inbox event `{}`:\n{}", event.kind, event.payload))
+    event.event.message().to_owned()
 }
 
 fn ticket_transition_id(event: &WakeEvent) -> Option<i64> {
-    matches!(
-        event.kind.as_str(),
-        "ticket.assigned" | "ticket.review_claimed" | "ticket.changes_requested"
-    )
-    .then(|| event.payload.get("ticket_id")?.as_i64())
-    .flatten()
+    event.event.ticket_id()
 }
 
 #[cfg(test)]
@@ -572,7 +597,10 @@ mod tests {
         sync::Mutex,
     };
 
-    use crate::store::{NewTicket, Store};
+    use crate::{
+        domain::{TicketWakePayload, TicketWakeTicket},
+        store::{NewTicket, Store},
+    };
 
     use super::*;
 
@@ -734,11 +762,12 @@ mod tests {
             .store
             .enqueue_wake_event(
                 agent.id,
-                "ticket.assigned",
-                json!({
-                    "message": format!("Ticket #{} was assigned to you.", ticket.id),
-                    "ticket_id": ticket.id,
-                    "ticket": {"project_id": project.id},
+                WakeEventData::TicketAssigned(TicketWakePayload {
+                    message: format!("Ticket #{} was assigned to you.", ticket.id),
+                    ticket_id: ticket.id,
+                    revision: None,
+                    changed_fields: Vec::new(),
+                    ticket: TicketWakeTicket::project(project.id),
                 }),
                 None,
                 WakeDeliveryPolicy::IdleOnly,
@@ -813,19 +842,25 @@ mod tests {
     async fn ticket_wakes_wait_for_idle_without_blocking_channel_messages() {
         let (manager, agent, _rpc, server) =
             manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
-        for (kind, message) in [
-            ("ticket.available", "Pending implementation work"),
-            ("ticket.review_requested", "Pending review"),
+        for event in [
+            WakeEventData::TicketAvailable(TicketWakePayload {
+                message: "Pending implementation work".into(),
+                ticket_id: 1,
+                revision: None,
+                changed_fields: Vec::new(),
+                ticket: TicketWakeTicket::project(1),
+            }),
+            WakeEventData::TicketReviewRequested(TicketWakePayload {
+                message: "Pending review".into(),
+                ticket_id: 1,
+                revision: None,
+                changed_fields: Vec::new(),
+                ticket: TicketWakeTicket::project(1),
+            }),
         ] {
             manager
                 .store
-                .enqueue_wake_event(
-                    agent.id,
-                    kind,
-                    json!({"message": message}),
-                    None,
-                    WakeDeliveryPolicy::IdleOnly,
-                )
+                .enqueue_wake_event(agent.id, event, None, WakeDeliveryPolicy::IdleOnly)
                 .await
                 .unwrap();
         }
@@ -982,7 +1017,7 @@ mod tests {
         assert!(agent.idle_since.is_none());
         let events = manager.store.wake_events(agent.id).await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "idle.heartbeat");
+        assert_eq!(events[0].kind(), "idle.heartbeat");
         assert_eq!(
             events[0].delivery_state,
             crate::domain::WakeEventState::Delivered

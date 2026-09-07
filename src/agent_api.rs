@@ -13,7 +13,7 @@ use multi_agent_board_protocol::{
 use std::{convert::Infallible, time::Duration};
 
 use crate::{
-    agent_runtime::AgentManager,
+    agent_runtime::{AgentEvent, AgentManager},
     domain::{Agent, AgentMessage, AgentProjectWorktree},
     error::AppError,
 };
@@ -257,11 +257,11 @@ async fn events(
                 event = receiver.recv() => match event {
                     Ok(event) => yield Ok(Event::default().json_data(event).unwrap()),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        yield Ok(Event::default().data(r#"{"kind":"refresh"}"#));
+                        yield Ok(Event::default().json_data(AgentEvent::Refresh).unwrap());
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
-                _ = refresh.tick() => yield Ok(Event::default().data(r#"{"kind":"refresh"}"#)),
+                _ = refresh.tick() => yield Ok(Event::default().json_data(AgentEvent::Refresh).unwrap()),
             }
         }
     };

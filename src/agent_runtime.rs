@@ -4,8 +4,8 @@ use std::{
     sync::Arc,
 };
 
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     process::{Child, Command},
     sync::{Mutex, broadcast},
@@ -23,11 +23,58 @@ mod rpc;
 
 use rpc::RpcPeer;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct AgentEvent {
-    pub agent_id: i64,
-    pub kind: String,
-    pub data: Value,
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentEvent {
+    Refresh,
+    AgentCreated {
+        agent_id: i64,
+        data: Agent,
+    },
+    AgentUpdated {
+        agent_id: i64,
+        data: Agent,
+    },
+    AgentMessageDelta {
+        agent_id: i64,
+        data: AgentMessageDelta,
+    },
+    Message {
+        agent_id: i64,
+        data: crate::domain::AgentMessage,
+    },
+    TicketUpdated {
+        agent_id: i64,
+        data: Ticket,
+    },
+    SettingsUpdated {
+        agent_id: i64,
+        data: BoardSettings,
+    },
+    BoardMessage {
+        agent_id: i64,
+        data: Message,
+    },
+    ChannelSubscriptions {
+        agent_id: i64,
+        data: Vec<String>,
+    },
+    ProjectSubscriptions {
+        agent_id: i64,
+        data: Vec<i64>,
+    },
+    ApprovalDeclined {
+        agent_id: i64,
+    },
+    CodexEvent {
+        agent_id: i64,
+        data: Value,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMessageDelta {
+    pub delta: String,
 }
 
 #[derive(Clone)]
@@ -107,7 +154,10 @@ impl AgentManager {
         let settings = BoardSettings {
             merge_notification_channel,
         };
-        self.emit(0, "settings_updated", json!(settings));
+        self.emit(AgentEvent::SettingsUpdated {
+            agent_id: 0,
+            data: settings.clone(),
+        });
         Ok(settings)
     }
 
@@ -116,11 +166,10 @@ impl AgentManager {
     }
 
     pub(crate) fn emit_board_message(&self, message: &Message) {
-        self.emit(
-            message.agent_id.unwrap_or_default(),
-            "board_message",
-            json!(message),
-        );
+        self.emit(AgentEvent::BoardMessage {
+            agent_id: message.agent_id.unwrap_or_default(),
+            data: message.clone(),
+        });
     }
 
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {
@@ -181,7 +230,10 @@ impl AgentManager {
             .store
             .set_agent_active_project(agent_id, Some(project.id))
             .await?;
-        self.emit(agent_id, "agent_updated", json!(updated));
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id,
+            data: updated,
+        });
         Ok(Some(ProjectTransition {
             agent_id,
             ticket_id: ticket.id,
@@ -222,7 +274,10 @@ impl AgentManager {
             .store
             .set_agent_project_subscriptions(agent_id, project_ids)
             .await?;
-        self.emit(agent_id, "project_subscriptions", json!(project_ids));
+        self.emit(AgentEvent::ProjectSubscriptions {
+            agent_id,
+            data: project_ids.clone(),
+        });
         Ok(project_ids)
     }
 
@@ -235,7 +290,10 @@ impl AgentManager {
             .store
             .add_agent_project_subscriptions(agent_id, project_ids)
             .await?;
-        self.emit(agent_id, "project_subscriptions", json!(project_ids));
+        self.emit(AgentEvent::ProjectSubscriptions {
+            agent_id,
+            data: project_ids.clone(),
+        });
         Ok(project_ids)
     }
 
@@ -248,7 +306,10 @@ impl AgentManager {
             .store
             .remove_agent_project_subscriptions(agent_id, project_ids)
             .await?;
-        self.emit(agent_id, "project_subscriptions", json!(project_ids));
+        self.emit(AgentEvent::ProjectSubscriptions {
+            agent_id,
+            data: project_ids.clone(),
+        });
         Ok(project_ids)
     }
 
@@ -261,7 +322,10 @@ impl AgentManager {
             .store
             .set_agent_channel_subscriptions(agent_id, channels)
             .await?;
-        self.emit(agent_id, "channel_subscriptions", json!(channels));
+        self.emit(AgentEvent::ChannelSubscriptions {
+            agent_id,
+            data: channels.clone(),
+        });
         Ok(channels)
     }
 
@@ -274,7 +338,10 @@ impl AgentManager {
             .store
             .add_agent_channel_subscriptions(agent_id, channels)
             .await?;
-        self.emit(agent_id, "channel_subscriptions", json!(channels));
+        self.emit(AgentEvent::ChannelSubscriptions {
+            agent_id,
+            data: channels.clone(),
+        });
         Ok(channels)
     }
 
@@ -287,7 +354,10 @@ impl AgentManager {
             .store
             .remove_agent_channel_subscriptions(agent_id, channels)
             .await?;
-        self.emit(agent_id, "channel_subscriptions", json!(channels));
+        self.emit(AgentEvent::ChannelSubscriptions {
+            agent_id,
+            data: channels.clone(),
+        });
         Ok(channels)
     }
 
@@ -308,7 +378,10 @@ impl AgentManager {
                 idle_heartbeat_minutes,
             )
             .await?;
-        self.emit(agent_id, "agent_updated", json!(agent));
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id,
+            data: agent.clone(),
+        });
         Ok(agent)
     }
 
@@ -361,7 +434,10 @@ impl AgentManager {
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        self.emit(agent.id, "agent_created", json!(agent));
+        self.emit(AgentEvent::AgentCreated {
+            agent_id: agent.id,
+            data: agent.clone(),
+        });
         Ok(agent)
     }
 
@@ -439,12 +515,8 @@ impl AgentManager {
         self.worktree_for_project(agent_id, project_id).await
     }
 
-    fn emit(&self, agent_id: i64, kind: &str, data: Value) {
-        let _ = self.events.send(AgentEvent {
-            agent_id,
-            kind: kind.into(),
-            data,
-        });
+    fn emit(&self, event: AgentEvent) {
+        let _ = self.events.send(event);
     }
 }
 
@@ -514,6 +586,36 @@ mod tests {
         assert!(validate_agent_name("backend-1").is_ok());
         assert!(validate_agent_name("../escape").is_err());
         assert!(validate_agent_name("spaces are bad").is_err());
+    }
+
+    #[test]
+    fn typed_agent_events_keep_the_sse_wire_contract() {
+        let agent = Agent {
+            id: 1,
+            name: "worker".into(),
+            state: crate::domain::AgentState::Idle,
+            thread_id: None,
+            home_path: "/tmp/worker".into(),
+            active_project_id: None,
+            active_turn_id: None,
+            last_error: None,
+            wake_on_pending_work: false,
+            wake_on_pending_review: false,
+            idle_heartbeat_minutes: None,
+            idle_since: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let event = AgentEvent::AgentUpdated {
+            agent_id: agent.id,
+            data: agent,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(value["kind"], "agent_updated");
+        assert_eq!(value["agent_id"], 1);
+        assert_eq!(value["data"]["name"], "worker");
+        assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
     }
 
     #[tokio::test]
