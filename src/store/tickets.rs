@@ -225,6 +225,14 @@ impl Store {
                 .bind(id)
                 .execute(&mut *transaction)
                 .await?;
+            sqlx::query(
+                "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
+                 AND kind IN ('ticket.available', 'ticket.review_requested') \
+                 AND json_extract(payload, '$.ticket.project_id') = ?",
+            )
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
         }
         let archived = sqlx::query_as(
             "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
@@ -1832,15 +1840,19 @@ mod tests {
             .set_agent_wake_settings(implementer.id, true, false, None)
             .await
             .unwrap();
-        store
-            .set_agent_project_subscriptions(implementer.id, &[])
-            .await
-            .unwrap();
         let (ticket, assigned_targets) = store
             .claim_ticket_with_wakes(ticket.id, implementer.id, Some(ticket.revision))
             .await
             .unwrap();
         assert_eq!(assigned_targets, vec![implementer.id]);
+        assert_eq!(
+            store.wake_events(implementer.id).await.unwrap()[0].kind,
+            "ticket.assigned"
+        );
+        store
+            .set_agent_project_subscriptions(implementer.id, &[])
+            .await
+            .unwrap();
         assert_eq!(
             store.wake_events(implementer.id).await.unwrap()[0].kind,
             "ticket.assigned"
@@ -1886,6 +1898,11 @@ mod tests {
         );
         assert!(store.wake_events(neither.id).await.unwrap().is_empty());
         assert!(store.wake_events(unsubscribed.id).await.unwrap().is_empty());
+        store
+            .set_agent_project_subscriptions(both.id, &[])
+            .await
+            .unwrap();
+        assert!(store.wake_events(both.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

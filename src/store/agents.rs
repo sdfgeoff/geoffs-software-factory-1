@@ -314,6 +314,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
+        remove_ineligible_project_wakes(&mut transaction, agent_id).await?;
         transaction.commit().await?;
         self.agent_project_subscriptions(agent_id).await
     }
@@ -354,6 +355,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
+        remove_ineligible_project_wakes(&mut transaction, agent_id).await?;
         transaction.commit().await?;
         self.agent_project_subscriptions(agent_id).await
     }
@@ -570,6 +572,23 @@ impl Store {
         .await?
         .rows_affected())
     }
+}
+
+async fn remove_ineligible_project_wakes(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    agent_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM agent_wake_events WHERE agent_id = ? AND delivery_state = 'pending' \
+         AND kind IN ('ticket.available', 'ticket.review_requested') \
+         AND NOT EXISTS (SELECT 1 FROM agent_project_subscriptions subscription \
+         WHERE subscription.agent_id = agent_wake_events.agent_id \
+         AND subscription.project_id = json_extract(agent_wake_events.payload, '$.ticket.project_id'))",
+    )
+    .bind(agent_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 fn worktree_from_row(row: (i64, i64, String, i64, i64)) -> AgentProjectWorktree {
