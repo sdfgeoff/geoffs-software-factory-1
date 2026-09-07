@@ -434,7 +434,7 @@ impl Store {
                 .await?;
             sqlx::query(
                 "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
-                 AND kind IN ('ticket.available', 'ticket.assigned', 'ticket.review_requested') \
+                 AND kind LIKE 'ticket.%' \
                  AND json_extract(payload, '$.ticket_id') = ?",
             )
             .bind(ticket.id)
@@ -447,7 +447,9 @@ impl Store {
         {
             return Err(blocked_ticket_error(&ticket));
         }
-        let reason = if current.assignee_id != ticket.assignee_id && ticket.assignee_id.is_some() {
+        let reason = if ticket.state == TicketState::Cancelled {
+            None
+        } else if current.assignee_id != ticket.assignee_id && ticket.assignee_id.is_some() {
             Some(TicketWakeReason::Assigned)
         } else if !ticket_is_available(&current) && ticket_is_available(&ticket) {
             Some(TicketWakeReason::Available)
@@ -1363,12 +1365,33 @@ mod tests {
             })
             .await
             .unwrap();
+        store
+            .enqueue_wake_event(
+                worker.id,
+                "ticket.changes_requested",
+                serde_json::json!({"ticket_id": blocker.id}),
+                Some("cancel-test-changes-requested"),
+                WakeDeliveryPolicy::IdleOnly,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .wake_events(worker.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ticket.available", "ticket.changes_requested"]
+        );
 
         let (cancelled, wake_targets) = store
             .update_ticket_with_wakes(
                 blocker.id,
                 TicketChanges {
                     state: Some(TicketState::Cancelled),
+                    assignee_id: Some(Some(worker.id)),
                     expected_revision: Some(blocker.revision),
                     ..Default::default()
                 },
@@ -1376,6 +1399,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled.state, TicketState::Cancelled);
+        assert_eq!(cancelled.assignee_id, Some(worker.id));
         assert!(wake_targets.is_empty());
         assert!(store.wake_events(worker.id).await.unwrap().is_empty());
         assert_eq!(
