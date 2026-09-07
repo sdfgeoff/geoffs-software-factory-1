@@ -203,12 +203,6 @@ impl AgentManager {
         self.start_inbox_turn(&agent, message).await
     }
 
-    pub(super) async fn notify_agent(&self, agent_id: i64, message: &str) -> Result<(), AppError> {
-        self.store.enqueue_notification(agent_id, message).await?;
-        self.deliver_pending(agent_id).await;
-        Ok(())
-    }
-
     pub async fn deliver_pending(&self, agent_id: i64) {
         let _operation = self.operations.lock().await;
         loop {
@@ -225,7 +219,16 @@ impl AgentManager {
             else {
                 return;
             };
-            let message = wake_event_message(&event);
+            let message = match self
+                .wake_message_with_project_transition(&agent, &event)
+                .await
+            {
+                Ok(message) => message,
+                Err(_) => {
+                    let _ = self.store.retry_wake_event(event.id).await;
+                    return;
+                }
+            };
             let delivered = match agent.state {
                 AgentState::Idle => self.start_inbox_turn(&agent, &message).await,
                 AgentState::Running | AgentState::AwaitingApproval => {
@@ -234,6 +237,12 @@ impl AgentManager {
                 AgentState::Paused | AgentState::Error => unreachable!(),
             };
             if delivered.is_err() {
+                if ticket_transition_project(&event).is_some() {
+                    let _ = self
+                        .store
+                        .set_agent_active_project(agent.id, agent.active_project_id)
+                        .await;
+                }
                 let _ = self.store.retry_wake_event(event.id).await;
                 return;
             }
@@ -473,6 +482,50 @@ impl AgentManager {
             self.emit(agent_id, "agent_updated", json!(agent));
         }
     }
+
+    async fn wake_message_with_project_transition(
+        &self,
+        agent: &Agent,
+        event: &WakeEvent,
+    ) -> Result<String, AppError> {
+        let message = wake_event_message(event);
+        let Some(project_id) = ticket_transition_project(event) else {
+            return Ok(message);
+        };
+        if agent.active_project_id == Some(project_id) {
+            return Ok(message);
+        }
+        let project = self
+            .store
+            .project_by_id(project_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket project not found"))?;
+        let worktree = self.worktree_for_project(agent.id, project.id).await?;
+        let old_project = match agent.active_project_id {
+            Some(id) => self
+                .store
+                .project_by_id(id)
+                .await?
+                .map(|project| format!("{} (#{})", project.name, project.id))
+                .unwrap_or_else(|| format!("unknown project (#{id})")),
+            None => "no project".into(),
+        };
+        let updated = self
+            .store
+            .set_agent_active_project(agent.id, Some(project.id))
+            .await?;
+        self.emit(agent.id, "agent_updated", json!(updated));
+        let ticket_id = event
+            .payload
+            .get("ticket_id")
+            .and_then(Value::as_i64)
+            .map(|id| format!("ticket #{id}"))
+            .unwrap_or_else(|| "ticket work".into());
+        Ok(format!(
+            "Project context changed for {ticket_id}: {old_project} → {} (#{}).\nWorking directory: {}\n\n{message}",
+            project.name, project.id, worktree.path
+        ))
+    }
 }
 
 fn agent_instructions(agent: &Agent) -> String {
@@ -522,6 +575,15 @@ fn wake_event_message(event: &WakeEvent) -> String {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Agent inbox event `{}`:\n{}", event.kind, event.payload))
+}
+
+fn ticket_transition_project(event: &WakeEvent) -> Option<i64> {
+    matches!(
+        event.kind.as_str(),
+        "ticket.assigned" | "ticket.review_claimed" | "ticket.changes_requested"
+    )
+    .then(|| event.payload.pointer("/ticket/project_id")?.as_i64())
+    .flatten()
 }
 
 #[cfg(test)]
@@ -658,6 +720,101 @@ mod tests {
             manager.store.wake_events(agent.id).await.unwrap()[0].delivery_state,
             crate::domain::WakeEventState::Delivered
         );
+    }
+
+    #[tokio::test]
+    async fn ticket_events_change_project_but_channel_messages_keep_it() {
+        let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
+        let project = manager
+            .store
+            .set_project("/tmp/second-project")
+            .await
+            .unwrap();
+        manager
+            .store
+            .add_agent_project_worktree(agent.id, project.id, "/tmp/worker-second")
+            .await
+            .unwrap();
+        manager
+            .set_channel_subscriptions(agent.id, &["general".into()])
+            .await
+            .unwrap();
+        manager
+            .store
+            .enqueue_wake_event(
+                agent.id,
+                "ticket.assigned",
+                json!({
+                    "message": "Ticket #9 was assigned to you.",
+                    "ticket_id": 9,
+                    "ticket": {"project_id": project.id},
+                }),
+                None,
+                WakeDeliveryPolicy::IdleOnly,
+            )
+            .await
+            .unwrap();
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let transitioned: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(transitioned["method"], "turn/start");
+            assert_eq!(transitioned["params"]["threadId"], "thread-1");
+            assert_eq!(transitioned["params"]["cwd"], "/tmp/worker-second");
+            let text = transitioned["params"]["input"][0]["text"].as_str().unwrap();
+            assert!(text.contains("Project context changed for ticket #9"));
+            assert!(text.contains("second-project"));
+            assert!(text.contains("Working directory: /tmp/worker-second"));
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-2\"}}}}}}\n",
+                        transitioned["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let channel: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(channel["method"], "turn/start");
+            assert_eq!(channel["params"]["threadId"], "thread-1");
+            assert_eq!(channel["params"]["cwd"], "/tmp/worker-second");
+            assert_eq!(
+                channel["params"]["input"][0]["text"],
+                "A message was posted in #general by human:\nStill here"
+            );
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turn\":{{\"id\":\"turn-3\"}}}}}}\n",
+                        channel["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        manager.deliver_pending(agent.id).await;
+        let active = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(active.active_project_id, Some(project.id));
+        manager
+            .store
+            .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
+            .await
+            .unwrap();
+        let (_, targets) = manager
+            .store
+            .post_message_with_wakes("general", None, "human", "Still here")
+            .await
+            .unwrap();
+        for agent_id in targets {
+            manager.deliver_pending(agent_id).await;
+        }
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

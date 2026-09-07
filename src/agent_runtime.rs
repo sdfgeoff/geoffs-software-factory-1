@@ -311,12 +311,22 @@ impl AgentManager {
     }
 
     async fn current_worktree(&self, agent_id: i64) -> Result<AgentProjectWorktree, AppError> {
-        let project = self
+        let agent = self
             .store
-            .project()
+            .agent(agent_id)
             .await?
-            .ok_or_else(|| AppError::bad_request("project is not selected"))?;
-        self.worktree_for_project(agent_id, project.id).await
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        let project_id = match agent.active_project_id {
+            Some(project_id) => project_id,
+            None => {
+                self.store
+                    .project()
+                    .await?
+                    .ok_or_else(|| AppError::bad_request("project is not selected"))?
+                    .id
+            }
+        };
+        self.worktree_for_project(agent_id, project_id).await
     }
 
     fn emit(&self, agent_id: i64, kind: &str, data: Value) {

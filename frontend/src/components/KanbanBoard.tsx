@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { Agent, Ticket, TicketState } from "../types";
+import type { Agent, Project, Ticket, TicketState } from "../types";
 
 const columns: { state: TicketState; label: string }[] = [
   { state: "todo", label: "To do" },
@@ -11,16 +11,26 @@ const columns: { state: TicketState; label: string }[] = [
 interface Props {
   tickets: Ticket[];
   agents: Agent[];
+  projects?: Project[];
+  currentProjectId?: number | null;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
 }
 
-export function KanbanBoard({ tickets, agents, onChanged, onError }: Props) {
+export function KanbanBoard({ tickets, agents, projects = [], currentProjectId = null, onChanged, onError }: Props) {
   const [title, setTitle] = useState("");
+  const [projectId, setProjectId] = useState(currentProjectId?.toString() ?? "");
+  const [filterProjectId, setFilterProjectId] = useState("all");
+  useEffect(() => {
+    if (!projectId && currentProjectId) setProjectId(currentProjectId.toString());
+  }, [currentProjectId, projectId]);
+  const visibleTickets = filterProjectId === "all"
+    ? tickets
+    : tickets.filter((ticket) => ticket.project_id === Number(filterProjectId));
   async function create(event: FormEvent) {
     event.preventDefault();
     try {
-      await api.createTicket(title);
+      await api.createTicket(title, Number(projectId));
       setTitle("");
       await onChanged();
     } catch (error) {
@@ -41,8 +51,24 @@ export function KanbanBoard({ tickets, agents, onChanged, onError }: Props) {
           required
           maxLength={200}
         />
+        <label className="sr-only" htmlFor="ticket-project">Ticket project</label>
+        <select id="ticket-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} required>
+          <option value="" disabled>Select project</option>
+          {projects.filter((project) => !project.archived_at).map((project) => (
+            <option key={project.id} value={project.id}>{project.name}</option>
+          ))}
+        </select>
         <button type="submit">Create ticket</button>
       </form>
+      <label>
+        Filter projects
+        <select value={filterProjectId} onChange={(event) => setFilterProjectId(event.target.value)}>
+          <option value="all">All projects</option>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>{project.name}</option>
+          ))}
+        </select>
+      </label>
       <div className="kanban">
         {columns.map((column) => (
           <section
@@ -54,18 +80,19 @@ export function KanbanBoard({ tickets, agents, onChanged, onError }: Props) {
               {column.label}
               <span>
                 {
-                  tickets.filter((ticket) => ticket.state === column.state)
+                  visibleTickets.filter((ticket) => ticket.state === column.state)
                     .length
                 }
               </span>
             </h2>
-            {tickets
+            {visibleTickets
               .filter((ticket) => ticket.state === column.state)
               .map((ticket) => (
                 <TicketCard
                   key={ticket.id}
                   ticket={ticket}
                   agents={agents}
+                  project={projects.find((project) => project.id === ticket.project_id)}
                   onChanged={onChanged}
                   onError={onError}
                 />
@@ -80,11 +107,13 @@ export function KanbanBoard({ tickets, agents, onChanged, onError }: Props) {
 function TicketCard({
   ticket,
   agents,
+  project,
   onChanged,
   onError,
 }: {
   ticket: Ticket;
   agents: Agent[];
+  project?: Project;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
 }) {
@@ -147,6 +176,9 @@ function TicketCard({
       <summary>
         <span>#{ticket.id}</span>
         {ticket.title}
+        <small className="project-badge">
+          {project?.name ?? `Project #${ticket.project_id}`}
+        </small>
         {ticket.unresolved_blockers.length > 0 && (
           <strong className="blocked-badge">Blocked</strong>
         )}

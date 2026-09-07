@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import { KanbanBoard } from "./KanbanBoard";
-import type { Agent, Ticket } from "../types";
+import type { Agent, Project, Ticket } from "../types";
 
 vi.mock("../api", () => ({
   api: {
@@ -37,6 +37,11 @@ const ticket: Ticket = {
   updated_at: 0,
 };
 
+const projects: Project[] = [
+  { id: 1, name: "Board", path: "/board", default_branch: "main", archived_at: null, updated_at: 0 },
+  { id: 2, name: "API", path: "/api", default_branch: "main", archived_at: null, updated_at: 0 },
+];
+
 describe("KanbanBoard", () => {
   it("places tickets in their state column", () => {
     render(
@@ -53,6 +58,28 @@ describe("KanbanBoard", () => {
         ?.textContent,
     ).toContain("Build the board");
     expect(screen.getByRole("heading", { name: /review/i })).toBeTruthy();
+  });
+
+  it("selects a project for new tickets and filters the global board", async () => {
+    vi.mocked(api.createTicket).mockResolvedValue(ticket);
+    render(
+      <KanbanBoard
+        tickets={[ticket, { ...ticket, id: 8, project_id: 2, title: "API work" }]}
+        agents={[]}
+        projects={projects}
+        currentProjectId={2}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(screen.getAllByText("Board").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("API").length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Filter projects"), { target: { value: "2" } });
+    expect(screen.queryByText("Build the board")).toBeNull();
+    fireEvent.change(screen.getByLabelText("New ticket title"), { target: { value: "Scoped work" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    await waitFor(() => expect(api.createTicket).toHaveBeenCalledWith("Scoped work", 2));
   });
 
   it("shows the implementation branch for a review", () => {

@@ -31,6 +31,7 @@ function agentRoute(hash: string) {
 export function App() {
   const initialAgentRoute = agentRoute(window.location.hash);
   const [project, setProject] = useState<Project | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -48,15 +49,17 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [nextProject, nextTickets, nextChannels, nextAgents, nextSettings] =
+      const [nextProject, nextProjects, nextTickets, nextChannels, nextAgents, nextSettings] =
         await Promise.all([
           api.project(),
+          api.projects(),
           api.tickets(),
           api.channels(),
           api.agents(),
           api.settings(),
         ]);
       setProject(nextProject);
+      setProjects(nextProjects);
       setTickets(nextTickets);
       setChannels(nextChannels);
       setAgents(nextAgents);
@@ -145,7 +148,12 @@ export function App() {
           <p className="eyebrow">LOCAL WORKSPACE</p>
           <h1>Multi-agent board</h1>
         </div>
-        <ProjectPicker project={project} onChanged={reload} onError={report} />
+        <ProjectPicker
+          project={project}
+          projects={projects}
+          onChanged={reload}
+          onError={report}
+        />
       </header>
       <nav aria-label="Main views">
         {(["board", "messages", "agents", "settings"] as View[]).map((item) => (
@@ -170,6 +178,8 @@ export function App() {
         <KanbanBoard
           tickets={tickets}
           agents={agents}
+          projects={projects}
+          currentProjectId={project?.id ?? null}
           onChanged={reload}
           onError={report}
         />
@@ -191,6 +201,7 @@ export function App() {
           agents={agents}
           channels={channels}
           tickets={tickets}
+          projects={projects}
           selectedAgentId={selectedAgentId}
           view={agentView}
           refresh={refresh}

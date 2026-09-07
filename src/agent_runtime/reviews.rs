@@ -2,6 +2,7 @@ use serde_json::json;
 use tokio::process::Command;
 
 use crate::{
+    domain::WakeDeliveryPolicy,
     error::AppError,
     store::{MergeNotification, ReviewSubmission},
 };
@@ -72,6 +73,19 @@ impl AgentManager {
             .store
             .claim_review(ticket_id, agent_id, expected_revision)
             .await?;
+        self.store
+            .enqueue_wake_event(
+                agent_id,
+                "ticket.review_claimed",
+                json!({
+                    "message": format!("You claimed review of ticket #{} '{}'.", ticket.id, ticket.title),
+                    "ticket_id": ticket.id,
+                    "ticket": {"project_id": ticket.project_id},
+                }),
+                Some(&format!("ticket:{}:{}:review-claimed", ticket.id, ticket.revision)),
+                WakeDeliveryPolicy::IdleOnly,
+            )
+            .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
         Ok(ticket)
     }
@@ -94,14 +108,26 @@ impl AgentManager {
                 .as_deref()
                 .map(|branch| format!(" Switch to branch '{branch}' before updating it."))
                 .unwrap_or_default();
-            self.notify_agent(
-                worker_id,
-                &format!(
-                    "Changes were requested on ticket #{} '{}'.{} Feedback: {}",
-                    ticket.id, ticket.title, branch_instruction, feedback
-                ),
-            )
-            .await?;
+            self.store
+                .enqueue_wake_event(
+                    worker_id,
+                    "ticket.changes_requested",
+                    json!({
+                        "message": format!(
+                            "Changes were requested on ticket #{} '{}'.{} Feedback: {}",
+                            ticket.id, ticket.title, branch_instruction, feedback
+                        ),
+                        "ticket_id": ticket.id,
+                        "ticket": {"project_id": ticket.project_id},
+                    }),
+                    Some(&format!(
+                        "ticket:{}:{}:changes-requested",
+                        ticket.id, ticket.revision
+                    )),
+                    WakeDeliveryPolicy::IdleOnly,
+                )
+                .await?;
+            self.deliver_pending(worker_id).await;
         }
         Ok(ticket)
     }
@@ -590,12 +616,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             store
-                .pending_notification(worker.id)
+                .wake_events(worker.id)
                 .await
                 .unwrap()
-                .is_some()
+                .last()
+                .unwrap()
+                .kind,
+            "ticket.changes_requested"
         );
         let second = manager
             .submit_review(second.id, worker.id, Some(second.revision))

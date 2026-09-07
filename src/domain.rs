@@ -95,6 +95,7 @@ pub struct Agent {
     pub state: AgentState,
     pub thread_id: Option<String>,
     pub home_path: String,
+    pub active_project_id: Option<i64>,
     pub active_turn_id: Option<String>,
     pub last_error: Option<String>,
     pub wake_on_pending_work: bool,

@@ -42,11 +42,19 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ path }),
     }),
+  projects: () => request<Project[]>("/projects"),
+  registerProject: (name: string, path: string, defaultBranch: string) =>
+    request<Project>("/projects", {
+      method: "POST",
+      body: JSON.stringify({ name, path, default_branch: defaultBranch }),
+    }),
+  archiveProject: (id: number) =>
+    request<Project>(`/projects/${id}/archive`, { method: "POST" }),
   tickets: () => request<Ticket[]>("/tickets"),
-  createTicket: (title: string) =>
+  createTicket: (title: string, projectId?: number) =>
     request<Ticket>("/tickets", {
       method: "POST",
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, project_id: projectId }),
     }),
   updateTicket: (ticket: Ticket, changes: Partial<Ticket>) =>
     request<Ticket>(`/tickets/${ticket.id}`, {

@@ -61,7 +61,7 @@ impl Store {
         exclude_agent_id: i64,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT a.id, a.name, a.state, a.thread_id, a.home_path, a.active_turn_id, \
+            "SELECT a.id, a.name, a.state, a.thread_id, a.home_path, a.active_project_id, a.active_turn_id, \
              a.last_error, a.wake_on_pending_work, a.wake_on_pending_review, a.idle_heartbeat_minutes, \
              a.idle_since, a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
@@ -76,7 +76,7 @@ impl Store {
 
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents ORDER BY id",
         )
@@ -86,7 +86,7 @@ impl Store {
 
     pub async fn agents_due_for_idle_heartbeat(&self, now: i64) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE state = 'idle' AND idle_heartbeat_minutes IS NOT NULL \
              AND idle_since IS NOT NULL AND idle_since + idle_heartbeat_minutes * 60 <= ? \
@@ -99,7 +99,7 @@ impl Store {
 
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE id = ?",
         )
@@ -110,7 +110,7 @@ impl Store {
 
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_turn_id, last_error, \
+            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE name = ?",
         )
@@ -122,19 +122,20 @@ impl Store {
     pub async fn create_agent(&self, name: &str, legacy_worktree: &str) -> Result<Agent, AppError> {
         let mut transaction = self.pool.begin().await?;
         let home = format!("{legacy_worktree}.agent-home");
-        let result = sqlx::query(
-            "INSERT INTO agents (name, home_path, idle_since) VALUES (?, ?, unixepoch())",
-        )
-        .bind(name)
-        .bind(home)
-        .execute(&mut *transaction)
-        .await?;
-        let id = result.last_insert_rowid();
         let current_project_id: Option<i64> =
             sqlx::query_scalar("SELECT current_project_id FROM board_state WHERE id = 1")
                 .fetch_optional(&mut *transaction)
                 .await?
                 .flatten();
+        let result = sqlx::query(
+            "INSERT INTO agents (name, home_path, active_project_id, idle_since) VALUES (?, ?, ?, unixepoch())",
+        )
+        .bind(name)
+        .bind(home)
+        .bind(current_project_id)
+        .execute(&mut *transaction)
+        .await?;
+        let id = result.last_insert_rowid();
         if let Some(project_id) = current_project_id {
             sqlx::query(
                 "INSERT INTO agent_project_worktrees (agent_id, project_id, path) VALUES (?, ?, ?)",
@@ -166,10 +167,11 @@ impl Store {
             return Err(AppError::conflict("agent project is missing or archived"));
         }
         let result = sqlx::query(
-            "INSERT INTO agents (name, home_path, idle_since) \
-             VALUES (?, 'pending:' || lower(hex(randomblob(16))), unixepoch())",
+            "INSERT INTO agents (name, home_path, active_project_id, idle_since) \
+             VALUES (?, 'pending:' || lower(hex(randomblob(16))), ?, unixepoch())",
         )
         .bind(name)
+        .bind(project_id)
         .execute(&mut *transaction)
         .await?;
         let agent_id = result.last_insert_rowid();
@@ -248,6 +250,24 @@ impl Store {
             .agent_project_worktree(agent_id, project_id)
             .await?
             .unwrap())
+    }
+
+    pub async fn set_agent_active_project(
+        &self,
+        agent_id: i64,
+        project_id: Option<i64>,
+    ) -> Result<Agent, AppError> {
+        let result = sqlx::query(
+            "UPDATE agents SET active_project_id = ?, updated_at = unixepoch() WHERE id = ?",
+        )
+        .bind(project_id)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(self.agent(agent_id).await?.unwrap())
     }
 
     pub(crate) async fn delete_agent(&self, id: i64) -> Result<(), sqlx::Error> {

@@ -6,7 +6,9 @@ export interface BoardSettings {
 }
 export interface Project {
   id: number;
+  name: string;
   path: string;
+  default_branch: string;
   archived_at: number | null;
   updated_at: number;
 }
@@ -55,6 +57,7 @@ export interface Agent {
   state: AgentState;
   thread_id: string | null;
   home_path: string;
+  active_project_id: number | null;
   active_turn_id: string | null;
   last_error: string | null;
   wake_on_pending_work: boolean;

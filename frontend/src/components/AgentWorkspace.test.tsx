@@ -26,6 +26,7 @@ const agent: Agent = {
   state: "idle",
   thread_id: null,
   home_path: "/repo/reviewer-home",
+  active_project_id: 1,
   active_turn_id: null,
   last_error: null,
   wake_on_pending_work: false,
@@ -90,6 +91,7 @@ describe("AgentWorkspace", () => {
         agents={[agent]}
         channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
+        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 }]}
         selectedAgentId={agent.id}
         view="settings"
         refresh={0}
@@ -104,6 +106,8 @@ describe("AgentWorkspace", () => {
     fireEvent.click(
       await screen.findByRole("checkbox", { name: /approve_review/i }),
     );
+    expect(screen.getByText("Board")).toBeTruthy();
+    expect(screen.getAllByText("/repo/reviewer")).toHaveLength(2);
     await waitFor(() =>
       expect(api.setAgentScopes).toHaveBeenCalledWith(1, ["approve_review"]),
     );
@@ -272,6 +276,7 @@ describe("AgentWorkspace", () => {
         agents={[agent]}
         channels={[]}
         tickets={[ticket]}
+        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 }]}
         selectedAgentId={agent.id}
         view="chat"
         refresh={0}
@@ -284,9 +289,10 @@ describe("AgentWorkspace", () => {
     );
 
     expect(
-      screen.getByText("Ticket #17: Move agent settings").parentElement
-        ?.textContent,
-    ).toContain("idle");
+      screen.getByText((_, element) =>
+        Boolean(element?.classList.contains("agent-operation")),
+      ).textContent,
+    ).toContain("Board");
     const settings = screen.getByRole("link", { name: "Settings" });
     expect(settings.getAttribute("href")).toBe("#agents/1/settings");
     fireEvent.click(settings);

@@ -90,7 +90,38 @@ h2 {
   letter-spacing: 0.16em;
 }
 .project-picker {
+  position: relative;
   min-width: min(34rem, 45vw);
+}
+.project-picker > summary {
+  cursor: pointer;
+  font-weight: 700;
+  text-align: right;
+}
+.project-picker[open] {
+  padding: 0.75rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.65rem;
+  background: #fffefa;
+}
+.project-picker form {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.project-picker ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.project-picker li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
 }
 .board-settings {
   max-width: 40rem;
@@ -199,6 +230,12 @@ nav button.active {
 .ticket-card summary span {
   color: #987a66;
   font-weight: 500;
+}
+.project-badge {
+  margin-left: auto;
+  color: #6c6256;
+  font-size: 0.7rem;
+  font-weight: 700;
 }
 .blocked-badge {
   margin-left: auto;

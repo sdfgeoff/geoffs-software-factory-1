@@ -20,6 +20,7 @@ const agent: Agent = {
   state: "idle",
   thread_id: null,
   home_path: "/repo/worker-home",
+  active_project_id: null,
   active_turn_id: null,
   last_error: null,
   wake_on_pending_work: false,

@@ -145,6 +145,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_project_migration_backfills_existing_agents() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 23) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO projects (name, path, default_branch) VALUES ('legacy', '/legacy', 'main')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE board_state SET current_project_id = 1 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agents (name, home_path) VALUES ('worker', '/worker')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 23)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let active_project_id: Option<i64> =
+            sqlx::query_scalar("SELECT active_project_id FROM agents")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(active_project_id, Some(1));
+    }
+
+    #[tokio::test]
     async fn file_store_survives_reopen() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -179,6 +218,7 @@ mod tests {
         assert_eq!(reopened.tickets().await.unwrap().len(), 1);
         let agent = reopened.agent(agent.id).await.unwrap().unwrap();
         let project = reopened.project().await.unwrap().unwrap();
+        assert_eq!(agent.active_project_id, Some(project.id));
         assert_eq!(
             reopened
                 .agent_project_worktree(agent.id, project.id)

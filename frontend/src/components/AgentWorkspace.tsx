@@ -5,6 +5,7 @@ import type {
   AgentMessage,
   AgentProjectWorktree,
   Channel,
+  Project,
   Ticket,
 } from "../types";
 import { MessageContent } from "./MessageContent";
@@ -15,6 +16,7 @@ interface Props {
   agents: Agent[];
   channels: Channel[];
   tickets: Ticket[];
+  projects?: Project[];
   selectedAgentId: number | null;
   view: AgentView;
   refresh: number;
@@ -29,6 +31,7 @@ export function AgentWorkspace({
   agents,
   channels,
   tickets,
+  projects = [],
   selectedAgentId,
   view,
   refresh,
@@ -55,6 +58,12 @@ export function AgentWorkspace({
     (ticket) =>
       ticket.assignee_id === selected?.id &&
       (ticket.state === "in_progress" || ticket.state === "review"),
+  );
+  const activeProject = projects.find(
+    (project) => project.id === selected?.active_project_id,
+  );
+  const activeWorktree = worktrees.find(
+    (worktree) => worktree.project_id === selected?.active_project_id,
   );
   useEffect(() => {
     if (!selected && agents[0]) onSelectAgent(agents[0].id);
@@ -236,12 +245,13 @@ export function AgentWorkspace({
                   {currentTicket
                     ? `Ticket #${currentTicket.id}: ${currentTicket.title}`
                     : "No active ticket"}
+                  {activeProject ? ` · ${activeProject.name}` : ""}
                 </p>
                 <p
                   className="worktree-path"
-                  title={worktrees[0]?.path ?? selected.home_path}
+                  title={activeWorktree?.path ?? selected.home_path}
                 >
-                  {worktrees[0]?.path ?? selected.home_path}
+                  {activeWorktree?.path ?? selected.home_path}
                 </p>
               </div>
               <button className="secondary" onClick={toggle}>
@@ -255,6 +265,17 @@ export function AgentWorkspace({
             )}
             <section hidden={view !== "settings"}>
               <h3>Agent settings</h3>
+              <section>
+                <h4>Project worktrees</h4>
+                <dl>
+                  {worktrees.map((worktree) => (
+                    <div key={worktree.project_id}>
+                      <dt>{projects.find((project) => project.id === worktree.project_id)?.name ?? `Project #${worktree.project_id}`}</dt>
+                      <dd className="worktree-path">{worktree.path}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
               <form className="rename-agent" onSubmit={rename}>
                 <label>
                   Agent name

@@ -13,6 +13,7 @@ vi.mock("./api", () => ({
     agents: vi.fn(),
     channels: vi.fn(),
     project: vi.fn(),
+    projects: vi.fn(),
     settings: vi.fn(),
     tickets: vi.fn(),
   },
@@ -24,6 +25,7 @@ const agent: Agent = {
   state: "idle",
   thread_id: null,
   home_path: "/repo/worker-home",
+  active_project_id: null,
   active_turn_id: null,
   last_error: null,
   wake_on_pending_work: false,
@@ -44,6 +46,7 @@ describe("App agent routes", () => {
     vi.stubGlobal("EventSource", MockEventSource);
     window.history.replaceState(null, "", "#agents/1/settings");
     vi.mocked(api.project).mockResolvedValue(null);
+    vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.settings).mockResolvedValue({
       merge_notification_channel: null,
     });
