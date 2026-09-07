@@ -87,7 +87,7 @@ export interface AgentMessage {
   created_at: number;
 }
 export interface AgentEvent {
-  agent_id: number;
+  agent_id?: number;
   kind: string;
   data: unknown;
 }

@@ -292,23 +292,12 @@ describe("App agent routes", () => {
     expect(api.settings).toHaveBeenCalledTimes(3);
   });
 
-  it("refreshes the current channel for a remote message without clearing its draft", async () => {
+  it("merges board messages without treating agent-thread messages as channel posts", async () => {
     window.history.replaceState(null, "", "#messages/general");
     vi.mocked(api.channels).mockResolvedValue([
       { name: "general", description: "", most_recent_message_at: 0 },
     ]);
-    vi.mocked(api.messages)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          id: 4,
-          channel_name: "general",
-          agent_id: null,
-          author: "human",
-          body: "Remote post",
-          created_at: 0,
-        },
-      ]);
+    vi.mocked(api.messages).mockResolvedValue([]);
     render(<App />);
     await screen.findByText("No messages in #general yet.");
     fireEvent.change(screen.getByLabelText("Message"), {
@@ -320,12 +309,58 @@ describe("App agent routes", () => {
         data: JSON.stringify({ agent_id: agent.id, kind: "message", data: {} }),
       } as MessageEvent);
     });
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 25)));
+    expect(api.messages).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Remote post")).toBeNull();
 
-    expect(await screen.findByText("Remote post")).toBeTruthy();
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 0,
+          kind: "board_message",
+          data: {
+            id: 4,
+            channel_name: "general",
+            agent_id: null,
+            author: "human",
+            body: "Remote post",
+            created_at: 0,
+          },
+        }),
+      } as MessageEvent);
+    });
+
+    expect(screen.getByText("Remote post")).toBeTruthy();
     expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
       "Unsent reply",
     );
-    expect(api.messages).toHaveBeenCalledTimes(2);
+    expect(api.messages).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fan periodic refreshes out through hidden visited views", async () => {
+    window.history.replaceState(null, "", "#messages/general");
+    vi.mocked(api.channels).mockResolvedValue([
+      { name: "general", description: "", most_recent_message_at: 0 },
+    ]);
+    render(<App />);
+    await screen.findByText("No messages in #general yet.");
+    fireEvent.click(screen.getByRole("link", { name: "agents" }));
+    await screen.findByRole("heading", { name: "worker" });
+    await waitFor(() => expect(api.agentProjectSubscriptions).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ kind: "refresh" }),
+      } as MessageEvent);
+    });
+
+    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
+    expect(api.messages).toHaveBeenCalledTimes(1);
+    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+    expect(api.agentProjectWorktrees).toHaveBeenCalledTimes(1);
+    expect(api.agentScopes).toHaveBeenCalledTimes(1);
+    expect(api.agentChannelSubscriptions).toHaveBeenCalledTimes(1);
+    expect(api.agentProjectSubscriptions).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes agent details for the project_subscriptions event", async () => {

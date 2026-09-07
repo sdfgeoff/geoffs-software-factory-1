@@ -11,6 +11,7 @@ import { ProjectPicker } from "./components/ProjectPicker";
 import type {
   Agent,
   AgentEvent,
+  BoardMessage,
   BoardSettings as Settings,
   Channel,
   Project,
@@ -97,9 +98,9 @@ export function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [messageBoardRefresh, setMessageBoardRefresh] = useState(0);
   const [agentMessageRefresh, setAgentMessageRefresh] = useState(0);
   const [agentDetailRefresh, setAgentDetailRefresh] = useState(0);
+  const [boardMessages, setBoardMessages] = useState<Record<number, BoardMessage>>({});
   const [deltas, setDeltas] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const reloadTimer = useRef<number | null>(null);
@@ -135,9 +136,6 @@ export function App() {
       setChannels(nextChannels);
       setAgents(nextAgents);
       setSettings(nextSettings);
-      setMessageBoardRefresh((value) => value + 1);
-      setAgentMessageRefresh((value) => value + 1);
-      setAgentDetailRefresh((value) => value + 1);
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -196,12 +194,16 @@ export function App() {
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as AgentEvent;
       const data = event.data as Record<string, unknown> | null;
-      if (event.kind === "agent_message_delta" && typeof data?.delta === "string") {
+      if (
+        event.kind === "agent_message_delta" &&
+        event.agent_id &&
+        typeof data?.delta === "string"
+      ) {
         const delta = data.delta;
         setDeltas((current) => ({
           ...current,
-          [event.agent_id]:
-            (current[event.agent_id] ?? "") + delta,
+          [event.agent_id!]:
+            (current[event.agent_id!] ?? "") + delta,
         }));
       } else if (event.kind === "agent_updated" || event.kind === "agent_created") {
         mergeAgent(event.data as Agent);
@@ -209,9 +211,14 @@ export function App() {
         mergeTickets(event.data as Ticket);
       } else if (event.kind === "settings_updated") {
         setSettings(event.data as Settings);
-      } else if (event.kind === "message") {
-        setDeltas((current) => ({ ...current, [event.agent_id]: "" }));
-        setMessageBoardRefresh((value) => value + 1);
+      } else if (event.kind === "board_message") {
+        const boardMessage = event.data as BoardMessage;
+        setBoardMessages((current) => ({
+          ...current,
+          [boardMessage.id]: boardMessage,
+        }));
+      } else if (event.kind === "message" && event.agent_id) {
+        setDeltas((current) => ({ ...current, [event.agent_id!]: "" }));
         setAgentMessageRefresh((value) => value + 1);
       } else if (
         event.kind === "channel_subscriptions" ||
@@ -395,7 +402,8 @@ export function App() {
           agents={agents}
           channels={channels}
           selectedChannelName={route.view === "messages" ? route.channel : lastMessageChannel}
-          refresh={messageBoardRefresh}
+          refresh={0}
+          liveMessages={Object.values(boardMessages)}
           onSelectChannel={(channel) => navigate({ view: "messages", channel })}
           onSelectAgent={(agentId) =>
             navigate({ view: "agents", agentId, agentView: "chat" })

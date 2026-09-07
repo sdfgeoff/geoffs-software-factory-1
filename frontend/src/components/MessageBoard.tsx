@@ -15,6 +15,7 @@ interface Props {
   channels: Channel[];
   selectedChannelName?: string;
   refresh: number;
+  liveMessages?: BoardMessage[];
   onSelectChannel?: (name: string) => void;
   onSelectAgent: (id: number) => void;
   onChanged: (channel?: Channel) => void | Promise<void>;
@@ -26,6 +27,7 @@ export function MessageBoard({
   channels,
   selectedChannelName,
   refresh,
+  liveMessages = [],
   onSelectChannel,
   onSelectAgent,
   onChanged,
@@ -44,6 +46,14 @@ export function MessageBoard({
     [...newDescription].length <= channelDescriptionMaxLength;
   const selectedChannel = channels.find((item) => item.name === channel);
   const body = drafts[channel] ?? "";
+  const visibleMessages = [
+    ...new Map(
+      [
+        ...(messagesChannel === channel ? messages : []),
+        ...liveMessages.filter((message) => message.channel_name === channel),
+      ].map((message) => [message.id, message]),
+    ).values(),
+  ];
   useEffect(() => {
     if (selectedChannelName) setChannel(selectedChannelName);
   }, [selectedChannelName]);
@@ -190,10 +200,10 @@ export function MessageBoard({
           {(loading || messagesChannel !== channel) && (
             <p className="empty">Loading messages…</p>
           )}
-          {!loading && messagesChannel === channel && messages.length === 0 && (
+          {!loading && messagesChannel === channel && visibleMessages.length === 0 && (
             <p className="empty">No messages in #{channel} yet.</p>
           )}
-          {messagesChannel === channel && messages.map((message) => {
+          {visibleMessages.map((message) => {
             const agent = agents.find(
               (item) =>
                 item.id === message.agent_id ||
