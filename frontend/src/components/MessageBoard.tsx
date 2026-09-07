@@ -83,7 +83,7 @@ export function MessageBoard({
   }, [channel, refresh, onError]);
   async function post(event: FormEvent) {
     event.preventDefault();
-    if (postingChannel === channel) return;
+    if (postingChannel !== null) return;
     const targetChannel = channel;
     setPostingChannel(targetChannel);
     setPostStatuses((current) => ({ ...current, [targetChannel]: "Posting…" }));
@@ -141,6 +141,7 @@ export function MessageBoard({
               <input
                 autoFocus
                 value={newChannel}
+                disabled={channelSaving}
                 onChange={(event) => {
                   setNewChannel(event.target.value);
                   setChannelStatus("");
@@ -161,6 +162,7 @@ export function MessageBoard({
               Description
               <textarea
                 value={newDescription}
+                disabled={channelSaving}
                 onChange={(event) => {
                   setNewDescription(event.target.value);
                   setChannelStatus("");
@@ -271,6 +273,7 @@ export function MessageBoard({
             Message
             <textarea
               value={body}
+              disabled={postingChannel !== null}
               onChange={(event) =>
                 {
                   setDrafts((current) => ({
@@ -283,7 +286,7 @@ export function MessageBoard({
               required
             />
           </label>
-          <button type="submit" disabled={postingChannel === channel}>
+          <button type="submit" disabled={postingChannel !== null}>
             {postingChannel === channel ? "Posting…" : `Post to #${channel}`}
           </button>
           {postStatuses[channel] && (

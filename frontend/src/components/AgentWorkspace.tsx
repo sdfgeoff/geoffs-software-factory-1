@@ -229,7 +229,7 @@ export function AgentWorkspace({
   }
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!selected || sendingAgentId === selected.id) return;
+    if (!selected || sendingAgentId !== null) return;
     const agentId = selected.id;
     setSendingAgentId(agentId);
     setSendStatuses((current) => ({ ...current, [agentId]: "Sending…" }));
@@ -248,7 +248,7 @@ export function AgentWorkspace({
     }
   }
   async function toggle() {
-    if (!selected || togglingAgentId === selected.id) return;
+    if (!selected || togglingAgentId !== null) return;
     const agentId = selected.id;
     const action = selected.state === "paused" || selected.state === "error"
       ? "Resuming"
@@ -359,6 +359,7 @@ export function AgentWorkspace({
             New agent
             <input
               value={name}
+              disabled={creating}
               onChange={(event) => {
                 setName(event.target.value);
                 setCreateStatus("");
@@ -413,7 +414,7 @@ export function AgentWorkspace({
               <button
                 className="secondary"
                 onClick={toggle}
-                disabled={togglingAgentId === selected.id}
+                disabled={togglingAgentId !== null}
               >
                 {togglingAgentId === selected.id
                   ? "Working…"
@@ -645,6 +646,7 @@ export function AgentWorkspace({
                   Message
                   <textarea
                     value={prompt}
+                    disabled={sendingAgentId !== null}
                     onChange={(event) =>
                       {
                         setPrompts((current) => ({
@@ -662,7 +664,7 @@ export function AgentWorkspace({
                 </label>
                 <button
                   type="submit"
-                  disabled={sendingAgentId === selected.id}
+                  disabled={sendingAgentId !== null}
                 >
                   {sendingAgentId === selected.id ? "Sending…" : "Send"}
                 </button>

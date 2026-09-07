@@ -376,6 +376,7 @@ describe("MessageBoard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
     const posting = screen.getByRole("button", { name: "Posting…" });
     expect((posting as HTMLButtonElement).disabled).toBe(true);
+    expect((draft as HTMLTextAreaElement).disabled).toBe(true);
     fireEvent.click(posting);
     expect(api.postMessage).toHaveBeenCalledTimes(1);
 
@@ -394,5 +395,55 @@ describe("MessageBoard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
     expect(await screen.findByText("Posted")).toBeTruthy();
     expect((draft as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps a pending post locked after switching channels", async () => {
+    vi.mocked(api.messages).mockResolvedValue([]);
+    let resolvePost!: (
+      message: Awaited<ReturnType<typeof api.postMessage>>,
+    ) => void;
+    vi.mocked(api.postMessage).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePost = resolve;
+      }),
+    );
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          { name: "general", description: "", most_recent_message_at: 0 },
+          { name: "backend", description: "", most_recent_message_at: 0 },
+        ]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "One post only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
+    fireEvent.click(screen.getByRole("button", { name: "#backend" }));
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled)
+      .toBe(true);
+    const backendPost = screen.getByRole("button", { name: "Post to #backend" });
+    expect((backendPost as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(backendPost);
+    expect(api.postMessage).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "#general" }));
+    resolvePost({
+      id: 1,
+      channel_name: "general",
+      agent_id: null,
+      author: "human",
+      body: "One post only",
+      created_at: 0,
+    });
+    expect(await screen.findByText("Posted")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value)
+      .toBe("");
   });
 });

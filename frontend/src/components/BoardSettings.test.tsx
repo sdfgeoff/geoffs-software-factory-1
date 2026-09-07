@@ -74,6 +74,7 @@ describe("BoardSettings", () => {
     fireEvent.submit(input.closest("form")!);
     const saving = screen.getByRole("button", { name: "Saving…" });
     expect((saving as HTMLButtonElement).disabled).toBe(true);
+    expect((input as HTMLInputElement).disabled).toBe(true);
     fireEvent.click(saving);
     expect(api.setSettings).toHaveBeenCalledTimes(1);
 

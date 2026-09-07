@@ -297,6 +297,7 @@ export function TicketDetailPanel({
           Title
           <input
             value={draft.title}
+            disabled={saving}
             onChange={(event) => {
               updateDraft({ title: event.target.value });
             }}
@@ -308,6 +309,7 @@ export function TicketDetailPanel({
           Description
           <textarea
             value={draft.description}
+            disabled={saving}
             onChange={(event) => {
               updateDraft({ description: event.target.value });
             }}
@@ -318,6 +320,7 @@ export function TicketDetailPanel({
           Active assignee
           <select
             value={draft.assignee}
+            disabled={saving}
             onChange={(event) => {
               updateDraft({ assignee: event.target.value });
             }}
@@ -330,7 +333,7 @@ export function TicketDetailPanel({
             ))}
           </select>
         </label>
-        <fieldset className="blocker-selector">
+        <fieldset className="blocker-selector" disabled={saving}>
           <legend>Blockers</legend>
           <label>
             Search tickets

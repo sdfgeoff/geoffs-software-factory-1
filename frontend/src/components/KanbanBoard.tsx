@@ -98,12 +98,19 @@ export function KanbanBoard({
           id="ticket-title"
           value={title}
           onChange={(event) => setTitle(event.target.value)}
+          disabled={creating}
           placeholder="Add a ticket"
           required
           maxLength={200}
         />
         <label className="sr-only" htmlFor="ticket-project">Ticket project</label>
-        <select id="ticket-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} required>
+        <select
+          id="ticket-project"
+          value={projectId}
+          onChange={(event) => setProjectId(event.target.value)}
+          disabled={creating}
+          required
+        >
           <option value="" disabled>Select project</option>
           {projects.filter((project) => !project.archived_at).map((project) => (
             <option key={project.id} value={project.id}>{project.name}</option>

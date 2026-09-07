@@ -59,6 +59,7 @@ export function BoardSettings({
           id="merge-notification-channel"
           list="merge-notification-channels"
           value={channel}
+          disabled={saving}
           onChange={(event) => {
             setChannel(event.target.value);
             setStatus("");

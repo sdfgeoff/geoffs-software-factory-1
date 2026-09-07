@@ -359,6 +359,9 @@ describe("KanbanBoard", () => {
 
     expect(api.updateTicket).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Saving…" }).hasAttribute("disabled")).toBe(true);
+    expect((screen.getByLabelText("Title") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Description") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Active assignee") as HTMLSelectElement).disabled).toBe(true);
     reject(new Error("Ticket changed elsewhere"));
     await waitFor(() => expect(screen.getByText("Ticket changed elsewhere")).toBeTruthy());
     expect(screen.getByDisplayValue("Unfinished edit")).toBeTruthy();
@@ -380,9 +383,29 @@ describe("KanbanBoard", () => {
     fireEvent.click(create);
 
     expect(api.createTicket).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText("New ticket title") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Ticket project") as HTMLSelectElement).disabled).toBe(true);
     reject(new Error("Could not create"));
     await waitFor(() => expect(screen.getByText("Could not create")).toBeTruthy());
     expect(screen.getByDisplayValue("Draft ticket")).toBeTruthy();
+  });
+
+  it("locks a ticket draft until a deferred create succeeds", async () => {
+    let resolveCreate!: (created: Ticket) => void;
+    vi.mocked(api.createTicket).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    render(<KanbanBoard {...baseProps} tickets={[]} currentProjectId={1} />);
+    const title = screen.getByLabelText("New ticket title") as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "Submitted title" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+
+    expect(title.disabled).toBe(true);
+    resolveCreate({ ...ticket, title: "Submitted title" });
+    expect(await screen.findByText("Ticket created.")).toBeTruthy();
+    expect(title.value).toBe("");
   });
 
   it("offers only valid state-specific actions", async () => {

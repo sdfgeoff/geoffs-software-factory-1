@@ -97,6 +97,37 @@ it("confirms archival and keeps the action local when the backend refuses", asyn
   expect(document.activeElement).toBe(archive);
 });
 
+it("allows only one archive while a project request is pending", async () => {
+  const projects: Project[] = [
+    { id: 1, name: "Board", path: "/board", default_branch: "main", archived_at: null, updated_at: 0 },
+    { id: 2, name: "API", path: "/api", default_branch: "main", archived_at: null, updated_at: 0 },
+  ];
+  let resolveArchive!: (project: Project) => void;
+  vi.mocked(api.archiveProject).mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolveArchive = resolve;
+    }),
+  );
+  vi.stubGlobal("confirm", vi.fn(() => true));
+  render(
+    <ProjectPicker
+      project={projects[0]}
+      projects={projects}
+      onChanged={vi.fn()}
+      onError={vi.fn()}
+    />,
+  );
+
+  const archiveButtons = screen.getAllByRole("button", { name: "Archive" });
+  fireEvent.click(archiveButtons[0]);
+  expect(archiveButtons.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+  fireEvent.click(archiveButtons[1]);
+  expect(api.archiveProject).toHaveBeenCalledTimes(1);
+
+  resolveArchive({ ...projects[0], archived_at: 1 });
+  expect(await screen.findByText("Board archived.")).toBeTruthy();
+});
+
 it("prevents duplicate registration and preserves a failed draft", async () => {
   let reject!: (error: Error) => void;
   vi.mocked(api.registerProject).mockReturnValue(
@@ -115,6 +146,9 @@ it("prevents duplicate registration and preserves a failed draft", async () => {
 
   expect(api.registerProject).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "Registering…" }).hasAttribute("disabled")).toBe(true);
+  expect((screen.getByLabelText("Project name") as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByLabelText("Git root") as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByLabelText("Default branch") as HTMLInputElement).disabled).toBe(true);
   reject(new Error("Path is not a Git repository"));
   await waitFor(() =>
     expect(screen.getByRole("status").textContent).toBe("Path is not a Git repository"),

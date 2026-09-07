@@ -20,10 +20,11 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
   const [registerStatus, setRegisterStatus] = useState("");
   const [archiveStatus, setArchiveStatus] = useState("");
   const summaryRef = useRef<HTMLElement>(null);
+  const projectBusy = selecting || registering || archivingId !== null;
   useEffect(() => setPath(project?.path ?? ""), [project?.path]);
   async function register(event: FormEvent) {
     event.preventDefault();
-    if (registering) return;
+    if (projectBusy) return;
     setRegistering(true);
     setRegisterStatus("Registering…");
     try {
@@ -38,6 +39,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
     }
   }
   async function archive(item: Project, button: HTMLButtonElement) {
+    if (projectBusy) return;
     const confirmed = window.confirm(
       `Archive ${item.name}? The board may refuse while the project has active tickets, reviews, or agent work.`,
     );
@@ -61,7 +63,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
     }
   }
   async function select(next: Project) {
-    if (selecting) return;
+    if (projectBusy) return;
     setSelecting(true);
     setSelectionStatus("Selecting…");
     setPath(next.path);
@@ -91,7 +93,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
               void select(selected);
             }
           }}
-          disabled={selecting}
+          disabled={projectBusy}
         >
           <option value="" disabled>Select a project</option>
           {projects.filter((item) => !item.archived_at).map((item) => (
@@ -103,7 +105,12 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       <form onSubmit={register}>
         <label>
           Project name
-          <input value={name} onChange={(event) => setName(event.target.value)} required />
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            disabled={projectBusy}
+            required
+          />
         </label>
         <label>
           Git root
@@ -111,14 +118,20 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
             value={path}
             onChange={(event) => setPath(event.target.value)}
             placeholder="/path/to/git/repository"
+            disabled={projectBusy}
             required
           />
         </label>
         <label>
           Default branch
-          <input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} required />
+          <input
+            value={defaultBranch}
+            onChange={(event) => setDefaultBranch(event.target.value)}
+            disabled={projectBusy}
+            required
+          />
         </label>
-        <button type="submit" disabled={registering}>
+        <button type="submit" disabled={projectBusy}>
           {registering ? "Registering…" : "Register project"}
         </button>
         {registerStatus && <p role="status" aria-live="polite">{registerStatus}</p>}
@@ -133,7 +146,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
               <button
                 type="button"
                 className="ghost"
-                disabled={archivingId === item.id}
+                disabled={projectBusy}
                 onClick={(event) => void archive(item, event.currentTarget)}
               >
                 {archivingId === item.id ? "Archiving…" : "Archive"}

@@ -413,6 +413,7 @@ describe("AgentWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     const sending = screen.getByRole("button", { name: "Sending…" });
     expect((sending as HTMLButtonElement).disabled).toBe(true);
+    expect((draft as HTMLTextAreaElement).disabled).toBe(true);
     fireEvent.click(sending);
     expect(api.sendAgentMessage).toHaveBeenCalledTimes(1);
 
@@ -425,6 +426,47 @@ describe("AgentWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("Sent")).toBeTruthy();
     expect((draft as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps agent sends globally locked after switching agents", async () => {
+    const second = { ...agent, id: 2, name: "builder" };
+    let resolveSend!: (updated: Agent) => void;
+    vi.mocked(api.sendAgentMessage).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
+    const props = {
+      agents: [agent, second],
+      channels: [],
+      tickets: [],
+      view: "chat" as const,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { rerender } = render(
+      <AgentWorkspace {...props} selectedAgentId={agent.id} />,
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "First request" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    rerender(<AgentWorkspace {...props} selectedAgentId={second.id} />);
+    const secondSend = screen.getByRole("button", { name: "Send" });
+    expect((secondSend as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).disabled)
+      .toBe(true);
+    fireEvent.click(secondSend);
+    expect(api.sendAgentMessage).toHaveBeenCalledTimes(1);
+
+    rerender(<AgentWorkspace {...props} selectedAgentId={agent.id} />);
+    resolveSend(agent);
+    expect(await screen.findByText("Sent")).toBeTruthy();
   });
 
   it("requires an explicit resume for an error-state agent", async () => {
