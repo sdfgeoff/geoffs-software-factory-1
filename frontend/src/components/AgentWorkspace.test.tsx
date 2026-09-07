@@ -336,6 +336,12 @@ describe("AgentWorkspace", () => {
     fireEvent.click(pendingWork);
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     expect(screen.getByRole("status").textContent).toBe("Saving…");
+    const pendingReviews = screen.getByRole("checkbox", {
+      name: /pending reviews/i,
+    }) as HTMLInputElement;
+    expect(pendingReviews.closest("fieldset")?.disabled).toBe(true);
+    pendingReviews.click();
+    expect(pendingReviews.checked).toBe(false);
 
     rejectSave(new Error("Network unavailable"));
     await waitFor(() =>

@@ -370,7 +370,10 @@ export function AgentWorkspace({
             <section hidden={view !== "settings"}>
               <h3>Agent settings</h3>
               <form className="agent-settings-form" onSubmit={saveSettings}>
-                <fieldset className="capabilities">
+                <fieldset
+                  className="capabilities"
+                  disabled={settingsSaveState === "saving"}
+                >
                   <legend>Identity</legend>
                   <label className="settings-text-field">
                     Agent name
@@ -389,7 +392,10 @@ export function AgentWorkspace({
                     <small>Pause the agent before changing its name.</small>
                   )}
                 </fieldset>
-                <fieldset className="capabilities" disabled={!settingsReady}>
+                <fieldset
+                  className="capabilities"
+                  disabled={!settingsReady || settingsSaveState === "saving"}
+                >
                   <legend>Work preferences</legend>
                   <label>
                     <input
@@ -424,7 +430,10 @@ export function AgentWorkspace({
                     </label>
                   ))}
                 </fieldset>
-                <fieldset className="capabilities" disabled={!settingsReady}>
+                <fieldset
+                  className="capabilities"
+                  disabled={!settingsReady || settingsSaveState === "saving"}
+                >
                   <legend>Notifications</legend>
                   <label>
                     <input
