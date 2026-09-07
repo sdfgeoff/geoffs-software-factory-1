@@ -46,6 +46,7 @@ export function KanbanBoard({
     routedProjectId?.toString() ?? "all",
   );
   const [showCancelled, setShowCancelled] = useState(false);
+  const [mobileState, setMobileState] = useState<TicketState>("todo");
   const [localTicketId, setLocalTicketId] = useState<number | null>(null);
   const [ticketDrafts, setTicketDrafts] = useState<Record<number, TicketDraft>>({});
   const selectedTicketId =
@@ -142,14 +143,32 @@ export function KanbanBoard({
         <input
           type="checkbox"
           checked={showCancelled}
-          onChange={(event) => setShowCancelled(event.target.checked)}
+          onChange={(event) => {
+            setShowCancelled(event.target.checked);
+            if (!event.target.checked && mobileState === "cancelled") {
+              setMobileState("todo");
+            }
+          }}
         />
         Show cancelled tickets
+      </label>
+      <label className="mobile-context-picker">
+        Ticket status
+        <select
+          value={mobileState}
+          onChange={(event) => setMobileState(event.target.value as TicketState)}
+        >
+          {visibleColumns.map((column) => (
+            <option key={column.state} value={column.state}>
+              {column.label} ({visibleTickets.filter((ticket) => ticket.state === column.state).length})
+            </option>
+          ))}
+        </select>
       </label>
       <div className={`kanban${showingCancelled ? " kanban-with-cancelled" : ""}`}>
         {visibleColumns.map((column) => (
           <section
-            className={`column column-${column.state}`}
+            className={`column column-${column.state}${mobileState === column.state ? " mobile-active" : ""}`}
             key={column.state}
             aria-labelledby={`column-${column.state}`}
           >

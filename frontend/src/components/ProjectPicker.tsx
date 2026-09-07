@@ -139,7 +139,9 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       <ul>
         {projects.map((item) => (
           <li key={item.id}>
-            <span>{item.name} — {item.path}</span>
+            <span title={`${item.name} — ${item.path}`}>
+              {item.name} — {item.path}
+            </span>
             {item.archived_at ? (
               <small>Archived</small>
             ) : (

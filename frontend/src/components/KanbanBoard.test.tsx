@@ -435,6 +435,25 @@ describe("KanbanBoard", () => {
     );
   });
 
+  it("navigates compact board statuses without removing desktop columns", () => {
+    const review = { ...ticket, id: 8, state: "review" as const };
+    const { container } = render(
+      <KanbanBoard {...baseProps} tickets={[ticket, review]} />,
+    );
+
+    const status = screen.getByRole("combobox", { name: "Ticket status" });
+    expect(container.querySelector(".column-todo.mobile-active")).toBeTruthy();
+    expect(container.querySelectorAll(".column")).toHaveLength(4);
+    fireEvent.change(status, { target: { value: "review" } });
+    expect(container.querySelector(".column-review.mobile-active")).toBeTruthy();
+    expect(container.querySelector(".column-todo.mobile-active")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Show cancelled tickets"));
+    fireEvent.change(status, { target: { value: "cancelled" } });
+    fireEvent.click(screen.getByLabelText("Show cancelled tickets"));
+    expect((status as HTMLSelectElement).value).toBe("todo");
+  });
+
   it("confirms before cancelling a ticket", () => {
     vi.stubGlobal("confirm", vi.fn(() => false));
     render(

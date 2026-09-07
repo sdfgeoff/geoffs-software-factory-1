@@ -521,6 +521,31 @@ describe("AgentWorkspace", () => {
     expect(onViewChange).toHaveBeenCalledWith("settings");
   });
 
+  it("selects agents through the compact navigation control", () => {
+    const second = { ...agent, id: 2, name: "builder" };
+    const onSelectAgent = vi.fn();
+    render(
+      <AgentWorkspace
+        agents={[agent, second]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={onSelectAgent}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), {
+      target: { value: "2" },
+    });
+    expect(onSelectAgent).toHaveBeenCalledWith(2);
+  });
+
   it("preserves the chat draft and scroll position while settings are open", () => {
     const props = {
       agents: [agent],

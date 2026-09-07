@@ -81,6 +81,7 @@ export function AgentWorkspace({
   const [sendStatuses, setSendStatuses] = useState<Record<number, string>>({});
   const [togglingAgentId, setTogglingAgentId] = useState<number | null>(null);
   const [toggleStatuses, setToggleStatuses] = useState<Record<number, string>>({});
+  const [showAgentCreator, setShowAgentCreator] = useState(false);
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const prompt = selected ? prompts[selected.id] ?? "" : "";
@@ -216,6 +217,7 @@ export function AgentWorkspace({
     try {
       const agent = await api.createAgent(name);
       setName("");
+      setShowAgentCreator(false);
       onSelectAgent(agent.id);
       await onChanged(agent);
       setCreateStatus("Agent created");
@@ -335,14 +337,25 @@ export function AgentWorkspace({
   }
   return (
     <section className="agents-layout">
-      <aside>
+      <aside className="context-sidebar">
         <h2>Agents</h2>
+        <label className="mobile-context-picker">
+          Agent
+          <select
+            value={selected?.id ?? ""}
+            onChange={(event) => onSelectAgent(Number(event.target.value))}
+          >
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>{agent.name}</option>
+            ))}
+          </select>
+        </label>
         {agents.map((agent) => (
           <button
             className={
               selected?.id === agent.id
-                ? "selected agent-button"
-                : "ghost agent-button"
+                ? "selected agent-button context-option"
+                : "ghost agent-button context-option"
             }
             key={agent.id}
             aria-current={selected?.id === agent.id ? "page" : undefined}
@@ -354,7 +367,18 @@ export function AgentWorkspace({
             </small>
           </button>
         ))}
-        <form onSubmit={create}>
+        <button
+          type="button"
+          className="ghost mobile-context-create"
+          aria-expanded={showAgentCreator}
+          onClick={() => setShowAgentCreator((current) => !current)}
+        >
+          {showAgentCreator ? "Hide new agent" : "+ New agent"}
+        </button>
+        <form
+          className={`agent-create-form${showAgentCreator ? " mobile-open" : ""}`}
+          onSubmit={create}
+        >
           <label>
             New agent
             <input

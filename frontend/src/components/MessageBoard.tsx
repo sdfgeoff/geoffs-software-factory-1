@@ -132,8 +132,16 @@ export function MessageBoard({
   }
   return (
     <section className="messages-layout">
-      <aside>
+      <aside className="context-sidebar">
         <h2>Channels</h2>
+        <label className="mobile-context-picker">
+          Channel
+          <select value={channel} onChange={(event) => selectChannel(event.target.value)}>
+            {channels.map((item) => (
+              <option key={item.name} value={item.name}>#{item.name}</option>
+            ))}
+          </select>
+        </label>
         {creatingChannel ? (
           <form className="channel-setting" onSubmit={createChannel}>
             <label>
@@ -212,7 +220,7 @@ export function MessageBoard({
         ) : (
           <button
             type="button"
-            className="ghost"
+            className="ghost context-create-button"
             onClick={() => setCreatingChannel(true)}
           >
             + New channel
@@ -220,7 +228,7 @@ export function MessageBoard({
         )}
         {channels.map((item) => (
           <button
-            className={channel === item.name ? "selected" : "ghost"}
+            className={`${channel === item.name ? "selected" : "ghost"} context-option`}
             key={item.name}
             aria-current={channel === item.name ? "page" : undefined}
             onClick={() => selectChannel(item.name)}

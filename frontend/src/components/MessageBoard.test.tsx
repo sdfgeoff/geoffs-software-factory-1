@@ -270,6 +270,31 @@ describe("MessageBoard", () => {
     );
   });
 
+  it("selects channels through the compact navigation control", async () => {
+    vi.mocked(api.messages).mockResolvedValue([]);
+    const onSelectChannel = vi.fn();
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          { name: "general", description: "", most_recent_message_at: 0 },
+          { name: "backend", description: "", most_recent_message_at: 0 },
+        ]}
+        refresh={0}
+        onSelectChannel={onSelectChannel}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Channel" }), {
+      target: { value: "backend" },
+    });
+    expect(onSelectChannel).toHaveBeenCalledWith("backend");
+    expect(await screen.findByRole("heading", { name: "#backend" })).toBeTruthy();
+  });
+
   it("does not show a previous channel while the next channel loads", async () => {
     let resolveGeneral!: (
       messages: Awaited<ReturnType<typeof api.messages>>,
