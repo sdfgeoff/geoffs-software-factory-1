@@ -39,6 +39,8 @@ export function KanbanBoard({
   onError,
 }: Props) {
   const [title, setTitle] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createStatus, setCreateStatus] = useState("");
   const [projectId, setProjectId] = useState(currentProjectId?.toString() ?? "");
   const [filterProjectId, setFilterProjectId] = useState(
     routedProjectId?.toString() ?? "all",
@@ -72,12 +74,18 @@ export function KanbanBoard({
     : columns.filter((column) => column.state !== "cancelled");
   async function create(event: FormEvent) {
     event.preventDefault();
+    if (creating) return;
+    setCreating(true);
+    setCreateStatus("Creating ticket…");
     try {
       const created = await api.createTicket(title, Number(projectId));
       setTitle("");
       await onChanged(created);
+      setCreateStatus("Ticket created.");
     } catch (error) {
-      onError(error);
+      setCreateStatus(error instanceof Error ? error.message : "Could not create ticket");
+    } finally {
+      setCreating(false);
     }
   }
   return (
@@ -101,7 +109,10 @@ export function KanbanBoard({
             <option key={project.id} value={project.id}>{project.name}</option>
           ))}
         </select>
-        <button type="submit">Create ticket</button>
+        <button type="submit" disabled={creating}>
+          {creating ? "Creating…" : "Create ticket"}
+        </button>
+        {createStatus && <p role="status" aria-live="polite">{createStatus}</p>}
       </form>
       <label>
         Filter projects

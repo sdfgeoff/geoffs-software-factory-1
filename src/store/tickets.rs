@@ -28,6 +28,7 @@ pub struct TicketChanges {
     pub description: Option<String>,
     pub state: Option<TicketState>,
     pub assignee_id: Option<Option<i64>>,
+    pub reserved_for_agent_id: Option<Option<i64>>,
     pub blocker_ids: Option<Vec<i64>>,
     pub expected_revision: Option<i64>,
 }
@@ -406,9 +407,12 @@ impl Store {
             }
         }
         let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
-        if current.reserved_for_agent_id.is_some()
+        let reserved_for_agent_id = changes
+            .reserved_for_agent_id
+            .unwrap_or(current.reserved_for_agent_id);
+        if reserved_for_agent_id.is_some()
             && assignee_id != current.assignee_id
-            && assignee_id != current.reserved_for_agent_id
+            && assignee_id != reserved_for_agent_id
         {
             return Err(AppError::conflict(
                 "ticket is reserved for another agent; override the reservation first",
@@ -424,13 +428,14 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
-            "UPDATE tickets SET title = ?, description = ?, state = ?, assignee_id = ?, revision = revision + 1, \
+            "UPDATE tickets SET title = ?, description = ?, state = ?, assignee_id = ?, reserved_for_agent_id = ?, revision = revision + 1, \
              updated_at = unixepoch() WHERE id = ? AND revision = ?",
         )
         .bind(title.trim())
         .bind(description)
         .bind(state)
         .bind(assignee_id)
+        .bind(reserved_for_agent_id)
         .bind(id)
         .bind(current.revision)
         .execute(&mut *transaction)
@@ -440,6 +445,25 @@ impl Store {
         }
         replace_ticket_dependencies(&mut transaction, id, &blocker_ids).await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        if current.reserved_for_agent_id.is_some() && ticket.reserved_for_agent_id.is_none() {
+            sqlx::query(
+                "INSERT INTO ticket_activity \
+                 (ticket_id, action, previous_reserved_for_agent_id, reserved_for_agent_id) \
+                 VALUES (?, 'reservation_cleared', ?, NULL)",
+            )
+            .bind(ticket.id)
+            .bind(current.reserved_for_agent_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
+                 AND kind = 'ticket.reserved' \
+                 AND json_extract(payload, '$.ticket_id') = ?",
+            )
+            .bind(ticket.id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         if current.state != TicketState::Cancelled && ticket.state == TicketState::Cancelled {
             sqlx::query("INSERT INTO ticket_activity (ticket_id, action) VALUES (?, 'cancelled')")
                 .bind(ticket.id)

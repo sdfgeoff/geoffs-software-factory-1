@@ -1,4 +1,4 @@
-import { useEffect, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type MouseEvent } from "react";
 import { api } from "../api";
 import type { Agent, Project, Ticket, TicketState } from "../types";
 
@@ -55,9 +55,14 @@ export function TicketDetailPanel({
   onChanged,
   draft: savedDraft,
   onDraftChange,
-  onError,
 }: Props) {
   const draft = savedDraft ?? ticketDraft(ticket);
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("");
+  const [changingReservation, setChangingReservation] = useState(false);
+  const [reservationStatus, setReservationStatus] = useState("");
+  const [transitioning, setTransitioning] = useState(false);
+  const [transitionStatus, setTransitionStatus] = useState("");
   const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
   const reservedFor = agents.find(
     (agent) => agent.id === ticket.reserved_for_agent_id,
@@ -86,6 +91,9 @@ export function TicketDetailPanel({
 
   async function save(event: FormEvent) {
     event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setSaveStatus("Saving…");
     try {
       const updated = await api.updateTicket({ ...ticket, revision: draft.baseRevision }, {
         title: draft.title,
@@ -95,15 +103,34 @@ export function TicketDetailPanel({
       });
       onDraftChange(ticketDraft(updated));
       await onChanged(updated);
+      setSaveStatus("Changes saved.");
     } catch (error) {
-      onError(error);
+      setSaveStatus(error instanceof Error ? error.message : "Could not save changes");
+    } finally {
+      setSaving(false);
     }
   }
 
-  async function reserve() {
+  async function reserve(event: MouseEvent<HTMLButtonElement>) {
     if (!draft.reservation) return;
+    const button = event.currentTarget;
+    const agentId = Number(draft.reservation);
+    const overriding = ticket.reserved_for_agent_id !== null &&
+      ticket.reserved_for_agent_id !== agentId;
+    if (
+      overriding &&
+      !window.confirm(
+        `Override ${reservedFor?.name ?? "the current agent"}'s reservation? They may already be planning this work.`,
+      )
+    ) {
+      setReservationStatus("Reservation unchanged.");
+      button.focus();
+      return;
+    }
+    if (changingReservation) return;
+    setChangingReservation(true);
+    setReservationStatus(overriding ? "Overriding reservation…" : "Reserving…");
     try {
-      const agentId = Number(draft.reservation);
       const updated = await api.reserveTickets(
         [ticket.id],
         agentId,
@@ -111,16 +138,44 @@ export function TicketDetailPanel({
           ticket.reserved_for_agent_id !== agentId,
       );
       await onChanged(updated);
+      setReservationStatus(overriding ? "Reservation overridden." : "Ticket reserved.");
     } catch (error) {
-      onError(error);
+      setReservationStatus(error instanceof Error ? error.message : "Could not update reservation");
+      button.focus();
+    } finally {
+      setChangingReservation(false);
+    }
+  }
+
+  async function clearReservation(event: MouseEvent<HTMLButtonElement>) {
+    if (changingReservation) return;
+    const button = event.currentTarget;
+    setChangingReservation(true);
+    setReservationStatus("Clearing reservation…");
+    try {
+      const updated = await api.clearTicketReservation(ticket);
+      updateDraft({ reservation: "" }, false);
+      await onChanged(updated);
+      setReservationStatus("Reservation cleared.");
+    } catch (error) {
+      setReservationStatus(error instanceof Error ? error.message : "Could not clear reservation");
+      button.focus();
+    } finally {
+      setChangingReservation(false);
     }
   }
 
   async function transition(state: TicketState) {
+    if (transitioning) return;
+    setTransitioning(true);
+    setTransitionStatus("Updating ticket…");
     try {
       await onChanged(await api.updateTicket(ticket, { state }));
+      setTransitionStatus("Ticket updated.");
     } catch (error) {
-      onError(error);
+      setTransitionStatus(error instanceof Error ? error.message : "Could not update ticket");
+    } finally {
+      setTransitioning(false);
     }
   }
 
@@ -290,7 +345,10 @@ export function TicketDetailPanel({
             ))}
           </div>
         </fieldset>
-        <button type="submit">Save changes</button>
+        <button type="submit" disabled={saving}>
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        {saveStatus && <p role="status" aria-live="polite">{saveStatus}</p>}
       </form>
 
       {ticket.state === "todo" && (
@@ -313,6 +371,7 @@ export function TicketDetailPanel({
             type="button"
             onClick={reserve}
             disabled={
+              changingReservation ||
               !draft.reservation ||
               draft.reservation ===
                 (ticket.reserved_for_agent_id?.toString() ?? "")
@@ -323,6 +382,19 @@ export function TicketDetailPanel({
               ? "Override reservation"
               : "Reserve"}
           </button>
+          {ticket.reserved_for_agent_id && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={changingReservation}
+              onClick={clearReservation}
+            >
+              Clear reservation
+            </button>
+          )}
+          {reservationStatus && (
+            <p role="status" aria-live="polite">{reservationStatus}</p>
+          )}
         </div>
       )}
 
@@ -333,11 +405,15 @@ export function TicketDetailPanel({
               type="button"
               className={action.state === "cancelled" ? "danger" : "secondary"}
               key={action.state}
+              disabled={transitioning}
               onClick={() => void transition(action.state)}
             >
               {action.label}
             </button>
           ))}
+          {transitionStatus && (
+            <p role="status" aria-live="polite">{transitionStatus}</p>
+          )}
         </div>
       )}
     </aside>

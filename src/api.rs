@@ -319,9 +319,19 @@ struct UpdateTicket {
     title: Option<String>,
     description: Option<String>,
     state: Option<TicketState>,
+    #[serde(default, deserialize_with = "deserialize_present_value")]
     assignee_id: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_present_value")]
+    reserved_for_agent_id: Option<serde_json::Value>,
     blocker_ids: Option<Vec<i64>>,
     expected_revision: Option<i64>,
+}
+
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 async fn update_ticket(
@@ -331,7 +341,8 @@ async fn update_ticket(
     headers: HeaderMap,
     Json(input): Json<UpdateTicket>,
 ) -> Result<Json<Ticket>, AppError> {
-    if agent_header(&headers)?.is_some()
+    let caller = agent_header(&headers)?;
+    if caller.is_some()
         && matches!(
             input.state,
             Some(TicketState::Review | TicketState::Done | TicketState::Cancelled)
@@ -339,6 +350,20 @@ async fn update_ticket(
     {
         return Err(AppError::forbidden(
             "agents cannot directly set review, done, or cancelled states",
+        ));
+    }
+    if caller.is_some() && input.reserved_for_agent_id.is_some() {
+        return Err(AppError::forbidden(
+            "agents cannot clear ticket reservations through ticket updates",
+        ));
+    }
+    if input
+        .reserved_for_agent_id
+        .as_ref()
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::bad_request(
+            "reserved_for_agent_id can only be cleared; use reservations to set it",
         ));
     }
     let assignee_id = match input.assignee_id {
@@ -356,6 +381,7 @@ async fn update_ticket(
                 description: input.description,
                 state: input.state,
                 assignee_id,
+                reserved_for_agent_id: input.reserved_for_agent_id.map(|_| None),
                 blocker_ids: input.blocker_ids,
                 expected_revision: input.expected_revision,
             },
@@ -1480,6 +1506,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(admin_reservation.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn humans_clear_ticket_reservations_over_http() {
+        let store = Store::memory().await.unwrap();
+        store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let app = test_router(store);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"title":"Available work"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let reserved = app
+            .clone()
+            .oneshot(
+                Request::post("/ticket-reservations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"ticket_ids":[1],"agent_id":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reserved.status(), StatusCode::OK);
+
+        let cleared = app
+            .clone()
+            .oneshot(
+                Request::patch("/tickets/1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"reserved_for_agent_id":null,"expected_revision":2}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.status(), StatusCode::OK);
+        let cleared: Value =
+            serde_json::from_slice(&to_bytes(cleared.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(cleared["reserved_for_agent_id"], Value::Null);
+        assert_eq!(cleared["revision"], 3);
+
+        let activity = app
+            .oneshot(
+                Request::get("/tickets/1/activity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let activity: Value =
+            serde_json::from_slice(&to_bytes(activity.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(activity[0]["action"], "reservation_cleared");
+        assert_eq!(activity[0]["previous_reserved_for_agent_id"], 1);
     }
 
     #[tokio::test]

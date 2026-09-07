@@ -6,6 +6,7 @@ import { KanbanBoard } from "./KanbanBoard";
 
 vi.mock("../api", () => ({
   api: {
+    clearTicketReservation: vi.fn(),
     createTicket: vi.fn(),
     reserveTickets: vi.fn(),
     updateTicket: vi.fn(),
@@ -15,6 +16,7 @@ vi.mock("../api", () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const ticket: Ticket = {
@@ -265,6 +267,7 @@ describe("KanbanBoard", () => {
   it("makes replacing an existing reservation an explicit override", async () => {
     vi.mocked(api.reserveTickets).mockResolvedValue([]);
     const changed = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("confirm", vi.fn(() => true));
     render(
       <KanbanBoard
         {...baseProps}
@@ -289,6 +292,96 @@ describe("KanbanBoard", () => {
       expect(api.reserveTickets).toHaveBeenCalledWith([ticket.id], 3, true),
     );
     expect(changed).toHaveBeenCalled();
+  });
+
+  it("requires confirmation before overriding another agent's reservation", () => {
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[{ ...ticket, state: "todo", reserved_for_agent_id: 2 }]}
+        selectedTicketId={ticket.id}
+        agents={[
+          { id: 2, name: "reserved" },
+          { id: 3, name: "replacement" },
+        ] as Agent[]}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Reservation"), {
+      target: { value: "3" },
+    });
+    const override = screen.getByRole("button", { name: "Override reservation" });
+    fireEvent.click(override);
+
+    expect(api.reserveTickets).not.toHaveBeenCalled();
+    expect(screen.getByText("Reservation unchanged.")).toBeTruthy();
+    expect(document.activeElement).toBe(override);
+  });
+
+  it("clears a reservation with local outcome feedback", async () => {
+    const reserved = { ...ticket, state: "todo" as const, reserved_for_agent_id: 2 };
+    vi.mocked(api.clearTicketReservation).mockResolvedValue({
+      ...reserved,
+      reserved_for_agent_id: null,
+      revision: 2,
+    });
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[reserved]}
+        selectedTicketId={ticket.id}
+        agents={[{ id: 2, name: "reserved" }] as Agent[]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Clear reservation" }));
+
+    await waitFor(() => expect(api.clearTicketReservation).toHaveBeenCalledWith(reserved));
+    expect(screen.getByText("Reservation cleared.")).toBeTruthy();
+  });
+
+  it("prevents duplicate saves and preserves a failed ticket draft", async () => {
+    let reject!: (error: Error) => void;
+    vi.mocked(api.updateTicket).mockReturnValue(
+      new Promise((_, rejectRequest) => {
+        reject = rejectRequest;
+      }),
+    );
+    render(
+      <KanbanBoard {...baseProps} tickets={[ticket]} selectedTicketId={ticket.id} />,
+    );
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "Unfinished edit" },
+    });
+    const save = screen.getByRole("button", { name: "Save changes" });
+    fireEvent.click(save);
+    fireEvent.click(save);
+
+    expect(api.updateTicket).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Saving…" }).hasAttribute("disabled")).toBe(true);
+    reject(new Error("Ticket changed elsewhere"));
+    await waitFor(() => expect(screen.getByText("Ticket changed elsewhere")).toBeTruthy());
+    expect(screen.getByDisplayValue("Unfinished edit")).toBeTruthy();
+  });
+
+  it("prevents duplicate ticket creation and preserves a failed title", async () => {
+    let reject!: (error: Error) => void;
+    vi.mocked(api.createTicket).mockReturnValue(
+      new Promise((_, rejectRequest) => {
+        reject = rejectRequest;
+      }),
+    );
+    render(<KanbanBoard {...baseProps} tickets={[]} currentProjectId={1} />);
+    fireEvent.change(screen.getByLabelText("New ticket title"), {
+      target: { value: "Draft ticket" },
+    });
+    const create = screen.getByRole("button", { name: "Create ticket" });
+    fireEvent.click(create);
+    fireEvent.click(create);
+
+    expect(api.createTicket).toHaveBeenCalledTimes(1);
+    reject(new Error("Could not create"));
+    await waitFor(() => expect(screen.getByText("Could not create")).toBeTruthy());
+    expect(screen.getByDisplayValue("Draft ticket")).toBeTruthy();
   });
 
   it("offers only valid state-specific actions", async () => {

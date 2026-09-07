@@ -61,6 +61,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ ...changes, expected_revision: ticket.revision }),
     }),
+  clearTicketReservation: (ticket: Ticket) =>
+    request<Ticket>(`/tickets/${ticket.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        reserved_for_agent_id: null,
+        expected_revision: ticket.revision,
+      }),
+    }),
   reserveTickets: (
     ticketIds: number[],
     agentId: number,
