@@ -127,6 +127,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ channels }),
     }),
+  agentProjectSubscriptions: (id: number) =>
+    request<number[]>(`/agents/${id}/project-subscriptions`),
+  setAgentProjectSubscriptions: (id: number, projectIds: number[]) =>
+    request<number[]>(`/agents/${id}/project-subscriptions`, {
+      method: "PUT",
+      body: JSON.stringify({ project_ids: projectIds }),
+    }),
   pauseAgent: (id: number) =>
     request<Agent>(`/agents/${id}/pause`, { method: "POST" }),
   resumeAgent: (id: number) =>

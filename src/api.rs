@@ -11,7 +11,7 @@ use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
     CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, RegisterProjectRequest,
     ReserveTicketsRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
-    SetProjectRequest,
+    SetAgentProjectSubscriptionsRequest, SetProjectRequest,
 };
 use serde::Deserialize;
 
@@ -54,6 +54,18 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         .route(
             "/agent/channel-subscriptions/remove",
             axum::routing::post(remove_my_channel_subscriptions),
+        )
+        .route(
+            "/agent/project-subscriptions",
+            get(my_project_subscriptions).put(replace_my_project_subscriptions),
+        )
+        .route(
+            "/agent/project-subscriptions/add",
+            axum::routing::post(add_my_project_subscriptions),
+        )
+        .route(
+            "/agent/project-subscriptions/remove",
+            axum::routing::post(remove_my_project_subscriptions),
         )
         .route(
             "/agent/reminders",
@@ -210,8 +222,16 @@ async fn current_branch(root: &std::path::Path) -> Result<String, AppError> {
         .map_err(|_| AppError::bad_request("default branch is not valid UTF-8"))
 }
 
-async fn list_tickets(State(store): State<Store>) -> Result<Json<Vec<Ticket>>, AppError> {
-    Ok(Json(store.tickets().await?))
+async fn list_tickets(
+    State(store): State<Store>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Ticket>>, AppError> {
+    let mut tickets = store.tickets().await?;
+    if let Some(agent_id) = agent_header(&headers)? {
+        let subscriptions = store.agent_project_subscriptions(agent_id).await?;
+        tickets.sort_by_key(|ticket| !subscriptions.contains(&ticket.project_id));
+    }
+    Ok(Json(tickets))
 }
 
 async fn create_ticket(
@@ -257,6 +277,7 @@ async fn ticket_activity(
 
 async fn reserve_tickets(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     headers: HeaderMap,
     Json(input): Json<ReserveTicketsRequest>,
 ) -> Result<Json<Vec<Ticket>>, AppError> {
@@ -279,16 +300,18 @@ async fn reserve_tickets(
             .agent_id
             .ok_or_else(|| AppError::bad_request("agent_id is required"))?,
     };
-    Ok(Json(
-        store
-            .reserve_tickets(
-                &input.ticket_ids,
-                agent_id,
-                caller,
-                input.administrative_override,
-            )
-            .await?,
-    ))
+    let (tickets, wake_agent_ids) = store
+        .reserve_tickets_with_wakes(
+            &input.ticket_ids,
+            agent_id,
+            caller,
+            input.administrative_override,
+        )
+        .await?;
+    for agent_id in wake_agent_ids {
+        agents.deliver_pending(agent_id).await;
+    }
+    Ok(Json(tickets))
 }
 
 #[derive(Deserialize)]
@@ -499,6 +522,53 @@ async fn remove_my_channel_subscriptions(
     Ok(Json(
         agents
             .remove_channel_subscriptions(calling_agent(&headers)?, &input.channels)
+            .await?,
+    ))
+}
+
+async fn my_project_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<i64>>, AppError> {
+    Ok(Json(
+        agents
+            .project_subscriptions(calling_agent(&headers)?)
+            .await?,
+    ))
+}
+
+async fn replace_my_project_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+    Json(input): Json<SetAgentProjectSubscriptionsRequest>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    Ok(Json(
+        agents
+            .set_project_subscriptions(calling_agent(&headers)?, &input.project_ids)
+            .await?,
+    ))
+}
+
+async fn add_my_project_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+    Json(input): Json<SetAgentProjectSubscriptionsRequest>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    Ok(Json(
+        agents
+            .add_project_subscriptions(calling_agent(&headers)?, &input.project_ids)
+            .await?,
+    ))
+}
+
+async fn remove_my_project_subscriptions(
+    Extension(agents): Extension<AgentManager>,
+    headers: HeaderMap,
+    Json(input): Json<SetAgentProjectSubscriptionsRequest>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    Ok(Json(
+        agents
+            .remove_project_subscriptions(calling_agent(&headers)?, &input.project_ids)
             .await?,
     ))
 }
@@ -962,6 +1032,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_ticket_lists_rank_subscribed_projects_first() {
+        let store = Store::memory().await.unwrap();
+        let preferred = store.project().await.unwrap().unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let other = store.set_project("/tmp/other-project").await.unwrap();
+        let other_ticket = store
+            .create_ticket_for_project_with_wakes(
+                NewTicket {
+                    title: "Other".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                Some(other.id),
+            )
+            .await
+            .unwrap()
+            .0;
+        let preferred_ticket = store
+            .create_ticket_for_project_with_wakes(
+                NewTicket {
+                    title: "Preferred".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                Some(preferred.id),
+            )
+            .await
+            .unwrap()
+            .0;
+        let response = test_router(store)
+            .oneshot(
+                Request::get("/tickets")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tickets: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(tickets[0]["id"], preferred_ticket.id);
+        assert_eq!(tickets[1]["id"], other_ticket.id);
     }
 
     #[tokio::test]

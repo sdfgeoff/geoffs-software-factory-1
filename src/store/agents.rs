@@ -145,6 +145,13 @@ impl Store {
             .bind(legacy_worktree)
             .execute(&mut *transaction)
             .await?;
+            sqlx::query(
+                "INSERT INTO agent_project_subscriptions (agent_id, project_id) VALUES (?, ?)",
+            )
+            .bind(id)
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
         }
         transaction.commit().await?;
         Ok(self.agent(id).await?.unwrap())
@@ -190,6 +197,11 @@ impl Store {
         .bind(&worktree_path)
         .execute(&mut *transaction)
         .await?;
+        sqlx::query("INSERT INTO agent_project_subscriptions (agent_id, project_id) VALUES (?, ?)")
+            .bind(agent_id)
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok((
             self.agent(agent_id).await?.unwrap(),
@@ -268,6 +280,108 @@ impl Store {
             return Err(AppError::not_found("agent not found"));
         }
         Ok(self.agent(agent_id).await?.unwrap())
+    }
+
+    pub async fn agent_project_subscriptions(&self, agent_id: i64) -> Result<Vec<i64>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT project_id FROM agent_project_subscriptions WHERE agent_id = ? ORDER BY project_id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn set_agent_project_subscriptions(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let project_ids = self.valid_agent_projects(agent_id, project_ids).await?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM agent_project_subscriptions WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        for project_id in project_ids {
+            sqlx::query(
+                "INSERT INTO agent_project_subscriptions (agent_id, project_id) VALUES (?, ?)",
+            )
+            .bind(agent_id)
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        remove_ineligible_project_wakes(&mut transaction, agent_id).await?;
+        transaction.commit().await?;
+        self.agent_project_subscriptions(agent_id).await
+    }
+
+    pub async fn add_agent_project_subscriptions(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let project_ids = self.valid_agent_projects(agent_id, project_ids).await?;
+        let mut transaction = self.pool.begin().await?;
+        for project_id in project_ids {
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_project_subscriptions (agent_id, project_id) VALUES (?, ?)",
+            )
+            .bind(agent_id)
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.agent_project_subscriptions(agent_id).await
+    }
+
+    pub async fn remove_agent_project_subscriptions(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let project_ids = self.valid_agent_projects(agent_id, project_ids).await?;
+        let mut transaction = self.pool.begin().await?;
+        for project_id in project_ids {
+            sqlx::query(
+                "DELETE FROM agent_project_subscriptions WHERE agent_id = ? AND project_id = ?",
+            )
+            .bind(agent_id)
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        remove_ineligible_project_wakes(&mut transaction, agent_id).await?;
+        transaction.commit().await?;
+        self.agent_project_subscriptions(agent_id).await
+    }
+
+    async fn valid_agent_projects(
+        &self,
+        agent_id: i64,
+        project_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        if self.agent(agent_id).await?.is_none() {
+            return Err(AppError::not_found("agent not found"));
+        }
+        let mut project_ids = project_ids.to_vec();
+        project_ids.sort_unstable();
+        project_ids.dedup();
+        for project_id in &project_ids {
+            let project = self.project_by_id(*project_id).await?.ok_or_else(|| {
+                AppError::bad_request(format!("project #{project_id} does not exist"))
+            })?;
+            if project.archived_at.is_some() {
+                return Err(AppError::conflict(format!(
+                    "project #{project_id} is archived"
+                )));
+            }
+        }
+        Ok(project_ids)
     }
 
     pub(crate) async fn delete_agent(&self, id: i64) -> Result<(), sqlx::Error> {
@@ -460,6 +574,23 @@ impl Store {
     }
 }
 
+async fn remove_ineligible_project_wakes(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    agent_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM agent_wake_events WHERE agent_id = ? AND delivery_state = 'pending' \
+         AND kind IN ('ticket.available', 'ticket.review_requested') \
+         AND NOT EXISTS (SELECT 1 FROM agent_project_subscriptions subscription \
+         WHERE subscription.agent_id = agent_wake_events.agent_id \
+         AND subscription.project_id = json_extract(agent_wake_events.payload, '$.ticket.project_id'))",
+    )
+    .bind(agent_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 fn worktree_from_row(row: (i64, i64, String, i64, i64)) -> AgentProjectWorktree {
     AgentProjectWorktree {
         agent_id: row.0,
@@ -487,6 +618,73 @@ mod tests {
     use sqlx::SqlitePool;
 
     use super::*;
+
+    #[tokio::test]
+    async fn project_subscriptions_default_to_the_agents_initial_project() {
+        let store = Store::memory().await.unwrap();
+        let first_project = store.project().await.unwrap().unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let second_project = store.set_project("/tmp/second-project").await.unwrap();
+
+        assert_eq!(
+            store.agent_project_subscriptions(agent.id).await.unwrap(),
+            vec![first_project.id]
+        );
+        assert_eq!(
+            store
+                .set_agent_project_subscriptions(
+                    agent.id,
+                    &[second_project.id, first_project.id, second_project.id],
+                )
+                .await
+                .unwrap(),
+            vec![first_project.id, second_project.id]
+        );
+        assert_eq!(
+            store
+                .set_agent_project_subscriptions(agent.id, &[999])
+                .await
+                .unwrap_err()
+                .to_string(),
+            "project #999 does not exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_subscription_migration_preserves_existing_wake_reach() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 25) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch) VALUES \
+             (1, 'Board', '/board', 'main'), (2, 'API', '/api', 'main')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, name, home_path) VALUES \
+             (1, 'first', '/first'), (2, 'second', '/second')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 25)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        let subscriptions: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT agent_id, project_id FROM agent_project_subscriptions ORDER BY agent_id, project_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(subscriptions, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
+    }
 
     #[tokio::test]
     async fn legacy_worktree_migration_preserves_the_checkout_mapping() {

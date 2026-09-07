@@ -8,7 +8,7 @@ use axum::{
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, CreateAgentRequest, RenameAgentRequest, RequestChangesRequest,
     ReviewRevisionRequest, SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
-    SetAgentScopesRequest, SetAgentWakeSettingsRequest,
+    SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
 };
 use std::{convert::Infallible, time::Duration};
 
@@ -43,6 +43,10 @@ pub fn router(manager: AgentManager) -> Router {
         .route(
             "/agents/{id}/channel-subscriptions",
             get(agent_channel_subscriptions).put(set_agent_channel_subscriptions),
+        )
+        .route(
+            "/agents/{id}/project-subscriptions",
+            get(agent_project_subscriptions).put(set_agent_project_subscriptions),
         )
         .route("/tickets/{id}/submit-review", post(submit_review))
         .route("/tickets/{id}/claim-review", post(claim_review))
@@ -154,6 +158,25 @@ async fn set_agent_channel_subscriptions(
     Ok(Json(
         manager
             .set_channel_subscriptions(id, &input.channels)
+            .await?,
+    ))
+}
+
+async fn agent_project_subscriptions(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    Ok(Json(manager.project_subscriptions(id).await?))
+}
+
+async fn set_agent_project_subscriptions(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    Json(input): Json<SetAgentProjectSubscriptionsRequest>,
+) -> Result<Json<Vec<i64>>, AppError> {
+    Ok(Json(
+        manager
+            .set_project_subscriptions(id, &input.project_ids)
             .await?,
     ))
 }
@@ -444,5 +467,48 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
         assert_eq!(body, serde_json::json!(["general"]));
+    }
+
+    #[tokio::test]
+    async fn project_subscriptions_are_configurable_over_http() {
+        let store = Store::memory().await.unwrap();
+        let first = store.project().await.unwrap().unwrap();
+        let second = store.set_project("/tmp/second-project").await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(manager);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/agents/{}/project-subscriptions", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        "{{\"project_ids\":[{},{}]}}",
+                        first.id, second.id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/agents/{}/project-subscriptions", agent.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body, serde_json::json!([first.id, second.id]));
     }
 }

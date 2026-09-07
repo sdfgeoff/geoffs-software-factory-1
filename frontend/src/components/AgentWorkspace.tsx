@@ -63,6 +63,7 @@ export function AgentWorkspace({
   >({});
   const [scopes, setScopes] = useState<string[]>([]);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
+  const [projectSubscriptions, setProjectSubscriptions] = useState<number[]>([]);
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const prompt = selected ? prompts[selected.id] ?? "" : "";
@@ -87,6 +88,8 @@ export function AgentWorkspace({
   const currentScopes = detailsAgentId === selectedAgentId ? scopes : [];
   const currentSubscriptions =
     detailsAgentId === selectedAgentId ? subscriptions : [];
+  const currentProjectSubscriptions =
+    detailsAgentId === selectedAgentId ? projectSubscriptions : [];
   const activeWorktree = currentWorktrees.find(
     (worktree) => worktree.project_id === selected?.active_project_id,
   );
@@ -137,19 +140,31 @@ export function AgentWorkspace({
     setWorktrees([]);
     setScopes([]);
     setSubscriptions([]);
+    setProjectSubscriptions([]);
     setDetailsAgentId(null);
     if (selectedAgentId) {
       void Promise.all([
         api.agentProjectWorktrees(selectedAgentId),
         api.agentScopes(selectedAgentId),
         api.agentChannelSubscriptions(selectedAgentId),
-      ]).then(([nextWorktrees, nextScopes, nextSubscriptions]) => {
-        if (!current) return;
-        setWorktrees(nextWorktrees);
-        setScopes(nextScopes);
-        setSubscriptions(nextSubscriptions);
-        setDetailsAgentId(selectedAgentId);
-      }).catch(onError);
+        api.agentProjectSubscriptions(selectedAgentId),
+      ])
+        .then(
+          ([
+            nextWorktrees,
+            nextScopes,
+            nextSubscriptions,
+            nextProjectSubscriptions,
+          ]) => {
+            if (!current) return;
+            setWorktrees(nextWorktrees);
+            setScopes(nextScopes);
+            setSubscriptions(nextSubscriptions);
+            setProjectSubscriptions(nextProjectSubscriptions);
+            setDetailsAgentId(selectedAgentId);
+          },
+        )
+        .catch(onError);
     }
     return () => {
       current = false;
@@ -225,6 +240,19 @@ export function AgentWorkspace({
     try {
       setSubscriptions(
         await api.setAgentChannelSubscriptions(selected.id, next),
+      );
+    } catch (error) {
+      onError(error);
+    }
+  }
+  async function setProjectSubscription(projectId: number, enabled: boolean) {
+    if (!selected) return;
+    const next = enabled
+      ? [...new Set([...currentProjectSubscriptions, projectId])]
+      : currentProjectSubscriptions.filter((item) => item !== projectId);
+    try {
+      setProjectSubscriptions(
+        await api.setAgentProjectSubscriptions(selected.id, next),
       );
     } catch (error) {
       onError(error);
@@ -435,6 +463,24 @@ export function AgentWorkspace({
                 </fieldset>
                 <button type="submit">Save wake settings</button>
               </form>
+              <fieldset className="capabilities">
+                <legend>Project subscriptions</legend>
+                {projects.filter((project) => !project.archived_at).map((project) => (
+                  <label key={project.id}>
+                    <input
+                      type="checkbox"
+                      checked={currentProjectSubscriptions.includes(project.id)}
+                      onChange={(event) =>
+                        void setProjectSubscription(project.id, event.target.checked)
+                      }
+                    />
+                    <span>
+                      <strong>{project.name}</strong>
+                      Prefer work and reviews from this project
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
               <fieldset className="capabilities">
                 <legend>Channel subscriptions</legend>
                 {channels.map((channel) => (

@@ -51,6 +51,7 @@ pub struct ReviewSubmission<'a> {
 enum TicketWakeReason {
     Available,
     Assigned,
+    Reserved,
     ReviewRequested,
 }
 
@@ -217,6 +218,18 @@ impl Store {
                 "UPDATE board_state SET current_project_id = (SELECT id FROM projects WHERE archived_at IS NULL AND id != ? ORDER BY id LIMIT 1) WHERE id = 1 AND current_project_id = ?",
             )
             .bind(id)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("DELETE FROM agent_project_subscriptions WHERE project_id = ?")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
+                 AND kind IN ('ticket.available', 'ticket.review_requested') \
+                 AND json_extract(payload, '$.ticket.project_id') = ?",
+            )
             .bind(id)
             .execute(&mut *transaction)
             .await?;
@@ -472,6 +485,24 @@ impl Store {
         actor_agent_id: Option<i64>,
         administrative_override: bool,
     ) -> Result<Vec<Ticket>, AppError> {
+        Ok(self
+            .reserve_tickets_with_wakes(
+                ticket_ids,
+                agent_id,
+                actor_agent_id,
+                administrative_override,
+            )
+            .await?
+            .0)
+    }
+
+    pub async fn reserve_tickets_with_wakes(
+        &self,
+        ticket_ids: &[i64],
+        agent_id: i64,
+        actor_agent_id: Option<i64>,
+        administrative_override: bool,
+    ) -> Result<(Vec<Ticket>, Vec<i64>), AppError> {
         if ticket_ids.is_empty() {
             return Err(AppError::bad_request("at least one ticket ID is required"));
         }
@@ -524,8 +555,10 @@ impl Store {
         }
 
         let mut reserved = Vec::with_capacity(tickets.len());
+        let mut wake_agent_ids = HashSet::new();
         for ticket in tickets {
-            if ticket.reserved_for_agent_id != Some(agent_id) {
+            let changed = ticket.reserved_for_agent_id != Some(agent_id);
+            if changed {
                 let result = sqlx::query(
                     "UPDATE tickets SET reserved_for_agent_id = ?, revision = revision + 1, \
                      updated_at = unixepoch() WHERE id = ? AND state = 'todo' \
@@ -559,10 +592,24 @@ impl Store {
                     .await?;
                 }
             }
-            reserved.push(ticket_in_transaction(&mut transaction, ticket.id).await?);
+            let updated = ticket_in_transaction(&mut transaction, ticket.id).await?;
+            if changed {
+                wake_agent_ids.extend(
+                    insert_pending_ticket_wakes(
+                        &mut transaction,
+                        Some(&ticket),
+                        &updated,
+                        TicketWakeReason::Reserved,
+                    )
+                    .await?,
+                );
+            }
+            reserved.push(updated);
         }
         transaction.commit().await?;
-        Ok(reserved)
+        let mut wake_agent_ids = wake_agent_ids.into_iter().collect::<Vec<_>>();
+        wake_agent_ids.sort_unstable();
+        Ok((reserved, wake_agent_ids))
     }
 
     pub async fn ticket_activity(&self, ticket_id: i64) -> Result<Vec<TicketActivity>, AppError> {
@@ -1063,9 +1110,14 @@ async fn insert_pending_ticket_wakes(
                 "Ticket #{} '{}' is available. Claim it atomically before starting work.",
                 ticket.id, ticket.title
             ),
-            sqlx::query_scalar("SELECT id FROM agents WHERE wake_on_pending_work = 1 ORDER BY id")
-                .fetch_all(&mut **transaction)
-                .await?,
+            sqlx::query_scalar(
+                "SELECT a.id FROM agents a JOIN agent_project_subscriptions subscription \
+                 ON subscription.agent_id = a.id WHERE a.wake_on_pending_work = 1 \
+                 AND subscription.project_id = ? ORDER BY a.id",
+            )
+            .bind(ticket.project_id)
+            .fetch_all(&mut **transaction)
+            .await?,
         ),
         TicketWakeReason::Assigned => (
             "ticket.assigned",
@@ -1075,6 +1127,17 @@ async fn insert_pending_ticket_wakes(
             ),
             sqlx::query_scalar("SELECT id FROM agents WHERE id = ? AND wake_on_pending_work = 1")
                 .bind(ticket.assignee_id)
+                .fetch_all(&mut **transaction)
+                .await?,
+        ),
+        TicketWakeReason::Reserved => (
+            "ticket.reserved",
+            format!(
+                "Ticket #{} '{}' was reserved for you.",
+                ticket.id, ticket.title
+            ),
+            sqlx::query_scalar("SELECT id FROM agents WHERE id = ? AND wake_on_pending_work = 1")
+                .bind(ticket.reserved_for_agent_id)
                 .fetch_all(&mut **transaction)
                 .await?,
         ),
@@ -1088,9 +1151,11 @@ async fn insert_pending_ticket_wakes(
             ),
             sqlx::query_scalar(
                 "SELECT a.id FROM agents a JOIN agent_scopes s ON s.agent_id = a.id \
+                 JOIN agent_project_subscriptions subscription ON subscription.agent_id = a.id \
                  WHERE a.wake_on_pending_review = 1 AND s.scope = 'approve_review' \
-                 AND a.id != ? ORDER BY a.id",
+                 AND subscription.project_id = ? AND a.id != ? ORDER BY a.id",
             )
+            .bind(ticket.project_id)
             .bind(ticket.assignee_id)
             .fetch_all(&mut **transaction)
             .await?,
@@ -1583,6 +1648,14 @@ mod tests {
             .create_agent("reserved", "/tmp/reserved")
             .await
             .unwrap();
+        store
+            .set_agent_wake_settings(reserved.id, true, false, None)
+            .await
+            .unwrap();
+        store
+            .set_agent_project_subscriptions(reserved.id, &[])
+            .await
+            .unwrap();
         let other = store.create_agent("other", "/tmp/other").await.unwrap();
         let first = store
             .create_ticket(NewTicket {
@@ -1603,8 +1676,8 @@ mod tests {
             .await
             .unwrap();
 
-        let tickets = store
-            .reserve_tickets(
+        let (tickets, wake_targets) = store
+            .reserve_tickets_with_wakes(
                 &[first.id, second.id],
                 reserved.id,
                 Some(reserved.id),
@@ -1612,6 +1685,17 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(wake_targets, vec![reserved.id]);
+        assert_eq!(
+            store
+                .wake_events(reserved.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ticket.reserved", "ticket.reserved"]
+        );
         assert_eq!(tickets[0].created_by_agent_id, Some(creator.id));
         assert_eq!(tickets[0].reserved_for_agent_id, Some(reserved.id));
         assert_eq!(tickets[0].state, TicketState::Todo);
@@ -1699,6 +1783,10 @@ mod tests {
             .await
             .unwrap();
         let both = store.create_agent("both", "/tmp/both").await.unwrap();
+        let unsubscribed = store
+            .create_agent("unsubscribed", "/tmp/unsubscribed")
+            .await
+            .unwrap();
         let neither = store.create_agent("neither", "/tmp/neither").await.unwrap();
         store
             .set_agent_wake_settings(work_only.id, true, false, None)
@@ -1712,7 +1800,21 @@ mod tests {
             .set_agent_wake_settings(both.id, true, true, None)
             .await
             .unwrap();
-        for agent_id in [work_only.id, review_only.id, both.id, neither.id] {
+        store
+            .set_agent_wake_settings(unsubscribed.id, true, true, None)
+            .await
+            .unwrap();
+        store
+            .set_agent_project_subscriptions(unsubscribed.id, &[])
+            .await
+            .unwrap();
+        for agent_id in [
+            work_only.id,
+            review_only.id,
+            both.id,
+            unsubscribed.id,
+            neither.id,
+        ] {
             store
                 .set_agent_scopes(agent_id, &["approve_review".into()])
                 .await
@@ -1731,6 +1833,7 @@ mod tests {
         available_targets.sort();
         assert_eq!(available_targets, vec![work_only.id, both.id]);
         assert!(store.wake_events(review_only.id).await.unwrap().is_empty());
+        assert!(store.wake_events(unsubscribed.id).await.unwrap().is_empty());
         assert!(store.wake_events(neither.id).await.unwrap().is_empty());
 
         store
@@ -1742,6 +1845,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(assigned_targets, vec![implementer.id]);
+        assert_eq!(
+            store.wake_events(implementer.id).await.unwrap()[0].kind,
+            "ticket.assigned"
+        );
+        store
+            .set_agent_project_subscriptions(implementer.id, &[])
+            .await
+            .unwrap();
         assert_eq!(
             store.wake_events(implementer.id).await.unwrap()[0].kind,
             "ticket.assigned"
@@ -1786,6 +1897,12 @@ mod tests {
             vec!["ticket.available", "ticket.review_requested"]
         );
         assert!(store.wake_events(neither.id).await.unwrap().is_empty());
+        assert!(store.wake_events(unsubscribed.id).await.unwrap().is_empty());
+        store
+            .set_agent_project_subscriptions(both.id, &[])
+            .await
+            .unwrap();
+        assert!(store.wake_events(both.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
