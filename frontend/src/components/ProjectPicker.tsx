@@ -9,27 +9,68 @@ interface Props {
   onError: (error: unknown) => void;
 }
 
-export function ProjectPicker({ project, projects, onChanged, onError }: Props) {
+export function ProjectPicker({ project, projects, onChanged }: Props) {
   const [path, setPath] = useState(project?.path ?? "");
   const [name, setName] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
+  const [selecting, setSelecting] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [archivingId, setArchivingId] = useState<number | null>(null);
+  const [selectionStatus, setSelectionStatus] = useState("");
+  const [registerStatus, setRegisterStatus] = useState("");
+  const [archiveStatus, setArchiveStatus] = useState("");
   useEffect(() => setPath(project?.path ?? ""), [project?.path]);
   async function register(event: FormEvent) {
     event.preventDefault();
+    if (registering) return;
+    setRegistering(true);
+    setRegisterStatus("Registering…");
     try {
       await api.registerProject(name, path, defaultBranch);
       setName("");
       await onChanged();
+      setRegisterStatus("Project registered.");
     } catch (error) {
-      onError(error);
+      setRegisterStatus(error instanceof Error ? error.message : "Could not register project");
+    } finally {
+      setRegistering(false);
     }
   }
-  async function archive(id: number) {
+  async function archive(item: Project, button: HTMLButtonElement) {
+    const confirmed = window.confirm(
+      `Archive ${item.name}? The board may refuse while the project has active tickets, reviews, or agent work.`,
+    );
+    if (!confirmed) {
+      setArchiveStatus("Archive cancelled.");
+      button.focus();
+      return;
+    }
+    setArchivingId(item.id);
+    setArchiveStatus(`Archiving ${item.name}…`);
     try {
-      await api.archiveProject(id);
+      await api.archiveProject(item.id);
       await onChanged();
+      setArchiveStatus(`${item.name} archived.`);
     } catch (error) {
-      onError(error);
+      setArchiveStatus(error instanceof Error ? error.message : "Could not archive project");
+      button.focus();
+    } finally {
+      setArchivingId(null);
+    }
+  }
+  async function select(next: Project) {
+    if (selecting) return;
+    setSelecting(true);
+    setSelectionStatus("Selecting…");
+    setPath(next.path);
+    try {
+      await api.setProject(next.path);
+      await onChanged();
+      setSelectionStatus(`${next.name} selected.`);
+    } catch (error) {
+      setSelectionStatus(error instanceof Error ? error.message : "Could not select project");
+    } finally {
+      setSelecting(false);
     }
   }
   return (
@@ -45,10 +86,10 @@ export function ProjectPicker({ project, projects, onChanged, onError }: Props) 
               (item) => item.id === Number(event.target.value),
             );
             if (selected) {
-              setPath(selected.path);
-              void api.setProject(selected.path).then(onChanged).catch(onError);
+              void select(selected);
             }
           }}
+          disabled={selecting}
         >
           <option value="" disabled>Select a project</option>
           {projects.filter((item) => !item.archived_at).map((item) => (
@@ -56,6 +97,7 @@ export function ProjectPicker({ project, projects, onChanged, onError }: Props) 
           ))}
         </select>
       </label>
+      {selectionStatus && <p role="status" aria-live="polite">{selectionStatus}</p>}
       <form onSubmit={register}>
         <label>
           Project name
@@ -74,7 +116,10 @@ export function ProjectPicker({ project, projects, onChanged, onError }: Props) 
           Default branch
           <input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} required />
         </label>
-        <button type="submit">Register project</button>
+        <button type="submit" disabled={registering}>
+          {registering ? "Registering…" : "Register project"}
+        </button>
+        {registerStatus && <p role="status" aria-live="polite">{registerStatus}</p>}
       </form>
       <ul>
         {projects.map((item) => (
@@ -83,13 +128,19 @@ export function ProjectPicker({ project, projects, onChanged, onError }: Props) 
             {item.archived_at ? (
               <small>Archived</small>
             ) : (
-              <button type="button" className="ghost" onClick={() => void archive(item.id)}>
-                Archive
+              <button
+                type="button"
+                className="ghost"
+                disabled={archivingId === item.id}
+                onClick={(event) => void archive(item, event.currentTarget)}
+              >
+                {archivingId === item.id ? "Archiving…" : "Archive"}
               </button>
             )}
           </li>
         ))}
       </ul>
+      {archiveStatus && <p role="status" aria-live="polite">{archiveStatus}</p>}
     </details>
   );
 }
