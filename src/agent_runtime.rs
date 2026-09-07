@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, AgentProjectWorktree, BoardSettings, ProjectTransition, Ticket},
+    domain::{Agent, AgentProjectWorktree, BoardSettings, Message, ProjectTransition, Ticket},
     error::AppError,
     store::{MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, validate_channel},
 };
@@ -113,6 +113,14 @@ impl AgentManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.events.subscribe()
+    }
+
+    pub(crate) fn emit_board_message(&self, message: &Message) {
+        self.emit(
+            message.agent_id.unwrap_or_default(),
+            "board_message",
+            json!(message),
+        );
     }
 
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {

@@ -654,6 +654,7 @@ async fn post_message(
     let (message, wake_agent_ids) = store
         .post_message_with_wakes(&name, agent_id, &author, &input.body)
         .await?;
+    agents.emit_board_message(&message);
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
@@ -1548,6 +1549,35 @@ mod tests {
                 .unwrap();
         assert_eq!(message["agent_id"], agent.id);
         assert_eq!(message["author"], "worker");
+    }
+
+    #[tokio::test]
+    async fn posting_a_board_message_emits_its_own_event_without_wake_recipients() {
+        let store = Store::memory().await.unwrap();
+        let agents = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let mut events = agents.subscribe();
+
+        let response = router(store, agents)
+            .oneshot(
+                Request::post("/channels/general/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"author":"human","body":"No wake needed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.kind, "board_message");
+        assert_eq!(event.agent_id, 0);
+        assert_eq!(event.data["channel_name"], "general");
+        assert_eq!(event.data["body"], "No wake needed");
     }
 
     #[tokio::test]
