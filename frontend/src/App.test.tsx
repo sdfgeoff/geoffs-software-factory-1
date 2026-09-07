@@ -178,11 +178,12 @@ describe("App agent routes", () => {
     expect(
       (screen.getByLabelText("Filter projects") as HTMLSelectElement).value,
     ).toBe("2");
-    const summary = screen.getByText("Durable routes").closest("summary")!;
-    expect(summary.closest("details")?.open).toBe(true);
-    fireEvent.click(summary);
+    expect(
+      screen.getByRole("heading", { name: "Durable routes" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(window.location.hash).toBe("#board?project=2");
-    fireEvent.click(screen.getByText("Durable routes").closest("summary")!);
+    fireEvent.click(screen.getByText("Durable routes").closest("button")!);
     expect(window.location.hash).toBe("#board?project=2&ticket=7");
   });
 

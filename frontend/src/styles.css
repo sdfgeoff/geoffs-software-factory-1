@@ -222,51 +222,88 @@ nav a.active {
   background: #d6cec1;
 }
 .ticket-card {
+  display: grid;
+  width: 100%;
+  gap: 0.55rem;
   margin-bottom: 0.7rem;
+  padding: 0.9rem;
+  border: 1px solid transparent;
   border-radius: 0.55rem;
   background: #fffefa;
+  color: #28332f;
   box-shadow: 0 2px 8px #352f2812;
+  text-align: left;
 }
-.ticket-card summary {
+.ticket-card:hover,
+.ticket-card[aria-current="page"] {
+  border-color: #76958d;
+}
+.ticket-card-topline,
+.ticket-card-meta {
   display: flex;
-  gap: 0.55rem;
-  padding: 0.9rem;
-  cursor: pointer;
-  font-weight: 700;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
-.ticket-ownership {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.25rem 0.75rem;
-  margin: 0;
+.ticket-number {
+  color: #987a66;
+  font-size: 0.75rem;
+  font-weight: 600;
 }
-.ticket-ownership dt {
+.state-badge {
+  padding: 0.18rem 0.45rem;
+  border-radius: 999px;
+  background: #e7e1d5;
+  color: #4b5563;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.state-in_progress {
+  background: #dcebe7;
+  color: #24564b;
+}
+.state-review {
+  background: #f6e4bd;
+  color: #765213;
+}
+.state-done {
+  background: #dce9d2;
+  color: #385c27;
+}
+.state-cancelled {
+  background: #e3e1dd;
   color: #6c6256;
 }
-.ticket-ownership dd {
-  margin: 0;
+.ticket-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #17211e;
+  font-family: Georgia, serif;
+  font-size: 1rem;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
-.ticket-card summary span {
-  color: #987a66;
-  font-weight: 500;
-}
-.project-badge {
-  margin-left: auto;
+.ticket-card-meta {
   color: #6c6256;
   font-size: 0.7rem;
-  font-weight: 700;
 }
-.blocked-badge {
-  margin-left: auto;
+.ticket-card-blocked,
+.ticket-card-review {
   color: #8d261d;
   font-size: 0.75rem;
+  font-weight: 700;
 }
 .ticket-blockers {
-  margin: 0;
+  margin: 0.75rem 0;
+  padding: 0.65rem;
+  border-left: 3px solid #b83b2d;
+  background: #f9ded7;
   color: #8d261d;
   font-size: 0.8rem;
 }
-.ticket-card form,
 aside form,
 .conversation form {
   display: grid;
@@ -291,6 +328,107 @@ aside form,
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
+}
+.ticket-detail-panel {
+  position: fixed;
+  z-index: 10;
+  inset: 0 0 0 auto;
+  width: min(42rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  overflow-y: auto;
+  border: 0;
+  border-left: 1px solid #d8d1c5;
+  background: #fffefa;
+  box-shadow: -12px 0 36px #352f2838;
+}
+.ticket-detail-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.ticket-detail-header h2 {
+  margin: 0.25rem 0 0;
+  font-family: Georgia, serif;
+}
+.ticket-detail-header > button {
+  width: auto;
+  margin: 0;
+}
+.ticket-detail-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 0.8rem;
+  margin: 1rem 0;
+}
+.ticket-detail-meta dt {
+  color: #81796d;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.ticket-detail-meta dd {
+  margin: 0;
+}
+.ticket-detail-panel .review-meta {
+  padding-inline: 0;
+}
+.ticket-detail-panel .ticket-detail-form {
+  padding-inline: 0;
+}
+.blocker-selector {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.55rem;
+}
+.blocker-selector legend {
+  color: #4b5563;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.blocker-options {
+  display: grid;
+  max-height: 15rem;
+  gap: 0.25rem;
+  overflow-y: auto;
+}
+.blocker-options label {
+  display: flex;
+  align-items: start;
+  gap: 0.55rem;
+  padding: 0.45rem;
+  border-radius: 0.4rem;
+  background: #f3f0e9;
+}
+.blocker-options input {
+  width: auto;
+  margin-top: 0.2rem;
+}
+.blocker-options span {
+  display: grid;
+  gap: 0.1rem;
+  font-weight: 400;
+}
+.blocker-options small {
+  color: #81796d;
+}
+.reservation-editor {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 0.5rem;
+  padding: 1rem 0;
+}
+.ticket-actions {
+  display: flex;
+  gap: 0.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #eee8de;
+}
+button.danger {
+  background: #8d261d;
 }
 .messages-layout,
 .agents-layout {
@@ -566,5 +704,10 @@ aside button.selected {
   aside {
     border-right: 0;
     border-bottom: 1px solid #d8d1c5;
+  }
+  .ticket-detail-panel {
+    inset: 0;
+    width: 100%;
+    border: 0;
   }
 }

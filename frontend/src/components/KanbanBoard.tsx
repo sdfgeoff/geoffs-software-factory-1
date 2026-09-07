@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Agent, Project, Ticket, TicketState } from "../types";
+import { TicketDetailPanel } from "./TicketDetailPanel";
 
 const columns: { state: TicketState; label: string }[] = [
   { state: "todo", label: "To do" },
@@ -28,7 +29,7 @@ export function KanbanBoard({
   projects = [],
   currentProjectId = null,
   filterProjectId: routedProjectId,
-  selectedTicketId = null,
+  selectedTicketId: routedTicketId,
   onFilterProject,
   onSelectTicket,
   onChanged,
@@ -40,6 +41,10 @@ export function KanbanBoard({
     routedProjectId?.toString() ?? "all",
   );
   const [showCancelled, setShowCancelled] = useState(false);
+  const [localTicketId, setLocalTicketId] = useState<number | null>(null);
+  const selectedTicketId =
+    routedTicketId === undefined ? localTicketId : routedTicketId;
+  const selectTicket = onSelectTicket ?? setLocalTicketId;
   useEffect(() => {
     if (!projectId && currentProjectId) setProjectId(currentProjectId.toString());
   }, [currentProjectId, projectId]);
@@ -144,14 +149,25 @@ export function KanbanBoard({
                   agents={agents}
                   project={projects.find((project) => project.id === ticket.project_id)}
                   selected={selectedTicketId === ticket.id}
-                  onSelect={onSelectTicket}
-                  onChanged={onChanged}
-                  onError={onError}
+                  onSelect={selectTicket}
                 />
               ))}
           </section>
         ))}
       </div>
+      {selectedTicket && (
+        <TicketDetailPanel
+          ticket={selectedTicket}
+          tickets={tickets}
+          agents={agents}
+          project={projects.find(
+            (project) => project.id === selectedTicket.project_id,
+          )}
+          onClose={() => selectTicket(null)}
+          onChanged={onChanged}
+          onError={onError}
+        />
+      )}
     </section>
   );
 }
@@ -162,246 +178,53 @@ function TicketCard({
   project,
   selected,
   onSelect,
-  onChanged,
-  onError,
 }: {
   ticket: Ticket;
   agents: Agent[];
   project?: Project;
   selected: boolean;
-  onSelect?: (ticketId: number | null) => void;
-  onChanged: () => Promise<void>;
-  onError: (error: unknown) => void;
+  onSelect: (ticketId: number | null) => void;
 }) {
-  const [title, setTitle] = useState(ticket.title);
-  const [description, setDescription] = useState(ticket.description);
-  const [state, setState] = useState(ticket.state);
-  const [assignee, setAssignee] = useState(
-    ticket.assignee_id?.toString() ?? "",
-  );
-  const [reservation, setReservation] = useState(
-    ticket.reserved_for_agent_id?.toString() ?? "",
-  );
-  const [blockerIds, setBlockerIds] = useState(ticket.blocker_ids.join(", "));
-  const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
-  useEffect(() => {
-    setTitle(ticket.title);
-    setDescription(ticket.description);
-    setState(ticket.state);
-    setAssignee(ticket.assignee_id?.toString() ?? "");
-    setReservation(ticket.reserved_for_agent_id?.toString() ?? "");
-    setBlockerIds(ticket.blocker_ids.join(", "));
-  }, [ticket]);
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    try {
-      await api.updateTicket(ticket, {
-        title,
-        description,
-        state,
-        assignee_id: assignee ? Number(assignee) : null,
-        blocker_ids: parseBlockerIds(blockerIds),
-      });
-      await onChanged();
-    } catch (error) {
-      onError(error);
-    }
-  }
-  async function reserve() {
-    if (!reservation) return;
-    try {
-      const agentId = Number(reservation);
-      await api.reserveTickets(
-        [ticket.id],
-        agentId,
-        ticket.reserved_for_agent_id !== null &&
-          ticket.reserved_for_agent_id !== agentId,
-      );
-      await onChanged();
-    } catch (error) {
-      onError(error);
-    }
-  }
-  async function cancel() {
-    try {
-      await api.updateTicket(ticket, { state: "cancelled" });
-      await onChanged();
-    } catch (error) {
-      onError(error);
-    }
-  }
-  const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
   const reservedFor = agents.find(
     (agent) => agent.id === ticket.reserved_for_agent_id,
   );
   const assignedTo = agents.find((agent) => agent.id === ticket.assignee_id);
+  const owner = assignedTo
+    ? `Assigned to ${assignedTo.name}`
+    : reservedFor
+      ? `Reserved for ${reservedFor.name}`
+      : "Unassigned";
   return (
-    <details className="ticket-card" open={onSelect ? selected : undefined}>
-      <summary
-        aria-current={selected ? "page" : undefined}
-        onClick={
-          onSelect
-            ? (event) => {
-                event.preventDefault();
-                onSelect(selected ? null : ticket.id);
-              }
-            : undefined
-        }
-      >
-        <span>#{ticket.id}</span>
-        {ticket.title}
-        <small className="project-badge">
+    <button
+      type="button"
+      className="ticket-card"
+      aria-current={selected ? "page" : undefined}
+      onClick={() => onSelect(ticket.id)}
+    >
+      <span className="ticket-card-topline">
+        <span className="ticket-number">#{ticket.id}</span>
+        <span className={`state-badge state-${ticket.state}`}>
+          {columns.find((column) => column.state === ticket.state)?.label}
+        </span>
+      </span>
+      <strong className="ticket-card-title">{ticket.title}</strong>
+      <span className="ticket-card-meta">
+        <span title={project?.path}>
           {project?.name ?? `Project #${ticket.project_id}`}
-        </small>
-        {ticket.unresolved_blockers.length > 0 && (
-          <strong className="blocked-badge">Blocked</strong>
-        )}
-      </summary>
-      <form onSubmit={save}>
-        <dl className="ticket-ownership">
-          <dt>Created by</dt>
-          <dd>{creator?.name ?? "User/system"}</dd>
-          <dt>Reserved for</dt>
-          <dd>{reservedFor?.name ?? "Nobody"}</dd>
-          <dt>Active assignee</dt>
-          <dd>{assignedTo?.name ?? "Nobody"}</dd>
-        </dl>
-        {ticket.unresolved_blockers.length > 0 && (
-          <p className="ticket-blockers">
-            Blocked by {ticket.unresolved_blockers
-              .map((blocker) => `#${blocker.id} ${blocker.title}`)
-              .join(", ")}
-          </p>
-        )}
-        {(ticket.implementation_branch || ticket.review_commit || ticket.review_feedback) && (
-          <dl className="review-meta">
-            {ticket.implementation_branch && (
-              <>
-                <dt>Implementation branch</dt>
-                <dd>{ticket.implementation_branch}</dd>
-              </>
-            )}
-            {ticket.review_commit && (
-              <>
-                <dt>Review commit</dt>
-                <dd title={ticket.review_commit}>
-                  {ticket.review_commit.slice(0, 12)} → {ticket.review_target_branch}
-                </dd>
-              </>
-            )}
-            <dt>Reviewer</dt>
-            <dd>{reviewer?.name ?? "Unclaimed"}</dd>
-            {ticket.review_feedback && (
-              <>
-                <dt>Feedback</dt>
-                <dd>{ticket.review_feedback}</dd>
-              </>
-            )}
-          </dl>
-        )}
-        <label>
-          Title
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            maxLength={200}
-            required
-          />
-        </label>
-        <label>
-          Description
-          <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            rows={4}
-          />
-        </label>
-        <label>
-          Blocker ticket IDs
-          <input
-            value={blockerIds}
-            onChange={(event) => setBlockerIds(event.target.value)}
-            placeholder="1, 2"
-          />
-        </label>
-        <label>
-          Status
-          <select
-            value={state}
-            onChange={(event) => setState(event.target.value as TicketState)}
-            disabled={ticket.state === "cancelled"}
-          >
-            {columns
-              .filter(
-                (column) =>
-                  column.state !== "cancelled" || ticket.state === "cancelled",
-              )
-              .map((column) => (
-                <option value={column.state} key={column.state}>
-                  {column.label}
-                </option>
-              ))}
-          </select>
-        </label>
-        <label>
-          Active assignee
-          <select
-            value={assignee}
-            onChange={(event) => setAssignee(event.target.value)}
-          >
-            <option value="">Unassigned</option>
-            {agents.map((agent) => (
-              <option value={agent.id} key={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Reservation
-          <select
-            value={reservation}
-            onChange={(event) => setReservation(event.target.value)}
-            disabled={ticket.state !== "todo"}
-          >
-            <option value="">Not reserved</option>
-            {agents.map((agent) => (
-              <option value={agent.id} key={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={reserve}
-          disabled={
-            ticket.state !== "todo" ||
-            !reservation ||
-            reservation === (ticket.reserved_for_agent_id?.toString() ?? "")
-          }
-        >
-          {ticket.reserved_for_agent_id &&
-          reservation !== ticket.reserved_for_agent_id.toString()
-            ? "Override reservation"
-            : "Reserve"}
-        </button>
-        <button type="submit">Save</button>
-        {(ticket.state === "todo" || ticket.state === "in_progress") && (
-          <button type="button" onClick={cancel}>
-            Cancel ticket
-          </button>
-        )}
-      </form>
-    </details>
+        </span>
+        <span>{owner}</span>
+      </span>
+      {ticket.unresolved_blockers.length > 0 && (
+        <span className="ticket-card-blocked">
+          Blocked by{" "}
+          {ticket.unresolved_blockers
+            .map((blocker) => `#${blocker.id}`)
+            .join(", ")}
+        </span>
+      )}
+      {ticket.review_feedback && (
+        <span className="ticket-card-review">Changes requested</span>
+      )}
+    </button>
   );
-}
-
-function parseBlockerIds(value: string): number[] {
-  if (!value.trim()) return [];
-  const ids = value.split(",").map((part) => Number(part.trim()));
-  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
-    throw new Error("Blocker ticket IDs must be positive integers separated by commas");
-  }
-  return ids;
 }
