@@ -13,7 +13,9 @@ import { MessageContent } from "./MessageContent";
 interface Props {
   agents: Agent[];
   channels: Channel[];
+  selectedChannelName?: string;
   refresh: number;
+  onSelectChannel?: (name: string) => void;
   onSelectAgent: (id: number) => void;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
@@ -22,12 +24,14 @@ interface Props {
 export function MessageBoard({
   agents,
   channels,
+  selectedChannelName,
   refresh,
+  onSelectChannel,
   onSelectAgent,
   onChanged,
   onError,
 }: Props) {
-  const [channel, setChannel] = useState("general");
+  const [channel, setChannel] = useState(selectedChannelName ?? "general");
   const [messages, setMessages] = useState<BoardMessage[]>([]);
   const [body, setBody] = useState("");
   const [creatingChannel, setCreatingChannel] = useState(false);
@@ -37,6 +41,9 @@ export function MessageBoard({
   const validDescription =
     [...newDescription].length <= channelDescriptionMaxLength;
   const selectedChannel = channels.find((item) => item.name === channel);
+  useEffect(() => {
+    if (selectedChannelName) setChannel(selectedChannelName);
+  }, [selectedChannelName]);
   useEffect(() => {
     void api.messages(channel).then(setMessages).catch(onError);
   }, [channel, refresh, onError]);
@@ -56,6 +63,7 @@ export function MessageBoard({
     try {
       const created = await api.createChannel(newChannel, newDescription);
       setChannel(created.name);
+      onSelectChannel?.(created.name);
       setMessages([]);
       setCreatingChannel(false);
       setNewChannel("");
@@ -67,6 +75,7 @@ export function MessageBoard({
   }
   function selectChannel(name: string) {
     setChannel(name);
+    onSelectChannel?.(name);
     setCreatingChannel(false);
     setNewChannel("");
     setNewDescription("");
@@ -145,6 +154,7 @@ export function MessageBoard({
           <button
             className={channel === item.name ? "selected" : "ghost"}
             key={item.name}
+            aria-current={channel === item.name ? "page" : undefined}
             onClick={() => selectChannel(item.name)}
           >
             #{item.name}

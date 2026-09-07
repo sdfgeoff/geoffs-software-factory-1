@@ -198,6 +198,7 @@ export function AgentWorkspace({
                 : "ghost agent-button"
             }
             key={agent.id}
+            aria-current={selected?.id === agent.id ? "page" : undefined}
             onClick={() => onSelectAgent(agent.id)}
           >
             <span>{agent.name}</span>

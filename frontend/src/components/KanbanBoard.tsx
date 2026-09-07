@@ -14,25 +14,51 @@ interface Props {
   agents: Agent[];
   projects?: Project[];
   currentProjectId?: number | null;
+  filterProjectId?: number | null;
+  selectedTicketId?: number | null;
+  onFilterProject?: (projectId: number | null) => void;
+  onSelectTicket?: (ticketId: number | null) => void;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
 }
 
-export function KanbanBoard({ tickets, agents, projects = [], currentProjectId = null, onChanged, onError }: Props) {
+export function KanbanBoard({
+  tickets,
+  agents,
+  projects = [],
+  currentProjectId = null,
+  filterProjectId: routedProjectId,
+  selectedTicketId = null,
+  onFilterProject,
+  onSelectTicket,
+  onChanged,
+  onError,
+}: Props) {
   const [title, setTitle] = useState("");
   const [projectId, setProjectId] = useState(currentProjectId?.toString() ?? "");
-  const [filterProjectId, setFilterProjectId] = useState("all");
+  const [filterProjectId, setFilterProjectId] = useState(
+    routedProjectId?.toString() ?? "all",
+  );
   const [showCancelled, setShowCancelled] = useState(false);
   useEffect(() => {
     if (!projectId && currentProjectId) setProjectId(currentProjectId.toString());
   }, [currentProjectId, projectId]);
+  useEffect(() => {
+    if (routedProjectId !== undefined) {
+      setFilterProjectId(routedProjectId?.toString() ?? "all");
+    }
+  }, [routedProjectId]);
+  const selectedTicket = tickets.find(
+    (ticket) => ticket.id === selectedTicketId,
+  );
+  const showingCancelled = showCancelled || selectedTicket?.state === "cancelled";
   const visibleTickets = tickets.filter(
     (ticket) =>
-      (showCancelled || ticket.state !== "cancelled") &&
+      (showingCancelled || ticket.state !== "cancelled") &&
       (filterProjectId === "all" ||
         ticket.project_id === Number(filterProjectId)),
   );
-  const visibleColumns = showCancelled
+  const visibleColumns = showingCancelled
     ? columns
     : columns.filter((column) => column.state !== "cancelled");
   async function create(event: FormEvent) {
@@ -70,7 +96,15 @@ export function KanbanBoard({ tickets, agents, projects = [], currentProjectId =
       </form>
       <label>
         Filter projects
-        <select value={filterProjectId} onChange={(event) => setFilterProjectId(event.target.value)}>
+        <select
+          value={filterProjectId}
+          onChange={(event) => {
+            setFilterProjectId(event.target.value);
+            onFilterProject?.(
+              event.target.value === "all" ? null : Number(event.target.value),
+            );
+          }}
+        >
           <option value="all">All projects</option>
           {projects.map((project) => (
             <option key={project.id} value={project.id}>{project.name}</option>
@@ -85,7 +119,7 @@ export function KanbanBoard({ tickets, agents, projects = [], currentProjectId =
         />
         Show cancelled tickets
       </label>
-      <div className={`kanban${showCancelled ? " kanban-with-cancelled" : ""}`}>
+      <div className={`kanban${showingCancelled ? " kanban-with-cancelled" : ""}`}>
         {visibleColumns.map((column) => (
           <section
             className={`column column-${column.state}`}
@@ -109,6 +143,8 @@ export function KanbanBoard({ tickets, agents, projects = [], currentProjectId =
                   ticket={ticket}
                   agents={agents}
                   project={projects.find((project) => project.id === ticket.project_id)}
+                  selected={selectedTicketId === ticket.id}
+                  onSelect={onSelectTicket}
                   onChanged={onChanged}
                   onError={onError}
                 />
@@ -124,12 +160,16 @@ function TicketCard({
   ticket,
   agents,
   project,
+  selected,
+  onSelect,
   onChanged,
   onError,
 }: {
   ticket: Ticket;
   agents: Agent[];
   project?: Project;
+  selected: boolean;
+  onSelect?: (ticketId: number | null) => void;
   onChanged: () => Promise<void>;
   onError: (error: unknown) => void;
 }) {
@@ -196,8 +236,18 @@ function TicketCard({
   );
   const assignedTo = agents.find((agent) => agent.id === ticket.assignee_id);
   return (
-    <details className="ticket-card">
-      <summary>
+    <details className="ticket-card" open={onSelect ? selected : undefined}>
+      <summary
+        aria-current={selected ? "page" : undefined}
+        onClick={
+          onSelect
+            ? (event) => {
+                event.preventDefault();
+                onSelect(selected ? null : ticket.id);
+              }
+            : undefined
+        }
+      >
         <span>#{ticket.id}</span>
         {ticket.title}
         <small className="project-badge">

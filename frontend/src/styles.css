@@ -147,11 +147,23 @@ nav {
   gap: 0.25rem;
   padding: 1rem 0;
 }
-nav button {
+nav a {
+  border-radius: 0.45rem;
+  padding: 0.65rem 0.9rem;
+  color: #4b5563;
+  font-weight: 700;
+  text-decoration: none;
   text-transform: capitalize;
 }
-nav button.active {
+nav a.active {
   background: #17211e;
+  color: white;
+}
+.route-fallback {
+  padding: 1.25rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.75rem;
+  background: #fffefa;
 }
 .error {
   display: flex;
