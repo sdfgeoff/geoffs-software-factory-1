@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",
+    "check:protocol": "node ../scripts/generate-protocol-types.mjs --check",
     "dev": "vite",
+    "generate:protocol": "node ../scripts/generate-protocol-types.mjs",
     "lint": "tsc -b --pretty false",
     "test": "vitest run"
   },

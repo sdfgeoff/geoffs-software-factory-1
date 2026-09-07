@@ -1,81 +1,161 @@
-// Canonical TypeScript view of the Rust wire contract in src/lib.rs.
-export type TicketState = "todo" | "in_progress" | "review" | "done" | "cancelled";
-export type AgentState = "paused" | "idle" | "running" | "awaiting_approval" | "error";
-export type ReminderState = "scheduled" | "enqueued" | "cancelled";
-export type WakeDeliveryPolicy = "idle_only" | "immediate";
-export type WakeEventState = "pending" | "delivering" | "delivered";
+// Generated from crates/protocol/src/lib.rs. Do not edit.
+export interface BoardSettings {
+  merge_notification_channel: string | null;
+}
 
-export interface BoardSettings { merge_notification_channel: string | null }
+export interface SetBoardSettingsRequest {
+  merge_notification_channel?: string | null;
+}
+
 export interface Project {
-  id: number; name: string; path: string; default_branch: string;
-  archived_at: number | null; updated_at: number;
+  id: number;
+  name: string;
+  path: string;
+  default_branch: string;
+  archived_at: number | null;
+  updated_at: number;
 }
-export interface TicketBlocker { id: number; title: string }
+
+export type TicketState = "todo" | "in_progress" | "review" | "done" | "cancelled";
+
+export interface TicketBlocker {
+  id: number;
+  title: string;
+}
+
 export interface Ticket {
-  id: number; project_id: number; title: string; description: string; state: TicketState;
-  created_by_agent_id: number | null; reserved_for_agent_id: number | null;
-  assignee_id: number | null; implementation_branch: string | null;
-  review_commit: string | null; review_target_branch: string | null;
-  review_project_id: number | null; review_project_path: string | null;
-  reviewer_id: number | null; review_feedback: string | null;
-  blocker_ids: number[]; unresolved_blockers: TicketBlocker[]; revision: number;
-  created_at: number; updated_at: number;
+  id: number;
+  project_id: number;
+  title: string;
+  description: string;
+  state: TicketState;
+  created_by_agent_id: number | null;
+  reserved_for_agent_id: number | null;
+  assignee_id: number | null;
+  implementation_branch: string | null;
+  review_commit: string | null;
+  review_target_branch: string | null;
+  review_project_id: number | null;
+  review_project_path: string | null;
+  reviewer_id: number | null;
+  review_feedback: string | null;
+  blocker_ids: number[];
+  unresolved_blockers: TicketBlocker[];
+  revision: number;
+  created_at: number;
+  updated_at: number;
 }
+
 export interface TicketActivity {
-  id: number; ticket_id: number; action: string; actor_agent_id: number | null;
-  previous_reserved_for_agent_id: number | null; reserved_for_agent_id: number | null;
+  id: number;
+  ticket_id: number;
+  action: string;
+  actor_agent_id: number | null;
+  previous_reserved_for_agent_id: number | null;
+  reserved_for_agent_id: number | null;
   created_at: number;
 }
+
 export interface ProjectTransition {
-  agent_id: number; ticket_id: number; previous_project_id: number | null;
-  project_id: number; project_name: string; worktree_path: string; message: string;
-}
-export interface TicketClaimResponse extends Ticket { project_transition: ProjectTransition | null }
-export interface Channel { name: string; description: string; most_recent_message_at: number | null }
-export interface Message {
-  id: number; channel_name: string; agent_id: number | null; author: string;
-  body: string; created_at: number;
-}
-export type BoardMessage = Message;
-export interface Agent {
-  id: number; name: string; state: AgentState; thread_id: string | null;
-  home_path: string; active_project_id: number | null; active_turn_id: string | null;
-  last_error: string | null; wake_on_pending_work: boolean; wake_on_pending_review: boolean;
-  idle_heartbeat_minutes: number | null; idle_since: number | null;
-  created_at: number; updated_at: number;
-}
-export interface AgentProjectWorktree {
-  agent_id: number; project_id: number; path: string; created_at: number; updated_at: number;
-}
-export interface AgentMessage {
-  id: number; agent_id: number; role: "user" | "agent" | "system";
-  body: string; created_at: number;
-}
-export interface Reminder {
-  id: number; agent_id: number; message: string; deliver_at: number; state: ReminderState;
-  wake_event_id: number | null; enqueued_at: number | null; cancelled_at: number | null;
-  created_at: number; updated_at: number;
+  agent_id: number;
+  ticket_id: number;
+  previous_project_id: number | null;
+  project_id: number;
+  project_name: string;
+  worktree_path: string;
+  message: string;
 }
 
-export interface NotificationWakePayload { message: string }
-export interface AgentMessageWakePayload { message: string; message_id: number }
-export interface ChannelMessageWakePayload {
-  message: string; channel: string; message_id: number; author: string; body: string;
-  mentioned: boolean; subscribed: boolean;
+export type TicketClaimResponse = Ticket & {
+  project_transition: ProjectTransition | null;
+};
+
+export interface Channel {
+  name: string;
+  description: string;
+  most_recent_message_at: number | null;
 }
-export interface IdleHeartbeatWakePayload { message: string; minutes: number; occurred_at: string }
-export interface ReminderWakePayload { message: string; requested_delivery_at: number }
-export interface TicketWakeTicket {
-  project_id?: number; title?: string; state?: TicketState; assignee_id?: number;
-  created_by_agent_id?: number; reserved_for_agent_id?: number;
-  implementation_branch?: string; review_commit?: string; review_target_branch?: string;
-  review_project_id?: number; review_project_path?: string; reviewer_id?: number;
-  blocker_ids?: number[]; unresolved_blockers?: TicketBlocker[];
+
+export interface Message {
+  id: number;
+  channel_name: string;
+  agent_id: number | null;
+  author: string;
+  body: string;
+  created_at: number;
 }
-export interface TicketWakePayload {
-  message: string; ticket_id: number; revision?: number; changed_fields?: string[];
-  ticket: TicketWakeTicket;
+
+export type BoardMessage = Message;
+
+export type AgentState = "paused" | "idle" | "running" | "awaiting_approval" | "error";
+
+export interface Agent {
+  id: number;
+  name: string;
+  state: AgentState;
+  thread_id: string | null;
+  home_path: string;
+  active_project_id: number | null;
+  active_turn_id: string | null;
+  last_error: string | null;
+  wake_on_pending_work: boolean;
+  wake_on_pending_review: boolean;
+  idle_heartbeat_minutes: number | null;
+  idle_since: number | null;
+  created_at: number;
+  updated_at: number;
 }
+
+export interface AgentProjectWorktree {
+  agent_id: number;
+  project_id: number;
+  path: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export type AgentMessageRole = "user" | "agent" | "system";
+
+export interface AgentMessage {
+  id: number;
+  agent_id: number;
+  role: AgentMessageRole;
+  body: string;
+  created_at: number;
+}
+
+export type ReminderState = "scheduled" | "enqueued" | "cancelled";
+
+export interface Reminder {
+  id: number;
+  agent_id: number;
+  message: string;
+  deliver_at: number;
+  state: ReminderState;
+  wake_event_id: number | null;
+  enqueued_at: number | null;
+  cancelled_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type WakeDeliveryPolicy = "idle_only" | "immediate";
+
+export type WakeEventState = "pending" | "delivering" | "delivered";
+
+export type WakeEvent = WakeEventData & {
+  id: number;
+  agent_id: number;
+  deduplication_key: string | null;
+  delivery_policy: WakeDeliveryPolicy;
+  delivery_state: WakeEventState;
+  delivery_attempts: number;
+  last_attempt_at: number | null;
+  delivered_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
 export type WakeEventData =
   | { kind: "notification"; payload: NotificationWakePayload }
   | { kind: "message"; payload: AgentMessageWakePayload }
@@ -88,17 +168,67 @@ export type WakeEventData =
   | { kind: "ticket.review_requested"; payload: TicketWakePayload }
   | { kind: "ticket.review_claimed"; payload: TicketWakePayload }
   | { kind: "ticket.changes_requested"; payload: TicketWakePayload };
-export type WakeEvent = WakeEventData & {
-  id: number; agent_id: number; deduplication_key: string | null;
-  delivery_policy: WakeDeliveryPolicy; delivery_state: WakeEventState;
-  delivery_attempts: number; last_attempt_at: number | null; delivered_at: number | null;
-  created_at: number; updated_at: number;
-};
+
+export interface NotificationWakePayload {
+  message: string;
+}
+
+export interface AgentMessageWakePayload {
+  message: string;
+  message_id: number;
+}
+
+export interface ChannelMessageWakePayload {
+  message: string;
+  channel: string;
+  message_id: number;
+  author: string;
+  body: string;
+  mentioned: boolean;
+  subscribed: boolean;
+}
+
+export interface IdleHeartbeatWakePayload {
+  message: string;
+  minutes: number;
+  occurred_at: string;
+}
+
+export interface ReminderWakePayload {
+  message: string;
+  requested_delivery_at: number;
+}
+
+export interface TicketWakePayload {
+  message: string;
+  ticket_id: number;
+  revision?: number | null;
+  changed_fields?: string[];
+  ticket: TicketWakeTicket;
+}
+
+export interface TicketWakeTicket {
+  project_id?: number | null;
+  title?: string | null;
+  state?: TicketState | null;
+  assignee_id?: number | null;
+  created_by_agent_id?: number | null;
+  reserved_for_agent_id?: number | null;
+  implementation_branch?: string | null;
+  review_commit?: string | null;
+  review_target_branch?: string | null;
+  review_project_id?: number | null;
+  review_project_path?: string | null;
+  reviewer_id?: number | null;
+  blocker_ids?: number[];
+  unresolved_blockers?: TicketBlocker[];
+}
 
 export type AgentEvent =
   | { kind: "refresh" }
-  | { kind: "agent_created" | "agent_updated"; agent_id: number; data: Agent }
-  | { kind: "agent_message_delta"; agent_id: number; data: { delta: string } }
+  | { kind: "agent_created"; agent_id: number; data: Agent }
+  | { kind: "agent_updated"; agent_id: number; data: Agent }
+  | { kind: "agent_message_delta"; agent_id: number; data: AgentMessageDelta }
   | { kind: "message"; agent_id: number; data: AgentMessage }
   | { kind: "ticket_updated"; agent_id: number; data: Ticket }
   | { kind: "settings_updated"; agent_id: number; data: BoardSettings }
@@ -108,38 +238,112 @@ export type AgentEvent =
   | { kind: "approval_declined"; agent_id: number }
   | { kind: "codex_event"; agent_id: number; data: unknown };
 
-export interface SetBoardSettingsRequest { merge_notification_channel: string | null }
-export interface SetProjectRequest { path: string }
-export interface RegisterProjectRequest { name: string; path: string; default_branch: string }
+export interface AgentMessageDelta {
+  delta: string;
+}
+
+export interface SetProjectRequest {
+  path: string;
+}
+
+export interface RegisterProjectRequest {
+  name: string;
+  path: string;
+  default_branch: string;
+}
+
 export interface CreateTicketRequest {
-  project_id?: number | null; title: string; description?: string; blocker_ids?: number[];
+  project_id?: number | null;
+  title: string;
+  description?: string;
+  blocker_ids?: number[];
 }
+
 export interface UpdateTicketRequest {
-  title?: string | null; description?: string | null; state?: TicketState | null;
-  assignee_id?: number | null; reserved_for_agent_id?: null;
-  blocker_ids?: number[] | null; expected_revision?: number | null;
+  title?: string | null;
+  description?: string | null;
+  state?: TicketState | null;
+  assignee_id?: number | null;
+  reserved_for_agent_id?: number | null;
+  blocker_ids?: number[] | null;
+  expected_revision?: number | null;
 }
+
 export interface ReserveTicketsRequest {
-  ticket_ids: number[]; agent_id?: number | null; administrative_override?: boolean;
+  ticket_ids: number[];
+  agent_id?: number | null;
+  administrative_override?: boolean;
 }
-export interface ClaimTicketRequest { agent_id?: number | null; expected_revision?: number | null }
-export interface MessageRangeQuery { start_time?: number | null; end_time?: number | null }
-export interface PostMessageRequest { author: string; body: string }
-export interface CreateChannelRequest { name: string; description?: string }
-export interface CreateAgentRequest { name: string }
-export interface RenameAgentRequest { name: string }
-export interface SendAgentMessageRequest { message: string }
-export type CreateWakeEventRequest = WakeEventData & { deduplication_key?: string | null };
+
+export interface ClaimTicketRequest {
+  agent_id?: number | null;
+  expected_revision?: number | null;
+}
+
+export interface MessageRangeQuery {
+  start_time?: number | null;
+  end_time?: number | null;
+}
+
+export interface PostMessageRequest {
+  author: string;
+  body: string;
+}
+
+export interface CreateChannelRequest {
+  name: string;
+  description?: string;
+}
+
+export interface CreateAgentRequest {
+  name: string;
+}
+
+export interface RenameAgentRequest {
+  name: string;
+}
+
+export interface SendAgentMessageRequest {
+  message: string;
+}
+
+export type CreateWakeEventRequest = WakeEventData & {
+  deduplication_key?: string | null;
+};
+
 export interface ScheduleSelfReminderRequest {
-  message: string; deliver_at?: string | null; delay_seconds?: number | null;
+  message: string;
+  deliver_at?: string | null;
+  delay_seconds?: number | null;
 }
-export interface SetAgentScopesRequest { scopes: string[] }
+
+export interface SetAgentScopesRequest {
+  scopes: string[];
+}
+
 export interface SetAgentWakeSettingsRequest {
-  wake_on_pending_work: boolean; wake_on_pending_review: boolean;
-  idle_heartbeat_minutes: number | null;
+  wake_on_pending_work: boolean;
+  wake_on_pending_review: boolean;
+  idle_heartbeat_minutes?: number | null;
 }
-export interface SetAgentChannelSubscriptionsRequest { channels: string[] }
-export interface SetAgentProjectSubscriptionsRequest { project_ids: number[] }
-export interface ReviewRevisionRequest { expected_revision?: number | null }
-export interface RequestChangesRequest extends ReviewRevisionRequest { feedback: string }
-export interface ErrorResponse { error: string }
+
+export interface SetAgentChannelSubscriptionsRequest {
+  channels: string[];
+}
+
+export interface SetAgentProjectSubscriptionsRequest {
+  project_ids: number[];
+}
+
+export interface ReviewRevisionRequest {
+  expected_revision?: number | null;
+}
+
+export interface RequestChangesRequest {
+  feedback: string;
+  expected_revision?: number | null;
+}
+
+export interface ErrorResponse {
+  error: string;
+}

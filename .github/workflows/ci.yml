@@ -16,5 +16,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --prefix frontend
       - name: Check shared TypeScript protocol contract
-        run: npm run lint --prefix frontend
+        run: |
+          npm run check:protocol --prefix frontend
+          node --test scripts/generate-protocol-types.test.mjs
+          npm run lint --prefix frontend
       - run: cargo build --locked
