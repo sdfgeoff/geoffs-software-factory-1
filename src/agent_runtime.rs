@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
 };
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     process::{Child, Command},
@@ -23,8 +22,7 @@ mod rpc;
 
 use rpc::RpcPeer;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
     Refresh,
     AgentCreated {
@@ -72,9 +70,55 @@ pub enum AgentEvent {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentMessageDelta {
     pub delta: String,
+}
+
+impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
+    type Error = String;
+
+    fn try_from(value: AgentEvent) -> Result<Self, Self::Error> {
+        Ok(match value {
+            AgentEvent::Refresh => Self::Refresh,
+            AgentEvent::AgentCreated { agent_id, data } => Self::AgentCreated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::AgentUpdated { agent_id, data } => Self::AgentUpdated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::AgentMessageDelta { agent_id, data } => Self::AgentMessageDelta {
+                agent_id,
+                data: multi_agent_board_protocol::AgentMessageDelta { delta: data.delta },
+            },
+            AgentEvent::Message { agent_id, data } => Self::Message {
+                agent_id,
+                data: data.try_into()?,
+            },
+            AgentEvent::TicketUpdated { agent_id, data } => Self::TicketUpdated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::SettingsUpdated { agent_id, data } => Self::SettingsUpdated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::BoardMessage { agent_id, data } => Self::BoardMessage {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::ChannelSubscriptions { agent_id, data } => {
+                Self::ChannelSubscriptions { agent_id, data }
+            }
+            AgentEvent::ProjectSubscriptions { agent_id, data } => {
+                Self::ProjectSubscriptions { agent_id, data }
+            }
+            AgentEvent::ApprovalDeclined { agent_id } => Self::ApprovalDeclined { agent_id },
+            AgentEvent::CodexEvent { agent_id, data } => Self::CodexEvent { agent_id, data },
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -610,12 +654,16 @@ mod tests {
             agent_id: agent.id,
             data: agent,
         };
+        let event = multi_agent_board_protocol::AgentEvent::try_from(event).unwrap();
         let value = serde_json::to_value(&event).unwrap();
 
         assert_eq!(value["kind"], "agent_updated");
         assert_eq!(value["agent_id"], 1);
         assert_eq!(value["data"]["name"], "worker");
-        assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+        assert_eq!(
+            serde_json::from_value::<multi_agent_board_protocol::AgentEvent>(value).unwrap(),
+            event
+        );
     }
 
     #[tokio::test]

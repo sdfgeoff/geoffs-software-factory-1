@@ -18,7 +18,7 @@ use multi_agent_board_protocol::{
 
 use crate::{
     agent_runtime::AgentManager,
-    domain::{TicketClaimResponse, WakeDeliveryPolicy, WakeEvent, WakeEventData},
+    domain::{TicketClaimResponse, WakeDeliveryPolicy},
     error::AppError,
     store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges},
 };
@@ -436,26 +436,35 @@ async fn claim_ticket(
 async fn list_wake_events(
     State(store): State<Store>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<WakeEvent>>, AppError> {
-    Ok(Json(store.wake_events(id).await?))
+) -> Result<Json<Vec<protocol::WakeEvent>>, AppError> {
+    Ok(Json(
+        store
+            .wake_events(id)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 async fn create_wake_event(
     State(store): State<Store>,
     Path(id): Path<i64>,
-    Json(input): Json<CreateWakeEventRequest>,
-) -> Result<Json<WakeEvent>, AppError> {
+    input: Result<Json<CreateWakeEventRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<protocol::WakeEvent>, AppError> {
+    let Json(input) = input.map_err(|error| {
+        AppError::bad_request(format!("invalid wake event kind or payload: {error}"))
+    })?;
     Ok(Json(
         store
             .enqueue_wake_event(
                 id,
-                WakeEventData::from_parts(&input.kind, input.payload).map_err(|error| {
-                    AppError::bad_request(format!("invalid wake event kind or payload: {error}"))
-                })?,
+                input.event.into(),
                 input.deduplication_key.as_deref(),
                 WakeDeliveryPolicy::Immediate,
             )
-            .await?,
+            .await?
+            .into(),
     ))
 }
 

@@ -13,10 +13,7 @@ use multi_agent_board_protocol::{
 };
 use std::{convert::Infallible, time::Duration};
 
-use crate::{
-    agent_runtime::{AgentEvent, AgentManager},
-    error::AppError,
-};
+use crate::{agent_runtime::AgentManager, error::AppError};
 
 pub fn router(manager: AgentManager) -> Router {
     Router::new()
@@ -279,13 +276,17 @@ async fn events(
         loop {
             tokio::select! {
                 event = receiver.recv() => match event {
-                    Ok(event) => yield Ok(Event::default().json_data(event).unwrap()),
+                    Ok(event) => {
+                        let event = protocol::AgentEvent::try_from(event)
+                            .unwrap_or(protocol::AgentEvent::Refresh);
+                        yield Ok(Event::default().json_data(event).unwrap());
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        yield Ok(Event::default().json_data(AgentEvent::Refresh).unwrap());
+                        yield Ok(Event::default().json_data(protocol::AgentEvent::Refresh).unwrap());
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
-                _ = refresh.tick() => yield Ok(Event::default().json_data(AgentEvent::Refresh).unwrap()),
+                _ = refresh.tick() => yield Ok(Event::default().json_data(protocol::AgentEvent::Refresh).unwrap()),
             }
         }
     };

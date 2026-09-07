@@ -483,6 +483,15 @@ impl From<TicketBlocker> for wire::TicketBlocker {
     }
 }
 
+impl From<wire::TicketBlocker> for TicketBlocker {
+    fn from(value: wire::TicketBlocker) -> Self {
+        Self {
+            id: value.id,
+            title: value.title,
+        }
+    }
+}
+
 impl From<Ticket> for wire::Ticket {
     fn from(value: Ticket) -> Self {
         Self {
@@ -654,6 +663,241 @@ impl From<Reminder> for wire::Reminder {
             wake_event_id: value.wake_event_id,
             enqueued_at: value.enqueued_at,
             cancelled_at: value.cancelled_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<WakeDeliveryPolicy> for wire::WakeDeliveryPolicy {
+    fn from(value: WakeDeliveryPolicy) -> Self {
+        match value {
+            WakeDeliveryPolicy::IdleOnly => Self::IdleOnly,
+            WakeDeliveryPolicy::Immediate => Self::Immediate,
+        }
+    }
+}
+
+impl From<WakeEventState> for wire::WakeEventState {
+    fn from(value: WakeEventState) -> Self {
+        match value {
+            WakeEventState::Pending => Self::Pending,
+            WakeEventState::Delivering => Self::Delivering,
+            WakeEventState::Delivered => Self::Delivered,
+        }
+    }
+}
+
+impl From<NotificationWakePayload> for wire::NotificationWakePayload {
+    fn from(value: NotificationWakePayload) -> Self {
+        Self {
+            message: value.message,
+        }
+    }
+}
+
+impl From<AgentMessageWakePayload> for wire::AgentMessageWakePayload {
+    fn from(value: AgentMessageWakePayload) -> Self {
+        Self {
+            message: value.message,
+            message_id: value.message_id,
+        }
+    }
+}
+
+impl From<ChannelMessageWakePayload> for wire::ChannelMessageWakePayload {
+    fn from(value: ChannelMessageWakePayload) -> Self {
+        Self {
+            message: value.message,
+            channel: value.channel,
+            message_id: value.message_id,
+            author: value.author,
+            body: value.body,
+            mentioned: value.mentioned,
+            subscribed: value.subscribed,
+        }
+    }
+}
+
+impl From<IdleHeartbeatWakePayload> for wire::IdleHeartbeatWakePayload {
+    fn from(value: IdleHeartbeatWakePayload) -> Self {
+        Self {
+            message: value.message,
+            minutes: value.minutes,
+            occurred_at: value.occurred_at,
+        }
+    }
+}
+
+impl From<ReminderWakePayload> for wire::ReminderWakePayload {
+    fn from(value: ReminderWakePayload) -> Self {
+        Self {
+            message: value.message,
+            requested_delivery_at: value.requested_delivery_at,
+        }
+    }
+}
+
+impl From<TicketWakeTicket> for wire::TicketWakeTicket {
+    fn from(value: TicketWakeTicket) -> Self {
+        Self {
+            project_id: value.project_id,
+            title: value.title,
+            state: value.state.map(Into::into),
+            assignee_id: value.assignee_id,
+            created_by_agent_id: value.created_by_agent_id,
+            reserved_for_agent_id: value.reserved_for_agent_id,
+            implementation_branch: value.implementation_branch,
+            review_commit: value.review_commit,
+            review_target_branch: value.review_target_branch,
+            review_project_id: value.review_project_id,
+            review_project_path: value.review_project_path,
+            reviewer_id: value.reviewer_id,
+            blocker_ids: value.blocker_ids,
+            unresolved_blockers: value
+                .unresolved_blockers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<TicketWakePayload> for wire::TicketWakePayload {
+    fn from(value: TicketWakePayload) -> Self {
+        Self {
+            message: value.message,
+            ticket_id: value.ticket_id,
+            revision: value.revision,
+            changed_fields: value.changed_fields,
+            ticket: value.ticket.into(),
+        }
+    }
+}
+
+impl From<WakeEventData> for wire::WakeEventData {
+    fn from(value: WakeEventData) -> Self {
+        match value {
+            WakeEventData::Notification(payload) => Self::Notification(payload.into()),
+            WakeEventData::Message(payload) => Self::Message(payload.into()),
+            WakeEventData::ChannelMessage(payload) => Self::ChannelMessage(payload.into()),
+            WakeEventData::IdleHeartbeat(payload) => Self::IdleHeartbeat(payload.into()),
+            WakeEventData::Reminder(payload) => Self::Reminder(payload.into()),
+            WakeEventData::TicketAvailable(payload) => Self::TicketAvailable(payload.into()),
+            WakeEventData::TicketAssigned(payload) => Self::TicketAssigned(payload.into()),
+            WakeEventData::TicketReserved(payload) => Self::TicketReserved(payload.into()),
+            WakeEventData::TicketReviewRequested(payload) => {
+                Self::TicketReviewRequested(payload.into())
+            }
+            WakeEventData::TicketReviewClaimed(payload) => {
+                Self::TicketReviewClaimed(payload.into())
+            }
+            WakeEventData::TicketChangesRequested(payload) => {
+                Self::TicketChangesRequested(payload.into())
+            }
+        }
+    }
+}
+
+impl From<wire::WakeEventData> for WakeEventData {
+    fn from(value: wire::WakeEventData) -> Self {
+        match value {
+            wire::WakeEventData::Notification(payload) => {
+                Self::Notification(NotificationWakePayload {
+                    message: payload.message,
+                })
+            }
+            wire::WakeEventData::Message(payload) => Self::Message(AgentMessageWakePayload {
+                message: payload.message,
+                message_id: payload.message_id,
+            }),
+            wire::WakeEventData::ChannelMessage(payload) => {
+                Self::ChannelMessage(ChannelMessageWakePayload {
+                    message: payload.message,
+                    channel: payload.channel,
+                    message_id: payload.message_id,
+                    author: payload.author,
+                    body: payload.body,
+                    mentioned: payload.mentioned,
+                    subscribed: payload.subscribed,
+                })
+            }
+            wire::WakeEventData::IdleHeartbeat(payload) => {
+                Self::IdleHeartbeat(IdleHeartbeatWakePayload {
+                    message: payload.message,
+                    minutes: payload.minutes,
+                    occurred_at: payload.occurred_at,
+                })
+            }
+            wire::WakeEventData::Reminder(payload) => Self::Reminder(ReminderWakePayload {
+                message: payload.message,
+                requested_delivery_at: payload.requested_delivery_at,
+            }),
+            wire::WakeEventData::TicketAvailable(payload) => Self::TicketAvailable(payload.into()),
+            wire::WakeEventData::TicketAssigned(payload) => Self::TicketAssigned(payload.into()),
+            wire::WakeEventData::TicketReserved(payload) => Self::TicketReserved(payload.into()),
+            wire::WakeEventData::TicketReviewRequested(payload) => {
+                Self::TicketReviewRequested(payload.into())
+            }
+            wire::WakeEventData::TicketReviewClaimed(payload) => {
+                Self::TicketReviewClaimed(payload.into())
+            }
+            wire::WakeEventData::TicketChangesRequested(payload) => {
+                Self::TicketChangesRequested(payload.into())
+            }
+        }
+    }
+}
+
+impl From<wire::TicketWakePayload> for TicketWakePayload {
+    fn from(value: wire::TicketWakePayload) -> Self {
+        Self {
+            message: value.message,
+            ticket_id: value.ticket_id,
+            revision: value.revision,
+            changed_fields: value.changed_fields,
+            ticket: value.ticket.into(),
+        }
+    }
+}
+
+impl From<wire::TicketWakeTicket> for TicketWakeTicket {
+    fn from(value: wire::TicketWakeTicket) -> Self {
+        Self {
+            project_id: value.project_id,
+            title: value.title,
+            state: value.state.map(Into::into),
+            assignee_id: value.assignee_id,
+            created_by_agent_id: value.created_by_agent_id,
+            reserved_for_agent_id: value.reserved_for_agent_id,
+            implementation_branch: value.implementation_branch,
+            review_commit: value.review_commit,
+            review_target_branch: value.review_target_branch,
+            review_project_id: value.review_project_id,
+            review_project_path: value.review_project_path,
+            reviewer_id: value.reviewer_id,
+            blocker_ids: value.blocker_ids,
+            unresolved_blockers: value
+                .unresolved_blockers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<WakeEvent> for wire::WakeEvent {
+    fn from(value: WakeEvent) -> Self {
+        Self {
+            id: value.id,
+            agent_id: value.agent_id,
+            event: value.event.into(),
+            deduplication_key: value.deduplication_key,
+            delivery_policy: value.delivery_policy.into(),
+            delivery_state: value.delivery_state.into(),
+            delivery_attempts: value.delivery_attempts,
+            last_attempt_at: value.last_attempt_at,
+            delivered_at: value.delivered_at,
             created_at: value.created_at,
             updated_at: value.updated_at,
         }

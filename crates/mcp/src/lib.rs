@@ -1,17 +1,18 @@
 use reqwest::Method;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, Channel, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
-    ErrorResponse, Message, MessageRangeQuery, PostBoardMessageRequest, PostMessageRequest,
-    Project, ProjectIdRequest, ReadChannelRequest, ReadChannelResponse, RegisterProjectRequest,
-    Reminder, ReminderIdRequest, RequestChangesRequest, ReserveTicketsRequest,
-    ReviewRevisionRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
-    SetAgentProjectSubscriptionsRequest, SetTicketDetailsRequest, Ticket, TicketActivity,
-    TicketChangesRequest, TicketClaimResponse, TicketIdRequest, TicketRevisionRequest,
-    UpdateTicketRequest,
+    AGENT_ID_HEADER, Agent, AgentMessage, AgentProjectWorktree, BoardSettings, Channel,
+    ClaimTicketRequest, CreateAgentRequest, CreateChannelRequest, CreateTicketRequest,
+    CreateWakeEventRequest, ErrorResponse, Message, MessageRangeQuery, PostMessageRequest, Project,
+    RegisterProjectRequest, Reminder, RenameAgentRequest, RequestChangesRequest,
+    ReserveTicketsRequest, ReviewRevisionRequest, ScheduleSelfReminderRequest,
+    SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
+    SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
+    SetBoardSettingsRequest, SetProjectRequest, Ticket, TicketActivity, TicketClaimResponse,
+    UpdateTicketRequest, WakeEvent,
 };
 
 #[derive(Debug)]
@@ -73,16 +74,16 @@ impl BoardClient {
             .map_err(|error| McpError::internal(format!("board request failed: {error}")))?;
         let status = response.status();
         let body = response
-            .json::<Value>()
+            .bytes()
             .await
             .map_err(|error| McpError::internal(format!("invalid board response: {error}")))?;
         if !status.is_success() {
-            let error = serde_json::from_value::<ErrorResponse>(body)
+            let error = serde_json::from_slice::<ErrorResponse>(&body)
                 .map(|body| body.error)
                 .unwrap_or_else(|_| "board request failed".into());
             return Err(McpError::internal(error));
         }
-        serde_json::from_value(body)
+        serde_json::from_slice(&body)
             .map_err(|error| McpError::internal(format!("invalid board response: {error}")))
     }
 
@@ -92,6 +93,25 @@ impl BoardClient {
 
     pub async fn list_tickets(&self) -> Result<Vec<Ticket>, McpError> {
         self.get("/tickets").await
+    }
+
+    pub async fn settings(&self) -> Result<BoardSettings, McpError> {
+        self.get("/settings").await
+    }
+
+    pub async fn set_settings(
+        &self,
+        request: &SetBoardSettingsRequest,
+    ) -> Result<BoardSettings, McpError> {
+        self.request(Method::PUT, "/settings", Some(request)).await
+    }
+
+    pub async fn project(&self) -> Result<Option<Project>, McpError> {
+        self.get("/project").await
+    }
+
+    pub async fn set_project(&self, request: &SetProjectRequest) -> Result<Project, McpError> {
+        self.request(Method::PUT, "/project", Some(request)).await
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Project>, McpError> {
@@ -369,6 +389,144 @@ impl BoardClient {
         )
         .await
     }
+
+    pub async fn agents(&self) -> Result<Vec<Agent>, McpError> {
+        self.get("/agents").await
+    }
+
+    pub async fn create_agent(&self, request: &CreateAgentRequest) -> Result<Agent, McpError> {
+        self.request(Method::POST, "/agents", Some(request)).await
+    }
+
+    pub async fn rename_agent(
+        &self,
+        agent_id: i64,
+        request: &RenameAgentRequest,
+    ) -> Result<Agent, McpError> {
+        self.request(Method::PATCH, &format!("/agents/{agent_id}"), Some(request))
+            .await
+    }
+
+    pub async fn agent_project_worktrees(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<AgentProjectWorktree>, McpError> {
+        self.get(&format!("/agents/{agent_id}/project-worktrees"))
+            .await
+    }
+
+    pub async fn agent_messages(&self, agent_id: i64) -> Result<Vec<AgentMessage>, McpError> {
+        self.get(&format!("/agents/{agent_id}/messages")).await
+    }
+
+    pub async fn send_agent_message(
+        &self,
+        agent_id: i64,
+        request: &SendAgentMessageRequest,
+    ) -> Result<Agent, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/agents/{agent_id}/messages"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn pause_agent(&self, agent_id: i64) -> Result<Agent, McpError> {
+        self.request::<(), _>(Method::POST, &format!("/agents/{agent_id}/pause"), None)
+            .await
+    }
+
+    pub async fn resume_agent(&self, agent_id: i64) -> Result<Agent, McpError> {
+        self.request::<(), _>(Method::POST, &format!("/agents/{agent_id}/resume"), None)
+            .await
+    }
+
+    pub async fn agent_scopes(&self, agent_id: i64) -> Result<Vec<String>, McpError> {
+        self.get(&format!("/agents/{agent_id}/scopes")).await
+    }
+
+    pub async fn set_agent_scopes(
+        &self,
+        agent_id: i64,
+        request: &SetAgentScopesRequest,
+    ) -> Result<Vec<String>, McpError> {
+        self.request(
+            Method::PUT,
+            &format!("/agents/{agent_id}/scopes"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn set_agent_wake_settings(
+        &self,
+        agent_id: i64,
+        request: &SetAgentWakeSettingsRequest,
+    ) -> Result<Agent, McpError> {
+        self.request(
+            Method::PUT,
+            &format!("/agents/{agent_id}/wake-settings"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn wake_events(&self, agent_id: i64) -> Result<Vec<WakeEvent>, McpError> {
+        self.get(&format!("/agents/{agent_id}/wake-events")).await
+    }
+
+    pub async fn create_wake_event(
+        &self,
+        agent_id: i64,
+        request: &CreateWakeEventRequest,
+    ) -> Result<WakeEvent, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/agents/{agent_id}/wake-events"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn agent_channel_subscriptions(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<String>, McpError> {
+        self.get(&format!("/agents/{agent_id}/channel-subscriptions"))
+            .await
+    }
+
+    pub async fn set_agent_channel_subscriptions(
+        &self,
+        agent_id: i64,
+        request: &SetAgentChannelSubscriptionsRequest,
+    ) -> Result<Vec<String>, McpError> {
+        self.request(
+            Method::PUT,
+            &format!("/agents/{agent_id}/channel-subscriptions"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn agent_project_subscriptions(&self, agent_id: i64) -> Result<Vec<i64>, McpError> {
+        self.get(&format!("/agents/{agent_id}/project-subscriptions"))
+            .await
+    }
+
+    pub async fn set_agent_project_subscriptions(
+        &self,
+        agent_id: i64,
+        request: &SetAgentProjectSubscriptionsRequest,
+    ) -> Result<Vec<i64>, McpError> {
+        self.request(
+            Method::PUT,
+            &format!("/agents/{agent_id}/project-subscriptions"),
+            Some(request),
+        )
+        .await
+    }
 }
 
 pub async fn run<R, W>(
@@ -611,6 +769,61 @@ fn channel_list_schema() -> Value {
 
 fn project_list_schema() -> Value {
     json!({"type":"object","properties":{"project_ids":{"type":"array","items":{"type":"integer"}}},"required":["project_ids"]})
+}
+
+#[derive(Deserialize)]
+struct ProjectIdRequest {
+    project_id: i64,
+}
+
+#[derive(Deserialize)]
+struct TicketIdRequest {
+    ticket_id: i64,
+}
+
+#[derive(Deserialize)]
+struct SetTicketDetailsRequest {
+    ticket_id: i64,
+    #[serde(flatten)]
+    changes: UpdateTicketRequest,
+}
+
+#[derive(Deserialize)]
+struct TicketRevisionRequest {
+    ticket_id: i64,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TicketChangesRequest {
+    ticket_id: i64,
+    feedback: String,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ReadChannelRequest {
+    channel_name: String,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ReadChannelResponse {
+    channel: Channel,
+    messages: Vec<Message>,
+}
+
+#[derive(Deserialize)]
+struct PostBoardMessageRequest {
+    channel_name: String,
+    author: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct ReminderIdRequest {
+    reminder_id: i64,
 }
 
 async fn call_tool(

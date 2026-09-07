@@ -197,6 +197,203 @@ pub struct Reminder {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeDeliveryPolicy {
+    IdleOnly,
+    Immediate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeEventState {
+    Pending,
+    Delivering,
+    Delivered,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WakeEvent {
+    pub id: i64,
+    pub agent_id: i64,
+    #[serde(flatten)]
+    pub event: WakeEventData,
+    pub deduplication_key: Option<String>,
+    pub delivery_policy: WakeDeliveryPolicy,
+    pub delivery_state: WakeEventState,
+    pub delivery_attempts: i64,
+    pub last_attempt_at: Option<i64>,
+    pub delivered_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "payload")]
+pub enum WakeEventData {
+    #[serde(rename = "notification")]
+    Notification(NotificationWakePayload),
+    #[serde(rename = "message")]
+    Message(AgentMessageWakePayload),
+    #[serde(rename = "channel.message")]
+    ChannelMessage(ChannelMessageWakePayload),
+    #[serde(rename = "idle.heartbeat")]
+    IdleHeartbeat(IdleHeartbeatWakePayload),
+    #[serde(rename = "reminder")]
+    Reminder(ReminderWakePayload),
+    #[serde(rename = "ticket.available")]
+    TicketAvailable(TicketWakePayload),
+    #[serde(rename = "ticket.assigned")]
+    TicketAssigned(TicketWakePayload),
+    #[serde(rename = "ticket.reserved")]
+    TicketReserved(TicketWakePayload),
+    #[serde(rename = "ticket.review_requested")]
+    TicketReviewRequested(TicketWakePayload),
+    #[serde(rename = "ticket.review_claimed")]
+    TicketReviewClaimed(TicketWakePayload),
+    #[serde(rename = "ticket.changes_requested")]
+    TicketChangesRequested(TicketWakePayload),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationWakePayload {
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMessageWakePayload {
+    pub message: String,
+    pub message_id: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelMessageWakePayload {
+    pub message: String,
+    pub channel: String,
+    pub message_id: i64,
+    pub author: String,
+    pub body: String,
+    pub mentioned: bool,
+    pub subscribed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IdleHeartbeatWakePayload {
+    pub message: String,
+    pub minutes: i64,
+    pub occurred_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReminderWakePayload {
+    pub message: String,
+    pub requested_delivery_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TicketWakePayload {
+    pub message: String,
+    pub ticket_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_fields: Vec<String>,
+    pub ticket: TicketWakeTicket,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TicketWakeTicket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<TicketState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_agent_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_for_agent_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_target_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_project_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_project_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_blockers: Vec<TicketBlocker>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentEvent {
+    Refresh,
+    AgentCreated {
+        agent_id: i64,
+        data: Agent,
+    },
+    AgentUpdated {
+        agent_id: i64,
+        data: Agent,
+    },
+    AgentMessageDelta {
+        agent_id: i64,
+        data: AgentMessageDelta,
+    },
+    Message {
+        agent_id: i64,
+        data: AgentMessage,
+    },
+    TicketUpdated {
+        agent_id: i64,
+        data: Ticket,
+    },
+    SettingsUpdated {
+        agent_id: i64,
+        data: BoardSettings,
+    },
+    BoardMessage {
+        agent_id: i64,
+        data: Message,
+    },
+    ChannelSubscriptions {
+        agent_id: i64,
+        data: Vec<String>,
+    },
+    ProjectSubscriptions {
+        agent_id: i64,
+        data: Vec<i64>,
+    },
+    ApprovalDeclined {
+        agent_id: i64,
+    },
+    CodexEvent {
+        agent_id: i64,
+        data: serde_json::Value,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMessageDelta {
+    pub delta: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SetProjectRequest {
     pub path: String,
@@ -207,11 +404,6 @@ pub struct RegisterProjectRequest {
     pub name: String,
     pub path: String,
     pub default_branch: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ProjectIdRequest {
-    pub project_id: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -282,31 +474,6 @@ pub struct UpdateTicketRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct TicketIdRequest {
-    pub ticket_id: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SetTicketDetailsRequest {
-    pub ticket_id: i64,
-    #[serde(flatten)]
-    pub changes: UpdateTicketRequest,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TicketRevisionRequest {
-    pub ticket_id: i64,
-    pub expected_revision: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TicketChangesRequest {
-    pub ticket_id: i64,
-    pub feedback: String,
-    pub expected_revision: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub struct ReserveTicketsRequest {
     pub ticket_ids: Vec<i64>,
     pub agent_id: Option<i64>,
@@ -333,26 +500,6 @@ pub struct PostMessageRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ReadChannelRequest {
-    pub channel_name: String,
-    pub start_time: Option<i64>,
-    pub end_time: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ReadChannelResponse {
-    pub channel: Channel,
-    pub messages: Vec<Message>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PostBoardMessageRequest {
-    pub channel_name: String,
-    pub author: String,
-    pub message: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateChannelRequest {
     pub name: String,
     #[serde(default)]
@@ -376,8 +523,8 @@ pub struct SendAgentMessageRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateWakeEventRequest {
-    pub kind: String,
-    pub payload: serde_json::Value,
+    #[serde(flatten)]
+    pub event: WakeEventData,
     pub deduplication_key: Option<String>,
 }
 
@@ -386,11 +533,6 @@ pub struct ScheduleSelfReminderRequest {
     pub message: String,
     pub deliver_at: Option<String>,
     pub delay_seconds: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ReminderIdRequest {
-    pub reminder_id: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -511,5 +653,34 @@ mod tests {
             AgentMessageRole::try_from("assistant").unwrap_err(),
             "invalid agent message role: assistant"
         );
+    }
+
+    #[test]
+    fn typed_events_keep_the_existing_wire_shape() {
+        let event = AgentEvent::TicketUpdated {
+            agent_id: 2,
+            data: ticket(),
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(encoded["kind"], "ticket_updated");
+        assert_eq!(encoded["data"]["id"], 47);
+        assert_eq!(
+            serde_json::from_value::<AgentEvent>(encoded).unwrap(),
+            event
+        );
+
+        let legacy_wake = json!({
+            "kind": "ticket.available",
+            "payload": {
+                "message": "Available",
+                "ticket_id": 47,
+                "ticket": {}
+            }
+        });
+        let decoded = serde_json::from_value::<WakeEventData>(legacy_wake).unwrap();
+        let WakeEventData::TicketAvailable(payload) = decoded else {
+            panic!("wrong wake variant");
+        };
+        assert_eq!(payload.ticket.project_id, None);
     }
 }
