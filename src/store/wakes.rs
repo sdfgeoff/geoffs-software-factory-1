@@ -22,6 +22,26 @@ struct WakeEventRow {
 }
 
 impl Store {
+    pub async fn complete_ticket_assignment_wake(
+        &self,
+        agent_id: i64,
+        ticket_id: i64,
+        revision: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE agent_wake_events SET delivery_state = 'delivered', delivered_at = unixepoch(), \
+             updated_at = unixepoch() WHERE agent_id = ? AND kind = 'ticket.assigned' \
+             AND deduplication_key = ? AND delivery_state = 'pending'",
+        )
+        .bind(agent_id)
+        .bind(format!(
+            "ticket:{ticket_id}:{revision}:ticket.assigned"
+        ))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn enqueue_wake_event(
         &self,
         agent_id: i64,

@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, AgentProjectWorktree, BoardSettings},
+    domain::{Agent, AgentProjectWorktree, BoardSettings, ProjectTransition, Ticket},
     error::AppError,
     store::{MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, validate_channel},
 };
@@ -124,6 +124,65 @@ impl AgentManager {
         agent_id: i64,
     ) -> Result<Vec<AgentProjectWorktree>, AppError> {
         self.store.agent_project_worktrees(agent_id).await
+    }
+
+    pub(crate) async fn prepare_ticket_project(
+        &self,
+        agent_id: i64,
+        ticket_id: i64,
+    ) -> Result<(), AppError> {
+        let ticket = self
+            .store
+            .ticket(ticket_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        let project = self.store.active_ticket_project(&ticket).await?;
+        self.worktree_for_project(agent_id, project.id).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn transition_to_ticket_project(
+        &self,
+        agent_id: i64,
+        ticket: &Ticket,
+    ) -> Result<Option<ProjectTransition>, AppError> {
+        let agent = self
+            .store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        if agent.active_project_id == Some(ticket.project_id) {
+            return Ok(None);
+        }
+        let project = self.store.active_ticket_project(ticket).await?;
+        let worktree = self.worktree_for_project(agent_id, project.id).await?;
+        let old_project = match agent.active_project_id {
+            Some(id) => self
+                .store
+                .project_by_id(id)
+                .await?
+                .map(|project| format!("{} (#{})", project.name, project.id))
+                .unwrap_or_else(|| format!("unknown project (#{id})")),
+            None => "no project".into(),
+        };
+        let message = format!(
+            "Project context changed for ticket #{}: {old_project} → {} (#{}). Working directory: {}",
+            ticket.id, project.name, project.id, worktree.path
+        );
+        let updated = self
+            .store
+            .set_agent_active_project(agent_id, Some(project.id))
+            .await?;
+        self.emit(agent_id, "agent_updated", json!(updated));
+        Ok(Some(ProjectTransition {
+            agent_id,
+            ticket_id: ticket.id,
+            previous_project_id: agent.active_project_id,
+            project_id: project.id,
+            project_name: project.name,
+            worktree_path: worktree.path,
+            message,
+        }))
     }
 
     pub async fn scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {

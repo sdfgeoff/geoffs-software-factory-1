@@ -237,7 +237,7 @@ impl AgentManager {
                 AgentState::Paused | AgentState::Error => unreachable!(),
             };
             if delivered.is_err() {
-                if ticket_transition_project(&event).is_some() {
+                if ticket_transition_id(&event).is_some() {
                     let _ = self
                         .store
                         .set_agent_active_project(agent.id, agent.active_project_id)
@@ -489,42 +489,20 @@ impl AgentManager {
         event: &WakeEvent,
     ) -> Result<String, AppError> {
         let message = wake_event_message(event);
-        let Some(project_id) = ticket_transition_project(event) else {
+        let Some(ticket_id) = ticket_transition_id(event) else {
             return Ok(message);
         };
-        if agent.active_project_id == Some(project_id) {
-            return Ok(message);
-        }
-        let project = self
+        let ticket = self
             .store
-            .project_by_id(project_id)
+            .ticket(ticket_id)
             .await?
-            .ok_or_else(|| AppError::not_found("ticket project not found"))?;
-        let worktree = self.worktree_for_project(agent.id, project.id).await?;
-        let old_project = match agent.active_project_id {
-            Some(id) => self
-                .store
-                .project_by_id(id)
-                .await?
-                .map(|project| format!("{} (#{})", project.name, project.id))
-                .unwrap_or_else(|| format!("unknown project (#{id})")),
-            None => "no project".into(),
-        };
-        let updated = self
-            .store
-            .set_agent_active_project(agent.id, Some(project.id))
-            .await?;
-        self.emit(agent.id, "agent_updated", json!(updated));
-        let ticket_id = event
-            .payload
-            .get("ticket_id")
-            .and_then(Value::as_i64)
-            .map(|id| format!("ticket #{id}"))
-            .unwrap_or_else(|| "ticket work".into());
-        Ok(format!(
-            "Project context changed for {ticket_id}: {old_project} → {} (#{}).\nWorking directory: {}\n\n{message}",
-            project.name, project.id, worktree.path
-        ))
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        Ok(
+            match self.transition_to_ticket_project(agent.id, &ticket).await? {
+                Some(transition) => format!("{}\n\n{message}", transition.message),
+                None => message,
+            },
+        )
     }
 }
 
@@ -577,12 +555,12 @@ fn wake_event_message(event: &WakeEvent) -> String {
         .unwrap_or_else(|| format!("Agent inbox event `{}`:\n{}", event.kind, event.payload))
 }
 
-fn ticket_transition_project(event: &WakeEvent) -> Option<i64> {
+fn ticket_transition_id(event: &WakeEvent) -> Option<i64> {
     matches!(
         event.kind.as_str(),
         "ticket.assigned" | "ticket.review_claimed" | "ticket.changes_requested"
     )
-    .then(|| event.payload.pointer("/ticket/project_id")?.as_i64())
+    .then(|| event.payload.get("ticket_id")?.as_i64())
     .flatten()
 }
 
@@ -594,7 +572,7 @@ mod tests {
         sync::Mutex,
     };
 
-    use crate::store::Store;
+    use crate::store::{NewTicket, Store};
 
     use super::*;
 
@@ -735,6 +713,19 @@ mod tests {
             .add_agent_project_worktree(agent.id, project.id, "/tmp/worker-second")
             .await
             .unwrap();
+        let (ticket, _) = manager
+            .store
+            .create_ticket_for_project_with_wakes(
+                NewTicket {
+                    title: "Project transition".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                Some(project.id),
+            )
+            .await
+            .unwrap();
         manager
             .set_channel_subscriptions(agent.id, &["general".into()])
             .await
@@ -745,8 +736,8 @@ mod tests {
                 agent.id,
                 "ticket.assigned",
                 json!({
-                    "message": "Ticket #9 was assigned to you.",
-                    "ticket_id": 9,
+                    "message": format!("Ticket #{} was assigned to you.", ticket.id),
+                    "ticket_id": ticket.id,
                     "ticket": {"project_id": project.id},
                 }),
                 None,
@@ -754,6 +745,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let ticket_id = ticket.id;
         let server_task = tokio::spawn(async move {
             let (reader, mut writer) = split(server);
             let mut lines = BufReader::new(reader).lines();
@@ -763,7 +755,7 @@ mod tests {
             assert_eq!(transitioned["params"]["threadId"], "thread-1");
             assert_eq!(transitioned["params"]["cwd"], "/tmp/worker-second");
             let text = transitioned["params"]["input"][0]["text"].as_str().unwrap();
-            assert!(text.contains("Project context changed for ticket #9"));
+            assert!(text.contains(&format!("Project context changed for ticket #{ticket_id}")));
             assert!(text.contains("second-project"));
             assert!(text.contains("Working directory: /tmp/worker-second"));
             writer

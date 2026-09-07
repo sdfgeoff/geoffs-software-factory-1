@@ -18,8 +18,8 @@ use serde::Deserialize;
 use crate::{
     agent_runtime::AgentManager,
     domain::{
-        BoardSettings, Channel, Message, Project, Reminder, Ticket, TicketActivity, TicketState,
-        WakeDeliveryPolicy, WakeEvent,
+        BoardSettings, Channel, Message, Project, Reminder, Ticket, TicketActivity,
+        TicketClaimResponse, TicketState, WakeDeliveryPolicy, WakeEvent,
     },
     error::AppError,
     store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges},
@@ -347,17 +347,35 @@ async fn claim_ticket(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ClaimTicketRequest>,
-) -> Result<Json<Ticket>, AppError> {
-    let agent_id = agent_header(&headers)?
+) -> Result<Json<TicketClaimResponse>, AppError> {
+    let caller = agent_header(&headers)?;
+    let agent_id = caller
         .or(input.agent_id)
         .ok_or_else(|| AppError::bad_request("agent_id is required"))?;
+    if caller == Some(agent_id) {
+        agents.prepare_ticket_project(agent_id, id).await?;
+    }
     let (ticket, wake_agent_ids) = store
         .claim_ticket_with_wakes(id, agent_id, input.expected_revision)
         .await?;
+    let project_transition = if caller == Some(agent_id) {
+        let transition = agents
+            .transition_to_ticket_project(agent_id, &ticket)
+            .await?;
+        store
+            .complete_ticket_assignment_wake(agent_id, ticket.id, ticket.revision)
+            .await?;
+        transition
+    } else {
+        None
+    };
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
-    Ok(Json(ticket))
+    Ok(Json(TicketClaimResponse {
+        ticket,
+        project_transition,
+    }))
 }
 
 async fn list_wake_events(
@@ -1045,6 +1063,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn running_agent_claims_surface_cross_project_transitions_immediately() {
+        let store = Store::memory().await.unwrap();
+        let first_project = store.project().await.unwrap().unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        store
+            .update_agent_runtime(
+                reviewer.id,
+                crate::domain::AgentState::Running,
+                Some("thread-1"),
+                Some("turn-1"),
+                None,
+            )
+            .await
+            .unwrap();
+        let second_project = store.set_project("/tmp/second-project").await.unwrap();
+        store
+            .add_agent_project_worktree(reviewer.id, second_project.id, "/tmp/reviewer-second")
+            .await
+            .unwrap();
+        let implementation = store
+            .create_ticket_for_project_with_wakes(
+                NewTicket {
+                    title: "Cross-project implementation".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                Some(second_project.id),
+            )
+            .await
+            .unwrap()
+            .0;
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(store.clone(), manager.clone()).merge(crate::agent_api::router(manager));
+
+        let claimed = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/tickets/{}/claim", implementation.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, reviewer.id)
+                    .body(Body::from(format!(
+                        "{{\"expected_revision\":{}}}",
+                        implementation.revision
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+        let claimed: Value =
+            serde_json::from_slice(&to_bytes(claimed.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            claimed["project_transition"]["worktree_path"],
+            "/tmp/reviewer-second"
+        );
+        assert!(
+            claimed["project_transition"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("ticket #{}", implementation.id))
+        );
+        assert_eq!(
+            store
+                .agent(reviewer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active_project_id,
+            Some(second_project.id)
+        );
+
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let review = store
+            .create_ticket_for_project_with_wakes(
+                NewTicket {
+                    title: "Cross-project review".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                Some(first_project.id),
+            )
+            .await
+            .unwrap()
+            .0;
+        let review = store
+            .claim_ticket(review.id, worker.id, Some(review.revision))
+            .await
+            .unwrap();
+        let review = store
+            .submit_review(
+                review.id,
+                worker.id,
+                crate::store::ReviewSubmission {
+                    implementation_branch: Some("agents/worker"),
+                    commit: "abc123",
+                    target_branch: "main",
+                    project_id: first_project.id,
+                    project_path: &first_project.path,
+                },
+                Some(review.revision),
+            )
+            .await
+            .unwrap();
+        let claimed_review = app
+            .oneshot(
+                Request::post(format!("/tickets/{}/claim-review", review.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, reviewer.id)
+                    .body(Body::from(format!(
+                        "{{\"expected_revision\":{}}}",
+                        review.revision
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed_review.status(), StatusCode::OK);
+        let claimed_review: Value = serde_json::from_slice(
+            &to_bytes(claimed_review.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            claimed_review["project_transition"]["worktree_path"],
+            "/tmp/reviewer"
+        );
+        assert_eq!(
+            store
+                .agent(reviewer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active_project_id,
+            Some(first_project.id)
+        );
+        assert_eq!(
+            store
+                .agent(reviewer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn_id
+                .as_deref(),
+            Some("turn-1")
+        );
     }
 
     #[tokio::test]

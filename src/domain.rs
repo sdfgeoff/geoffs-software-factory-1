@@ -61,6 +61,24 @@ pub struct TicketBlocker {
     pub title: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectTransition {
+    pub agent_id: i64,
+    pub ticket_id: i64,
+    pub previous_project_id: Option<i64>,
+    pub project_id: i64,
+    pub project_name: String,
+    pub worktree_path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TicketClaimResponse {
+    #[serde(flatten)]
+    pub ticket: Ticket,
+    pub project_transition: Option<ProjectTransition>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]

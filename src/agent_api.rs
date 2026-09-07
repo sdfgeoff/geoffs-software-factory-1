@@ -176,10 +176,10 @@ async fn claim_review(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Json(input): Json<ReviewRevisionRequest>,
-) -> Result<Json<crate::domain::Ticket>, AppError> {
+) -> Result<Json<crate::domain::TicketClaimResponse>, AppError> {
     Ok(Json(
         manager
-            .claim_review(id, caller_agent(&headers)?, input.expected_revision)
+            .claim_review_with_transition(id, caller_agent(&headers)?, input.expected_revision)
             .await?,
     ))
 }

@@ -73,21 +73,25 @@ impl AgentManager {
             .store
             .claim_review(ticket_id, agent_id, expected_revision)
             .await?;
-        self.store
-            .enqueue_wake_event(
-                agent_id,
-                "ticket.review_claimed",
-                json!({
-                    "message": format!("You claimed review of ticket #{} '{}'.", ticket.id, ticket.title),
-                    "ticket_id": ticket.id,
-                    "ticket": {"project_id": ticket.project_id},
-                }),
-                Some(&format!("ticket:{}:{}:review-claimed", ticket.id, ticket.revision)),
-                WakeDeliveryPolicy::IdleOnly,
-            )
-            .await?;
         self.emit(agent_id, "ticket_updated", json!(ticket));
         Ok(ticket)
+    }
+
+    pub async fn claim_review_with_transition(
+        &self,
+        ticket_id: i64,
+        agent_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::TicketClaimResponse, AppError> {
+        self.prepare_ticket_project(agent_id, ticket_id).await?;
+        let ticket = self
+            .claim_review(ticket_id, agent_id, expected_revision)
+            .await?;
+        let project_transition = self.transition_to_ticket_project(agent_id, &ticket).await?;
+        Ok(crate::domain::TicketClaimResponse {
+            ticket,
+            project_transition,
+        })
     }
 
     pub async fn request_changes(

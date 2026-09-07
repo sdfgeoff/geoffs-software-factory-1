@@ -1,4 +1,4 @@
-use multi_agent_board::{agent_runtime::AgentManager, store::Store};
+use multi_agent_board::{agent_runtime::AgentManager, domain::AgentState, store::Store};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -132,8 +132,27 @@ async fn mcp_registers_lists_and_archives_projects_through_http() {
 #[tokio::test]
 async fn mcp_calls_the_server_without_database_access() {
     let store = Store::memory().await.unwrap();
-    store.create_agent("first", "/tmp/first").await.unwrap();
+    let first = store.create_agent("first", "/tmp/first").await.unwrap();
     store.create_agent("second", "/tmp/second").await.unwrap();
+    store
+        .update_agent_runtime(
+            first.id,
+            AgentState::Running,
+            Some("thread-1"),
+            Some("turn-1"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .set_agent_wake_settings(first.id, true, false, None)
+        .await
+        .unwrap();
+    let second_project = store.set_project("/tmp/second-project").await.unwrap();
+    store
+        .add_agent_project_worktree(first.id, second_project.id, "/tmp/first-second")
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let agents = AgentManager::new(
@@ -168,6 +187,22 @@ async fn mcp_calls_the_server_without_database_access() {
     )
     .await;
     assert_eq!(claimed.pointer("/result/isError"), None);
+    assert_eq!(
+        tool_content(&claimed)["project_transition"]["worktree_path"],
+        "/tmp/first-second"
+    );
+    let first = store.agent(first.id).await.unwrap().unwrap();
+    assert_eq!(first.active_project_id, Some(second_project.id));
+    assert_eq!(first.active_turn_id.as_deref(), Some("turn-1"));
+    assert!(
+        store
+            .wake_events(first.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "ticket.assigned"
+                && event.delivery_state == multi_agent_board::domain::WakeEventState::Delivered)
+    );
 
     let dependent = mcp_tool(
         &base_url,
