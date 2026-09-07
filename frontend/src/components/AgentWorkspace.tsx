@@ -34,7 +34,12 @@ interface AgentSettingsDraft {
   wakeOnPendingReview: boolean;
   heartbeatEnabled: boolean;
   heartbeatMinutes: string;
+  canReview?: boolean;
+  channelSubscriptions?: string[];
+  projectSubscriptions?: number[];
 }
+
+type SettingsSaveState = "saved" | "dirty" | "saving" | "error";
 
 export function AgentWorkspace({
   agents,
@@ -61,6 +66,12 @@ export function AgentWorkspace({
   const [settingsDrafts, setSettingsDrafts] = useState<
     Record<number, AgentSettingsDraft>
   >({});
+  const [settingsSaveStates, setSettingsSaveStates] = useState<
+    Record<number, SettingsSaveState>
+  >({});
+  const [settingsErrors, setSettingsErrors] = useState<Record<number, string>>(
+    {},
+  );
   const [scopes, setScopes] = useState<string[]>([]);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
   const [projectSubscriptions, setProjectSubscriptions] = useState<number[]>([]);
@@ -90,9 +101,18 @@ export function AgentWorkspace({
     detailsAgentId === selectedAgentId ? subscriptions : [];
   const currentProjectSubscriptions =
     detailsAgentId === selectedAgentId ? projectSubscriptions : [];
-  const activeWorktree = currentWorktrees.find(
-    (worktree) => worktree.project_id === selected?.active_project_id,
-  );
+  const canReview =
+    settingsDraft?.canReview ?? currentScopes.includes("approve_review");
+  const selectedChannels =
+    settingsDraft?.channelSubscriptions ?? currentSubscriptions;
+  const selectedProjects =
+    settingsDraft?.projectSubscriptions ?? currentProjectSubscriptions;
+  const settingsSaveState = selected
+    ? settingsSaveStates[selected.id] ?? "saved"
+    : "saved";
+  const settingsReady = detailsAgentId === selectedAgentId;
+  const nameLocked =
+    selected?.state === "running" || selected?.state === "awaiting_approval";
   useEffect(() => {
     if (selectedAgentId === null && agents[0]) onSelectAgent(agents[0].id);
   }, [agents, selectedAgentId, onSelectAgent]);
@@ -176,6 +196,11 @@ export function AgentWorkspace({
       ...current,
       [selected.id]: { ...settingsDraft, ...changes },
     }));
+    setSettingsSaveStates((current) => ({
+      ...current,
+      [selected.id]: "dirty",
+    }));
+    setSettingsErrors((current) => ({ ...current, [selected.id]: "" }));
   }
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -199,17 +224,6 @@ export function AgentWorkspace({
       onError(error);
     }
   }
-  async function rename(event: FormEvent) {
-    event.preventDefault();
-    if (!selected) return;
-    try {
-      const updated = await api.renameAgent(selected.id, settingsDraft!.name);
-      updateSettings({ name: updated.name });
-      await onChanged(updated);
-    } catch (error) {
-      onError(error);
-    }
-  }
   async function toggle() {
     if (!selected) return;
     try {
@@ -221,57 +235,63 @@ export function AgentWorkspace({
       onError(error);
     }
   }
-  async function setScope(scope: string, enabled: boolean) {
-    if (!selected) return;
-    const next = enabled
-      ? [...new Set([...currentScopes, scope])]
-      : currentScopes.filter((item) => item !== scope);
-    try {
-      setScopes(await api.setAgentScopes(selected.id, next));
-    } catch (error) {
-      onError(error);
-    }
-  }
-  async function setSubscription(channel: string, enabled: boolean) {
-    if (!selected) return;
-    const next = enabled
-      ? [...new Set([...currentSubscriptions, channel])]
-      : currentSubscriptions.filter((item) => item !== channel);
-    try {
-      setSubscriptions(
-        await api.setAgentChannelSubscriptions(selected.id, next),
-      );
-    } catch (error) {
-      onError(error);
-    }
-  }
-  async function setProjectSubscription(projectId: number, enabled: boolean) {
-    if (!selected) return;
-    const next = enabled
-      ? [...new Set([...currentProjectSubscriptions, projectId])]
-      : currentProjectSubscriptions.filter((item) => item !== projectId);
-    try {
-      setProjectSubscriptions(
-        await api.setAgentProjectSubscriptions(selected.id, next),
-      );
-    } catch (error) {
-      onError(error);
-    }
-  }
-  async function saveWakeSettings(event: FormEvent) {
+  async function saveSettings(event: FormEvent) {
     event.preventDefault();
-    if (!selected) return;
+    if (!selected || !settingsDraft || !settingsReady) return;
+    const agentId = selected.id;
+    setSettingsSaveStates((current) => ({
+      ...current,
+      [agentId]: "saving",
+    }));
+    setSettingsErrors((current) => ({ ...current, [agentId]: "" }));
     try {
+      let savedName = selected.name;
+      if (settingsDraft.name !== selected.name) {
+        savedName = (await api.renameAgent(agentId, settingsDraft.name)).name;
+      }
+      const nextScopes = canReview
+        ? [...new Set([...currentScopes, "approve_review"])]
+        : currentScopes.filter((scope) => scope !== "approve_review");
+      const [nextSavedScopes, nextChannels, nextProjects] = await Promise.all([
+        api.setAgentScopes(agentId, nextScopes),
+        api.setAgentChannelSubscriptions(agentId, selectedChannels),
+        api.setAgentProjectSubscriptions(agentId, selectedProjects),
+      ]);
       const updated = await api.setAgentWakeSettings(
-        selected.id,
-        settingsDraft!.wakeOnPendingWork,
-        settingsDraft!.wakeOnPendingReview,
-        settingsDraft!.heartbeatEnabled
-          ? Number(settingsDraft!.heartbeatMinutes)
+        agentId,
+        settingsDraft.wakeOnPendingWork,
+        settingsDraft.wakeOnPendingReview,
+        settingsDraft.heartbeatEnabled
+          ? Number(settingsDraft.heartbeatMinutes)
           : null,
       );
+      setScopes(nextSavedScopes);
+      setSubscriptions(nextChannels);
+      setProjectSubscriptions(nextProjects);
+      setSettingsDrafts((current) => ({
+        ...current,
+        [agentId]: {
+          ...settingsDraft,
+          name: savedName,
+          canReview: nextSavedScopes.includes("approve_review"),
+          channelSubscriptions: nextChannels,
+          projectSubscriptions: nextProjects,
+        },
+      }));
       await onChanged(updated);
+      setSettingsSaveStates((current) => ({
+        ...current,
+        [agentId]: "saved",
+      }));
     } catch (error) {
+      setSettingsSaveStates((current) => ({
+        ...current,
+        [agentId]: "error",
+      }));
+      setSettingsErrors((current) => ({
+        ...current,
+        [agentId]: error instanceof Error ? error.message : "Could not save settings",
+      }));
       onError(error);
     }
   }
@@ -337,12 +357,6 @@ export function AgentWorkspace({
                     : "No active ticket"}
                   {activeProject ? ` · ${activeProject.name}` : ""}
                 </p>
-                <p
-                  className="worktree-path"
-                  title={activeWorktree?.path ?? selected.home_path}
-                >
-                  {activeWorktree?.path ?? selected.home_path}
-                </p>
               </div>
               <button className="secondary" onClick={toggle}>
                 {selected.state === "paused" || selected.state === "error"
@@ -355,58 +369,63 @@ export function AgentWorkspace({
             )}
             <section hidden={view !== "settings"}>
               <h3>Agent settings</h3>
-              <section>
-                <h4>Project worktrees</h4>
-                <dl>
-                  {currentWorktrees.map((worktree) => (
-                    <div key={worktree.project_id}>
-                      <dt>{projects.find((project) => project.id === worktree.project_id)?.name ?? `Project #${worktree.project_id}`}</dt>
-                      <dd className="worktree-path">{worktree.path}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </section>
-              <form className="rename-agent" onSubmit={rename}>
-                <label>
-                  Agent name
-                  <input
-                    value={settingsDraft?.name ?? ""}
-                    onChange={(event) => updateSettings({ name: event.target.value })}
-                    pattern="[A-Za-z0-9_-]+"
-                    maxLength={50}
-                    required
-                  />
-                </label>
-                <button
-                  type="submit"
-                  disabled={
-                    settingsDraft?.name === selected.name ||
-                    selected.state === "running" ||
-                    selected.state === "awaiting_approval"
-                  }
-                >
-                  Rename
-                </button>
-              </form>
-              <fieldset className="capabilities">
-                <legend>Capabilities</legend>
-                <label>
-                  <input
-                    type="checkbox"
-                      checked={currentScopes.includes("approve_review")}
-                    onChange={(event) =>
-                      void setScope("approve_review", event.target.checked)
-                    }
-                  />
-                  <span>
-                    <strong>approve_review</strong>
-                    Review changes and authorize board-owned merges
-                  </span>
-                </label>
-              </fieldset>
-              <form className="wake-settings" onSubmit={saveWakeSettings}>
+              <form className="agent-settings-form" onSubmit={saveSettings}>
                 <fieldset className="capabilities">
-                  <legend>Wake settings</legend>
+                  <legend>Identity</legend>
+                  <label className="settings-text-field">
+                    Agent name
+                    <input
+                      value={settingsDraft?.name ?? ""}
+                      onChange={(event) =>
+                        updateSettings({ name: event.target.value })
+                      }
+                      pattern="[A-Za-z0-9_-]+"
+                      maxLength={50}
+                      disabled={nameLocked}
+                      required
+                    />
+                  </label>
+                  {nameLocked && (
+                    <small>Pause the agent before changing its name.</small>
+                  )}
+                </fieldset>
+                <fieldset className="capabilities" disabled={!settingsReady}>
+                  <legend>Work preferences</legend>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={canReview}
+                      onChange={(event) =>
+                        updateSettings({ canReview: event.target.checked })
+                      }
+                    />
+                    <span>
+                      <strong>Can review tickets</strong>
+                      Review changes and authorize board-owned merges
+                    </span>
+                  </label>
+                  {projects.filter((project) => !project.archived_at).map((project) => (
+                    <label key={project.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedProjects.includes(project.id)}
+                        onChange={(event) =>
+                          updateSettings({
+                            projectSubscriptions: event.target.checked
+                              ? [...new Set([...selectedProjects, project.id])]
+                              : selectedProjects.filter((id) => id !== project.id),
+                          })
+                        }
+                      />
+                      <span>
+                        <strong>{project.name}</strong>
+                        Prefer work and reviews from this project
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+                <fieldset className="capabilities" disabled={!settingsReady}>
+                  <legend>Notifications</legend>
                   <label>
                     <input
                       type="checkbox"
@@ -460,45 +479,72 @@ export function AgentWorkspace({
                       }
                     />
                   </label>
+                  {channels.map((channel) => (
+                    <label key={channel.name}>
+                      <input
+                        type="checkbox"
+                        checked={selectedChannels.includes(channel.name)}
+                        onChange={(event) =>
+                          updateSettings({
+                            channelSubscriptions: event.target.checked
+                              ? [...new Set([...selectedChannels, channel.name])]
+                              : selectedChannels.filter(
+                                  (name) => name !== channel.name,
+                                ),
+                          })
+                        }
+                      />
+                      <span>
+                        <strong>#{channel.name}</strong>
+                        Wake for new messages
+                      </span>
+                    </label>
+                  ))}
                 </fieldset>
-                <button type="submit">Save wake settings</button>
+                <details className="advanced-settings">
+                  <summary>Advanced</summary>
+                  <dl>
+                    <div>
+                      <dt>Agent home</dt>
+                      <dd className="worktree-path">{selected.home_path}</dd>
+                    </div>
+                    {currentWorktrees.map((worktree) => (
+                      <div key={worktree.project_id}>
+                        <dt>
+                          {projects.find(
+                            (project) => project.id === worktree.project_id,
+                          )?.name ?? `Project #${worktree.project_id}`} worktree
+                        </dt>
+                        <dd className="worktree-path">{worktree.path}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </details>
+                <div className="settings-save-bar">
+                  <p
+                    className={settingsSaveState === "error" ? "inline-error" : undefined}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {settingsSaveState === "dirty" && "Unsaved changes"}
+                    {settingsSaveState === "saving" && "Saving…"}
+                    {settingsSaveState === "saved" && "Saved"}
+                    {settingsSaveState === "error" &&
+                      `Could not save: ${settingsErrors[selected.id]}`}
+                  </p>
+                  <button
+                    type="submit"
+                    disabled={
+                      !settingsReady ||
+                      settingsSaveState === "saved" ||
+                      settingsSaveState === "saving" ||
+                      (nameLocked && settingsDraft?.name !== selected.name)
+                    }
+                  >
+                    Save settings
+                  </button>
+                </div>
               </form>
-              <fieldset className="capabilities">
-                <legend>Project subscriptions</legend>
-                {projects.filter((project) => !project.archived_at).map((project) => (
-                  <label key={project.id}>
-                    <input
-                      type="checkbox"
-                      checked={currentProjectSubscriptions.includes(project.id)}
-                      onChange={(event) =>
-                        void setProjectSubscription(project.id, event.target.checked)
-                      }
-                    />
-                    <span>
-                      <strong>{project.name}</strong>
-                      Prefer work and reviews from this project
-                    </span>
-                  </label>
-                ))}
-              </fieldset>
-              <fieldset className="capabilities">
-                <legend>Channel subscriptions</legend>
-                {channels.map((channel) => (
-                  <label key={channel.name}>
-                    <input
-                      type="checkbox"
-                      checked={currentSubscriptions.includes(channel.name)}
-                      onChange={(event) =>
-                        void setSubscription(channel.name, event.target.checked)
-                      }
-                    />
-                    <span>
-                      <strong>#{channel.name}</strong>
-                      Wake for new messages
-                    </span>
-                  </label>
-                ))}
-              </fieldset>
             </section>
             <section className="agent-chat-panel" hidden={view !== "chat"}>
               <div className="message-list agent-chat">

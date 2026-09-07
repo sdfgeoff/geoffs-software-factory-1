@@ -66,6 +66,7 @@ describe("AgentWorkspace", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentMessages).mockResolvedValue([]);
     vi.mocked(api.agentProjectSubscriptions).mockResolvedValue([1]);
@@ -89,7 +90,7 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.setAgentWakeSettings).mockResolvedValue(agent);
   });
 
-  it("assigns the approve_review capability", async () => {
+  it("assigns the review capability with one explicit save", async () => {
     render(
       <AgentWorkspace
         agents={[agent]}
@@ -107,14 +108,20 @@ describe("AgentWorkspace", () => {
       />,
     );
 
-    fireEvent.click(
-      await screen.findByRole("checkbox", { name: /approve_review/i }),
+    const reviewCapability = await screen.findByRole("checkbox", {
+      name: /Can review tickets/i,
+    });
+    await waitFor(() =>
+      expect((reviewCapability as HTMLInputElement).disabled).toBe(false),
     );
-    expect(screen.getAllByText("Board")).toHaveLength(2);
-    expect(screen.getAllByText("/repo/reviewer")).toHaveLength(2);
+    fireEvent.click(reviewCapability);
+    expect(api.setAgentScopes).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toBe("Unsaved changes");
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() =>
       expect(api.setAgentScopes).toHaveBeenCalledWith(1, ["approve_review"]),
     );
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Saved"));
   });
 
   it("subscribes to a message-board channel", async () => {
@@ -134,9 +141,15 @@ describe("AgentWorkspace", () => {
       />,
     );
 
-    fireEvent.click(
-      await screen.findByRole("checkbox", { name: /#general/i }),
+    const channelSubscription = await screen.findByRole("checkbox", {
+      name: /#general/i,
+    });
+    await waitFor(() =>
+      expect((channelSubscription as HTMLInputElement).disabled).toBe(false),
     );
+    fireEvent.click(channelSubscription);
+    expect(api.setAgentChannelSubscriptions).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() =>
       expect(api.setAgentChannelSubscriptions).toHaveBeenCalledWith(1, [
         "general",
@@ -165,7 +178,14 @@ describe("AgentWorkspace", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("checkbox", { name: /API/i }));
+    const projectSubscription = await screen.findByRole("checkbox", {
+      name: /API/i,
+    });
+    await waitFor(() =>
+      expect((projectSubscription as HTMLInputElement).disabled).toBe(false),
+    );
+    fireEvent.click(projectSubscription);
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() =>
       expect(api.setAgentProjectSubscriptions).toHaveBeenCalledWith(1, [1, 2]),
     );
@@ -188,12 +208,16 @@ describe("AgentWorkspace", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /pending work/i }));
+    const pendingWork = screen.getByRole("checkbox", { name: /pending work/i });
+    await waitFor(() =>
+      expect((pendingWork as HTMLInputElement).disabled).toBe(false),
+    );
+    fireEvent.click(pendingWork);
     fireEvent.click(screen.getByRole("checkbox", { name: /idle heartbeat/i }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Minutes" }), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save wake settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() =>
       expect(api.setAgentWakeSettings).toHaveBeenCalledWith(
@@ -207,7 +231,7 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.setAgentWakeSettings).mockClear();
     fireEvent.click(screen.getByRole("checkbox", { name: /pending work/i }));
     fireEvent.click(screen.getByRole("checkbox", { name: /pending reviews/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Save wake settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() =>
       expect(api.setAgentWakeSettings).toHaveBeenCalledWith(
@@ -240,12 +264,86 @@ describe("AgentWorkspace", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Agent name" }), {
       target: { value: "architect" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Save settings" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() =>
       expect(api.renameAgent).toHaveBeenCalledWith(agent.id, "architect"),
     );
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("groups settings and keeps implementation paths in Advanced", async () => {
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 }]}
+        selectedAgentId={agent.id}
+        view="settings"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("group", { name: "Identity" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Work preferences" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Notifications" })).toBeTruthy();
+    expect(screen.queryByText("approve_review")).toBeNull();
+    const worktreePath = await screen.findByText("/repo/reviewer");
+    expect(worktreePath.closest("details")?.open).toBe(false);
+    expect(screen.getByText("Advanced")).toBeTruthy();
+  });
+
+  it("shows saving and failure feedback", async () => {
+    let rejectSave: (error: Error) => void = () => {};
+    vi.mocked(api.setAgentWakeSettings).mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectSave = reject;
+      }),
+    );
+    const onError = vi.fn();
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="settings"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={onError}
+      />,
+    );
+
+    const pendingWork = screen.getByRole("checkbox", { name: /pending work/i });
+    await waitFor(() =>
+      expect((pendingWork as HTMLInputElement).disabled).toBe(false),
+    );
+    fireEvent.click(pendingWork);
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    expect(screen.getByRole("status").textContent).toBe("Saving…");
+
+    rejectSave(new Error("Network unavailable"));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(
+        "Could not save: Network unavailable",
+      ),
+    );
+    expect(onError).toHaveBeenCalled();
   });
 
   it("sends a message while an agent is running", async () => {

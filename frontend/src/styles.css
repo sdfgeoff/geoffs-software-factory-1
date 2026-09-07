@@ -642,10 +642,6 @@ aside button.selected {
   border: 1px solid #d8d1c5;
   border-radius: 0.5rem;
 }
-.rename-agent {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-}
 .capabilities legend {
   color: #4b5563;
   font-size: 0.78rem;
@@ -665,14 +661,39 @@ aside button.selected {
   gap: 0.15rem;
   font-weight: 400;
 }
-.wake-settings .capabilities {
-  margin: 0;
-}
 .capabilities .heartbeat-minutes {
   align-items: center;
 }
 .heartbeat-minutes input {
   width: 7rem;
+}
+.settings-text-field {
+  display: grid !important;
+}
+.settings-text-field input {
+  width: 100%;
+}
+.advanced-settings {
+  margin: 0.8rem 0;
+  padding: 0.8rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.5rem;
+}
+.advanced-settings summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.advanced-settings dl {
+  margin-bottom: 0;
+}
+.settings-save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.settings-save-bar p {
+  margin: 0;
 }
 .empty {
   margin: auto;
