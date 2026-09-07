@@ -308,7 +308,8 @@ pub struct TicketWakePayload {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TicketWakeTicket {
-    pub project_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,7 +341,7 @@ pub struct TicketWakeTicket {
 impl TicketWakeTicket {
     pub fn project(project_id: i64) -> Self {
         Self {
-            project_id,
+            project_id: Some(project_id),
             title: None,
             state: None,
             assignee_id: None,
@@ -361,7 +362,7 @@ impl TicketWakeTicket {
 impl From<&Ticket> for TicketWakeTicket {
     fn from(ticket: &Ticket) -> Self {
         Self {
-            project_id: ticket.project_id,
+            project_id: Some(ticket.project_id),
             title: Some(ticket.title.clone()),
             state: Some(ticket.state),
             assignee_id: ticket.assignee_id,

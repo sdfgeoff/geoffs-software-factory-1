@@ -456,6 +456,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_ticket_wake_without_project_is_read_and_claimed_after_reopen() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mab-legacy-wakes-{unique}.sqlite3"));
+        let store = Store::open(&path).await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        sqlx::query(
+            "INSERT INTO agent_wake_events (agent_id, kind, payload, delivery_policy) \
+             VALUES (?, 'ticket.available', \
+             '{\"message\":\"Legacy ticket\",\"ticket_id\":7,\"revision\":2,\"changed_fields\":[\"state\"],\"ticket\":{\"title\":\"Old\",\"state\":\"todo\",\"assignee_id\":null,\"implementation_branch\":null,\"review_commit\":null,\"review_target_branch\":null,\"reviewer_id\":null}}', \
+             'idle_only')",
+        )
+        .bind(agent.id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        store.close().await;
+
+        let reopened = Store::open(&path).await.unwrap();
+        let listed = reopened.wake_events(agent.id).await.unwrap();
+        assert!(matches!(
+            &listed[0].event,
+            WakeEventData::TicketAvailable(crate::domain::TicketWakePayload {
+                ticket: crate::domain::TicketWakeTicket {
+                    project_id: None,
+                    ..
+                },
+                ..
+            })
+        ));
+        let claimed = reopened
+            .claim_pending_wake_event(agent.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, listed[0].id);
+        assert_eq!(claimed.delivery_state, WakeEventState::Delivering);
+        reopened.complete_wake_event(claimed.id).await.unwrap();
+        reopened.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn invalid_stored_wake_is_rejected_without_stranding_it() {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
