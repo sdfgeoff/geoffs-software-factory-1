@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -7,10 +8,14 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Agent } from "../types";
+import type { Agent, BoardMessage, MessagePage } from "../types";
 import { MessageBoard } from "./MessageBoard";
 
 const messageContentRender = vi.hoisted(() => vi.fn());
+const page = (messages: BoardMessage[], has_more = false): MessagePage => ({
+  messages,
+  has_more,
+});
 
 vi.mock("./MessageContent", () => ({
   MessageContent: ({ source }: { source: string }) => {
@@ -44,10 +49,11 @@ describe("MessageBoard", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("does not rerender a 500-message history while typing", async () => {
-    vi.mocked(api.messages).mockResolvedValue(
+    vi.mocked(api.messages).mockResolvedValue(page(
       Array.from({ length: 500 }, (_, index) => ({
         id: index + 1,
         channel_name: "general",
@@ -56,7 +62,7 @@ describe("MessageBoard", () => {
         body: `History ${index + 1}`,
         created_at: index,
       })),
-    );
+    ));
     render(
       <MessageBoard
         agents={[]}
@@ -77,8 +83,61 @@ describe("MessageBoard", () => {
     expect(messageContentRender).not.toHaveBeenCalled();
   });
 
+  it("prepends older messages without losing the draft or scroll position", async () => {
+    const initial = [
+      { id: 51, channel_name: "general", agent_id: null, author: "human", body: "Message 51", created_at: 51 },
+      { id: 52, channel_name: "general", agent_id: null, author: "human", body: "Message 52", created_at: 52 },
+    ];
+    let resolveOlder!: (value: MessagePage) => void;
+    vi.mocked(api.messages)
+      .mockResolvedValueOnce(page(initial, true))
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveOlder = resolve;
+      }));
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { container } = render(
+      <MessageBoard
+        agents={[]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    const loadOlder = await screen.findByRole("button", { name: "Load older messages" });
+    const draft = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(draft, { target: { value: "Unsent draft" } });
+    const list = container.querySelector<HTMLElement>(".conversation .message-list")!;
+    let height = 1_000;
+    Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => height });
+    list.scrollTop = 100;
+
+    fireEvent.click(loadOlder);
+    expect(api.messages).toHaveBeenLastCalledWith("general", {
+      before_id: 51,
+      limit: 50,
+    });
+    height = 1_400;
+    await act(async () => {
+      resolveOlder(page([
+        { id: 49, channel_name: "general", agent_id: null, author: "human", body: "Message 49", created_at: 49 },
+        { id: 50, channel_name: "general", agent_id: null, author: "human", body: "Message 50", created_at: 50 },
+        initial[0],
+      ]));
+    });
+
+    expect((draft as HTMLTextAreaElement).value).toBe("Unsent draft");
+    expect(list.scrollTop).toBe(500);
+    expect(screen.getAllByText("Message 51")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
+  });
+
   it("opens a renamed agent from a historical message", async () => {
-    vi.mocked(api.messages).mockResolvedValue([
+    vi.mocked(api.messages).mockResolvedValue(page([
       {
         id: 1,
         channel_name: "general",
@@ -87,7 +146,7 @@ describe("MessageBoard", () => {
         body: "Done",
         created_at: 0,
       },
-    ]);
+    ]));
     const onSelectAgent = vi.fn();
 
     render(
@@ -108,7 +167,7 @@ describe("MessageBoard", () => {
   });
 
   it("keeps links for legacy messages without an agent id", async () => {
-    vi.mocked(api.messages).mockResolvedValue([
+    vi.mocked(api.messages).mockResolvedValue(page([
       {
         id: 1,
         channel_name: "general",
@@ -117,7 +176,7 @@ describe("MessageBoard", () => {
         body: "Before the migration",
         created_at: 0,
       },
-    ]);
+    ]));
     const onSelectAgent = vi.fn();
 
     render(
@@ -136,7 +195,7 @@ describe("MessageBoard", () => {
   });
 
   it("enters and cancels explicit channel creation", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     render(
       <MessageBoard
         agents={[]}
@@ -164,7 +223,7 @@ describe("MessageBoard", () => {
   });
 
   it("leaves creation mode and clears its draft when selecting a channel", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     render(
       <MessageBoard
         agents={[]}
@@ -204,7 +263,7 @@ describe("MessageBoard", () => {
   });
 
   it("creates and selects an empty channel with its description", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     vi.mocked(api.createChannel).mockResolvedValue({
       name: "ops.v2",
       description: "Operations coordination",
@@ -259,7 +318,7 @@ describe("MessageBoard", () => {
   });
 
   it("shows a channel description beneath its name", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     render(
       <MessageBoard
         agents={[]}
@@ -281,7 +340,7 @@ describe("MessageBoard", () => {
   });
 
   it("keeps separate message drafts for each channel", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     render(
       <MessageBoard
         agents={[]}
@@ -311,7 +370,7 @@ describe("MessageBoard", () => {
   });
 
   it("selects channels through the compact navigation control", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     const onSelectChannel = vi.fn();
     render(
       <MessageBoard
@@ -344,7 +403,7 @@ describe("MessageBoard", () => {
         ? new Promise((resolve) => {
             resolveGeneral = resolve;
           })
-        : Promise.resolve([
+        : Promise.resolve(page([
             {
               id: 2,
               channel_name: "backend",
@@ -353,7 +412,7 @@ describe("MessageBoard", () => {
               body: "Backend message",
               created_at: 0,
             },
-          ]),
+          ])),
     );
     render(
       <MessageBoard
@@ -372,7 +431,7 @@ describe("MessageBoard", () => {
     fireEvent.click(screen.getByRole("button", { name: "#backend" }));
     expect(screen.getByText("Loading messages…")).toBeTruthy();
     expect(await screen.findByText("Backend message")).toBeTruthy();
-    resolveGeneral([
+    resolveGeneral(page([
       {
         id: 1,
         channel_name: "general",
@@ -381,13 +440,13 @@ describe("MessageBoard", () => {
         body: "Stale general message",
         created_at: 0,
       },
-    ]);
+    ]));
     await Promise.resolve();
     expect(screen.queryByText("Stale general message")).toBeNull();
   });
 
   it("reports duplicate channel creation errors", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     vi.mocked(api.createChannel).mockRejectedValue(
       new Error("channel already exists"),
     );
@@ -418,7 +477,7 @@ describe("MessageBoard", () => {
   });
 
   it("prevents duplicate posts and preserves a failed draft for retry", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     let rejectPost: (error: Error) => void = () => {};
     vi.mocked(api.postMessage).mockReturnValueOnce(
       new Promise((_, reject) => {
@@ -463,7 +522,7 @@ describe("MessageBoard", () => {
   });
 
   it("keeps a pending post locked after switching channels", async () => {
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue(page([]));
     let resolvePost!: (
       message: Awaited<ReturnType<typeof api.postMessage>>,
     ) => void;

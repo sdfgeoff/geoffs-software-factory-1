@@ -10,6 +10,7 @@ import { MessageBoard } from "./components/MessageBoard";
 import { ProjectPicker } from "./components/ProjectPicker";
 import type {
   Agent,
+  AgentMessage,
   AgentEvent,
   BoardMessage,
   BoardSettings as Settings,
@@ -98,9 +99,10 @@ export function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [agentMessageRefresh, setAgentMessageRefresh] = useState(0);
   const [agentDetailRefresh, setAgentDetailRefresh] = useState(0);
   const [boardMessages, setBoardMessages] = useState<Record<number, BoardMessage>>({});
+  const [agentMessages, setAgentMessages] = useState<Record<number, AgentMessage>>({});
+  const [messageCatchUp, setMessageCatchUp] = useState(1);
   const [deltas, setDeltas] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const reloadTimer = useRef<number | null>(null);
@@ -112,6 +114,9 @@ export function App() {
       : null;
   const activeAgentIdRef = useRef(activeAgentId);
   activeAgentIdRef.current = activeAgentId;
+  const activeChannel = route.view === "messages" ? route.channel : null;
+  const activeChannelRef = useRef(activeChannel);
+  activeChannelRef.current = activeChannel;
   const [visitedViews, setVisitedViews] = useState(() => new Set([route.view]));
   const [lastBoardRoute, setLastBoardRoute] = useState(() =>
     route.view === "board"
@@ -201,7 +206,10 @@ export function App() {
     const source = new EventSource("/api/events");
     let opened = false;
     source.onopen = () => {
-      if (opened) scheduleReload();
+      if (opened) {
+        scheduleReload();
+        setMessageCatchUp((value) => value + 1);
+      }
       opened = true;
     };
     source.onmessage = (message) => {
@@ -242,6 +250,7 @@ export function App() {
           setSettings(event.data);
           break;
         case "board_message":
+          if (event.data.channel_name !== activeChannelRef.current) break;
           setBoardMessages((current) => ({
             ...current,
             [event.data.id]: event.data,
@@ -253,7 +262,10 @@ export function App() {
             pendingDelta.current = null;
           }
           setDeltas((current) => ({ ...current, [event.agent_id]: "" }));
-          setAgentMessageRefresh((value) => value + 1);
+          setAgentMessages((current) => ({
+            ...current,
+            [event.data.id]: event.data,
+          }));
           break;
         case "channel_subscriptions":
         case "project_subscriptions":
@@ -261,6 +273,7 @@ export function App() {
           break;
         case "refresh":
           scheduleReload();
+          setMessageCatchUp((value) => value + 1);
           break;
         case "codex_event":
         case "approval_declined":
@@ -342,6 +355,10 @@ export function App() {
   const liveBoardMessages = useMemo(
     () => Object.values(boardMessages),
     [boardMessages],
+  );
+  const liveAgentMessages = useMemo(
+    () => Object.values(agentMessages),
+    [agentMessages],
   );
   const missingEntity = loaded && (
     route.view === "not_found"
@@ -472,6 +489,7 @@ export function App() {
           channels={channels}
           selectedChannelName={route.view === "messages" ? route.channel : lastMessageChannel}
           refresh={0}
+          catchUp={route.view === "messages" ? messageCatchUp : -1}
           liveMessages={liveBoardMessages}
           onSelectChannel={selectMessageChannel}
           onSelectAgent={selectAgent}
@@ -489,9 +507,11 @@ export function App() {
           projects={projects}
           selectedAgentId={selectedAgentId}
           view={agentView}
-          refresh={route.view === "agents" ? agentMessageRefresh : -1}
+          refresh={0}
+          catchUp={activeAgentId === null ? -1 : messageCatchUp}
           detailRefresh={route.view === "agents" ? agentDetailRefresh : -1}
           deltas={deltas}
+          liveMessages={liveAgentMessages}
           onSelectAgent={selectAgent}
           onViewChange={changeAgentView}
           onChanged={mergeAgent}

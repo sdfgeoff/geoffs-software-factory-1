@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState, type FormEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
 import { api } from "../api";
 import {
   channelDescriptionMaxLength,
@@ -8,6 +8,7 @@ import {
   channelNameRules,
 } from "../channelName";
 import type { Agent, BoardMessage, Channel } from "../types";
+import { mergeMessages } from "../messagePages";
 import { MessageContent } from "./MessageContent";
 
 interface Props {
@@ -15,6 +16,7 @@ interface Props {
   channels: Channel[];
   selectedChannelName?: string;
   refresh: number;
+  catchUp?: number;
   liveMessages?: BoardMessage[];
   onSelectChannel?: (name: string) => void;
   onSelectAgent: (id: number) => void;
@@ -30,6 +32,10 @@ const BoardConversation = memo(function BoardConversation({
   loading,
   messages,
   messagesChannel,
+  hasOlder,
+  loadingOlder,
+  listRef,
+  onLoadOlder,
   onSelectAgent,
 }: {
   agents: Agent[];
@@ -37,15 +43,24 @@ const BoardConversation = memo(function BoardConversation({
   loading: boolean;
   messages: BoardMessage[];
   messagesChannel: string | null;
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  listRef: RefObject<HTMLDivElement | null>;
+  onLoadOlder: () => void;
   onSelectAgent: (id: number) => void;
 }) {
   return (
-    <div className="message-list">
+    <div className="message-list" ref={listRef}>
       {(loading || messagesChannel !== channel) && (
         <p className="empty">Loading messages…</p>
       )}
       {!loading && messagesChannel === channel && messages.length === 0 && (
         <p className="empty">No messages in #{channel} yet.</p>
+      )}
+      {!loading && messagesChannel === channel && hasOlder && (
+        <button type="button" className="ghost" disabled={loadingOlder} onClick={onLoadOlder}>
+          {loadingOlder ? "Loading…" : "Load older messages"}
+        </button>
       )}
       {messages.map((message) => {
         const agent = agents.find(
@@ -80,6 +95,7 @@ export const MessageBoard = memo(function MessageBoard({
   channels,
   selectedChannelName,
   refresh,
+  catchUp = 0,
   liveMessages = emptyMessages,
   onSelectChannel,
   onSelectAgent,
@@ -91,6 +107,10 @@ export const MessageBoard = memo(function MessageBoard({
   const [messagesChannel, setMessagesChannel] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const lastCatchUp = useRef(catchUp);
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [newChannel, setNewChannel] = useState("");
   const [newDescription, setNewDescription] = useState("");
@@ -104,14 +124,10 @@ export const MessageBoard = memo(function MessageBoard({
   const selectedChannel = channels.find((item) => item.name === channel);
   const body = drafts[channel] ?? "";
   const visibleMessages = useMemo(
-    () => [
-      ...new Map(
-        [
-          ...(messagesChannel === channel ? messages : []),
-          ...liveMessages.filter((message) => message.channel_name === channel),
-        ].map((message) => [message.id, message]),
-      ).values(),
-    ],
+    () => mergeMessages(
+      messagesChannel === channel ? messages : [],
+      liveMessages.filter((message) => message.channel_name === channel),
+    ),
     [channel, liveMessages, messages, messagesChannel],
   );
   useEffect(() => {
@@ -119,13 +135,15 @@ export const MessageBoard = memo(function MessageBoard({
   }, [selectedChannelName]);
   useEffect(() => {
     let current = true;
+    lastCatchUp.current = catchUp;
     setMessages([]);
     setLoading(true);
     void api
-      .messages(channel)
-      .then((next) => {
+      .messages(channel, { limit: 50 })
+      .then((page) => {
         if (current) {
-          setMessages(next);
+          setMessages(page.messages);
+          setHasOlder(page.has_more);
           setMessagesChannel(channel);
         }
       })
@@ -137,6 +155,56 @@ export const MessageBoard = memo(function MessageBoard({
       current = false;
     };
   }, [channel, refresh, onError]);
+  useEffect(() => {
+    if (catchUp < 0) {
+      lastCatchUp.current = catchUp;
+      return;
+    }
+    if (catchUp === lastCatchUp.current || messagesChannel !== channel) return;
+    lastCatchUp.current = catchUp;
+    let current = true;
+    void (async () => {
+      let cursor = visibleMessages.at(-1)?.id;
+      if (!cursor) {
+        const page = await api.messages(channel, { limit: 50 });
+        if (current) {
+          setMessages(page.messages);
+          setHasOlder(page.has_more);
+        }
+        return;
+      }
+      while (current) {
+        const page = await api.messages(channel, { after_id: cursor, limit: 100 });
+        if (!current) return;
+        setMessages((existing) => mergeMessages(existing, page.messages));
+        const nextCursor = page.messages.at(-1)?.id;
+        if (!page.has_more || !nextCursor) return;
+        cursor = nextCursor;
+      }
+    })().catch(onError);
+    return () => {
+      current = false;
+    };
+  }, [catchUp, channel, messagesChannel, onError]);
+  const loadOlder = useCallback(async () => {
+    const beforeId = visibleMessages[0]?.id;
+    if (!beforeId || loadingOlder) return;
+    const list = listRef.current;
+    const previousHeight = list?.scrollHeight ?? 0;
+    setLoadingOlder(true);
+    try {
+      const page = await api.messages(channel, { before_id: beforeId, limit: 50 });
+      setMessages((current) => mergeMessages(page.messages, current));
+      setHasOlder(page.has_more);
+      window.requestAnimationFrame(() => {
+        if (list) list.scrollTop += list.scrollHeight - previousHeight;
+      });
+    } catch (error) {
+      onError(error);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [channel, loadingOlder, onError, visibleMessages]);
   async function post(event: FormEvent) {
     event.preventDefault();
     if (postingChannel !== null) return;
@@ -145,7 +213,7 @@ export const MessageBoard = memo(function MessageBoard({
     setPostStatuses((current) => ({ ...current, [targetChannel]: "Posting…" }));
     try {
       const created = await api.postMessage(targetChannel, body);
-      setMessages((current) => [...current, created]);
+      setMessages((current) => mergeMessages(current, [created]));
       setDrafts((current) => ({ ...current, [targetChannel]: "" }));
       setPostStatuses((current) => ({ ...current, [targetChannel]: "Posted" }));
     } catch (error) {
@@ -304,6 +372,10 @@ export const MessageBoard = memo(function MessageBoard({
           loading={loading}
           messages={visibleMessages}
           messagesChannel={messagesChannel}
+          hasOlder={hasOlder}
+          loadingOlder={loadingOlder}
+          listRef={listRef}
+          onLoadOlder={loadOlder}
           onSelectAgent={onSelectAgent}
         />
         <form onSubmit={post}>

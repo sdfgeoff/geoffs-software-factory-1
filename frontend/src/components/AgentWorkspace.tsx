@@ -1,5 +1,6 @@
-import { memo, useEffect, useState, type FormEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
 import { api } from "../api";
+import { mergeMessages } from "../messagePages";
 import type {
   Agent,
   AgentMessage,
@@ -21,7 +22,9 @@ interface Props {
   view: AgentView;
   refresh: number;
   detailRefresh?: number;
+  catchUp?: number;
   deltas: Record<number, string>;
+  liveMessages?: AgentMessage[];
   onSelectAgent: (id: number) => void;
   onViewChange: (view: AgentView) => void;
   onChanged: (agent: Agent) => void | Promise<void>;
@@ -40,6 +43,7 @@ interface AgentSettingsDraft {
 }
 
 type SettingsSaveState = "saved" | "dirty" | "saving" | "error";
+const emptyAgentMessages: AgentMessage[] = [];
 
 const AgentConversation = memo(function AgentConversation({
   agentId,
@@ -47,17 +51,30 @@ const AgentConversation = memo(function AgentConversation({
   loading,
   messages,
   messagesAgentId,
+  hasOlder,
+  loadingOlder,
+  listRef,
+  onLoadOlder,
 }: {
   agentId: number;
   delta: string;
   loading: boolean;
   messages: AgentMessage[];
   messagesAgentId: number | null;
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  listRef: RefObject<HTMLDivElement | null>;
+  onLoadOlder: () => void;
 }) {
   return (
-    <div className="message-list agent-chat">
+    <div className="message-list agent-chat" ref={listRef}>
       {(loading || messagesAgentId !== agentId) && (
         <p className="empty">Loading messages…</p>
+      )}
+      {!loading && messagesAgentId === agentId && hasOlder && (
+        <button type="button" className="ghost" disabled={loadingOlder} onClick={onLoadOlder}>
+          {loadingOlder ? "Loading…" : "Load older messages"}
+        </button>
       )}
       {messagesAgentId === agentId && messages.map((message) => (
         <article className={message.role} key={message.id}>
@@ -84,7 +101,9 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   view,
   refresh,
   detailRefresh = 0,
+  catchUp = 0,
   deltas,
+  liveMessages = emptyAgentMessages,
   onSelectAgent,
   onViewChange,
   onChanged,
@@ -92,6 +111,10 @@ export const AgentWorkspace = memo(function AgentWorkspace({
 }: Props) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const lastCatchUp = useRef(catchUp);
   const [messagesAgentId, setMessagesAgentId] = useState<number | null>(null);
   const [worktrees, setWorktrees] = useState<AgentProjectWorktree[]>([]);
   const [detailsAgentId, setDetailsAgentId] = useState<number | null>(null);
@@ -119,6 +142,13 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const prompt = selected ? prompts[selected.id] ?? "" : "";
+  const visibleMessages = useMemo(
+    () => mergeMessages(
+      messagesAgentId === selectedAgentId ? messages : [],
+      liveMessages.filter((message) => message.agent_id === selectedAgentId),
+    ),
+    [liveMessages, messages, messagesAgentId, selectedAgentId],
+  );
   const settingsDraft = selected
     ? settingsDrafts[selected.id] ?? {
         name: selected.name,
@@ -177,14 +207,16 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   useEffect(() => {
     if (view !== "chat") return;
     let current = true;
+    lastCatchUp.current = catchUp;
     setMessages([]);
     setMessagesLoading(Boolean(selectedAgentId));
     if (selectedAgentId) {
       void api
-        .agentMessages(selectedAgentId)
-        .then((next) => {
+        .agentMessages(selectedAgentId, { limit: 50 })
+        .then((page) => {
           if (current) {
-            setMessages(next);
+            setMessages(page.messages);
+            setHasOlderMessages(page.has_more);
             setMessagesAgentId(selectedAgentId);
           }
         })
@@ -197,6 +229,67 @@ export const AgentWorkspace = memo(function AgentWorkspace({
       current = false;
     };
   }, [selectedAgentId, refresh, view, onError]);
+  useEffect(() => {
+    if (catchUp < 0) {
+      lastCatchUp.current = catchUp;
+      return;
+    }
+    if (
+      view !== "chat" ||
+      catchUp === lastCatchUp.current ||
+      messagesAgentId !== selectedAgentId
+    ) return;
+    lastCatchUp.current = catchUp;
+    let current = true;
+    void (async () => {
+      let cursor = visibleMessages.at(-1)?.id;
+      if (!selectedAgentId) return;
+      if (!cursor) {
+        const page = await api.agentMessages(selectedAgentId, { limit: 50 });
+        if (current) {
+          setMessages(page.messages);
+          setHasOlderMessages(page.has_more);
+        }
+        return;
+      }
+      while (current) {
+        const page = await api.agentMessages(selectedAgentId, {
+          after_id: cursor,
+          limit: 100,
+        });
+        if (!current) return;
+        setMessages((existing) => mergeMessages(existing, page.messages));
+        const nextCursor = page.messages.at(-1)?.id;
+        if (!page.has_more || !nextCursor) return;
+        cursor = nextCursor;
+      }
+    })().catch(onError);
+    return () => {
+      current = false;
+    };
+  }, [catchUp, messagesAgentId, onError, selectedAgentId, view]);
+  const loadOlderMessages = useCallback(async () => {
+    const beforeId = visibleMessages[0]?.id;
+    if (!beforeId || !selectedAgentId || loadingOlderMessages) return;
+    const list = messageListRef.current;
+    const previousHeight = list?.scrollHeight ?? 0;
+    setLoadingOlderMessages(true);
+    try {
+      const page = await api.agentMessages(selectedAgentId, {
+        before_id: beforeId,
+        limit: 50,
+      });
+      setMessages((current) => mergeMessages(page.messages, current));
+      setHasOlderMessages(page.has_more);
+      window.requestAnimationFrame(() => {
+        if (list) list.scrollTop += list.scrollHeight - previousHeight;
+      });
+    } catch (error) {
+      onError(error);
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  }, [loadingOlderMessages, onError, selectedAgentId, visibleMessages]);
   useEffect(() => {
     let current = true;
     setWorktrees([]);
@@ -686,9 +779,13 @@ export const AgentWorkspace = memo(function AgentWorkspace({
               <AgentConversation
                 agentId={selected.id}
                 delta={deltas[selected.id] ?? ""}
+                hasOlder={hasOlderMessages}
                 loading={messagesLoading}
-                messages={messages}
+                loadingOlder={loadingOlderMessages}
+                listRef={messageListRef}
+                messages={visibleMessages}
                 messagesAgentId={messagesAgentId}
+                onLoadOlder={loadOlderMessages}
               />
               <form onSubmit={send}>
                 <label>

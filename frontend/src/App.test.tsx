@@ -100,12 +100,12 @@ describe("App agent routes", () => {
     vi.mocked(api.tickets).mockResolvedValue([]);
     vi.mocked(api.channels).mockResolvedValue([]);
     vi.mocked(api.agents).mockResolvedValue([agent]);
-    vi.mocked(api.agentMessages).mockResolvedValue([]);
+    vi.mocked(api.agentMessages).mockResolvedValue({ messages: [], has_more: false });
     vi.mocked(api.agentProjectSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentProjectWorktrees).mockResolvedValue([]);
     vi.mocked(api.agentScopes).mockResolvedValue([]);
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue({ messages: [], has_more: false });
   });
 
   afterEach(() => {
@@ -172,7 +172,7 @@ describe("App agent routes", () => {
     expect(
       await screen.findByRole("heading", { name: "#releases" }),
     ).toBeTruthy();
-    expect(api.messages).toHaveBeenLastCalledWith("releases");
+    expect(api.messages).toHaveBeenLastCalledWith("releases", { limit: 50 });
   });
 
   it("restores a project filter and open ticket from a direct link", async () => {
@@ -218,15 +218,16 @@ describe("App agent routes", () => {
   });
 
   it("refreshes history when chat becomes visible after a completion", async () => {
-    vi.mocked(api.agentMessages).mockResolvedValue([
-      {
+    vi.mocked(api.agentMessages).mockResolvedValue({
+      messages: [{
         id: 1,
         agent_id: agent.id,
         role: "agent",
         body: "Current history",
         created_at: 1,
-      },
-    ]);
+      }],
+      has_more: false,
+    });
     render(<App />);
     await screen.findByRole("heading", { name: "Agent settings" });
     expect(api.agentMessages).not.toHaveBeenCalled();
@@ -245,7 +246,7 @@ describe("App agent routes", () => {
     fireEvent.click(screen.getByRole("link", { name: "Back to chat" }));
     expect(await screen.findByText("Current history")).toBeTruthy();
     expect(api.agentMessages).toHaveBeenCalledTimes(1);
-    expect(api.agentMessages).toHaveBeenCalledWith(agent.id);
+    expect(api.agentMessages).toHaveBeenCalledWith(agent.id, { limit: 50 });
   });
 
   it("shows a useful fallback for a missing entity", async () => {
@@ -394,7 +395,7 @@ describe("App agent routes", () => {
     vi.mocked(api.channels).mockResolvedValue([
       { name: "general", description: "", most_recent_message_at: 0 },
     ]);
-    vi.mocked(api.messages).mockResolvedValue([]);
+    vi.mocked(api.messages).mockResolvedValue({ messages: [], has_more: false });
     render(<App />);
     await screen.findByText("No messages in #general yet.");
     fireEvent.change(screen.getByLabelText("Message"), {
@@ -411,7 +412,7 @@ describe("App agent routes", () => {
     expect(screen.queryByText("Remote post")).toBeNull();
 
     act(() => {
-      latestEventSource.onmessage?.({
+      const event = {
         data: JSON.stringify({
           agent_id: 0,
           kind: "board_message",
@@ -424,14 +425,131 @@ describe("App agent routes", () => {
             created_at: 0,
           },
         }),
+      } as MessageEvent;
+      latestEventSource.onmessage?.(event);
+      latestEventSource.onmessage?.(event);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 0,
+          kind: "board_message",
+          data: {
+            id: 5,
+            channel_name: "backend",
+            agent_id: null,
+            author: "human",
+            body: "Other channel",
+            created_at: 0,
+          },
+        }),
       } as MessageEvent);
     });
 
-    expect(screen.getByText("Remote post")).toBeTruthy();
+    expect(screen.getAllByText("Remote post")).toHaveLength(1);
+    expect(screen.queryByText("Other channel")).toBeNull();
     expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
       "Unsent reply",
     );
     expect(api.messages).toHaveBeenCalledTimes(1);
+  });
+
+  it("appends and deduplicates completed messages for only the visible agent", async () => {
+    window.history.replaceState(null, "", "#agents/1");
+    render(<App />);
+    await screen.findByRole("heading", { name: "worker" });
+    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      const visible = {
+        data: JSON.stringify({
+          agent_id: agent.id,
+          kind: "message",
+          data: {
+            id: 7,
+            agent_id: agent.id,
+            role: "agent",
+            body: "Completed answer",
+            created_at: 7,
+          },
+        }),
+      } as MessageEvent;
+      latestEventSource.onmessage?.(visible);
+      latestEventSource.onmessage?.(visible);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 2,
+          kind: "message",
+          data: {
+            id: 8,
+            agent_id: 2,
+            role: "agent",
+            body: "Other agent",
+            created_at: 8,
+          },
+        }),
+      } as MessageEvent);
+    });
+
+    expect(screen.getAllByText("Completed answer")).toHaveLength(1);
+    expect(screen.queryByText("Other agent")).toBeNull();
+    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("catches up the visible conversation once after reconnect and preserves its draft", async () => {
+    window.history.replaceState(null, "", "#messages/general");
+    vi.mocked(api.channels).mockResolvedValue([
+      { name: "general", description: "", most_recent_message_at: 0 },
+    ]);
+    vi.mocked(api.messages)
+      .mockResolvedValueOnce({
+        messages: [{
+          id: 10,
+          channel_name: "general",
+          agent_id: null,
+          author: "human",
+          body: "Before disconnect",
+          created_at: 10,
+        }],
+        has_more: false,
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            id: 10,
+            channel_name: "general",
+            agent_id: null,
+            author: "human",
+            body: "Before disconnect",
+            created_at: 10,
+          },
+          {
+            id: 11,
+            channel_name: "general",
+            agent_id: null,
+            author: "human",
+            body: "While disconnected",
+            created_at: 11,
+          },
+        ],
+        has_more: false,
+      });
+    render(<App />);
+    await screen.findByText("Before disconnect");
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Unsent reply" },
+    });
+
+    act(() => latestEventSource.onopen?.());
+    act(() => latestEventSource.onopen?.());
+
+    expect(await screen.findByText("While disconnected")).toBeTruthy();
+    expect(api.messages).toHaveBeenNthCalledWith(2, "general", {
+      after_id: 10,
+      limit: 100,
+    });
+    expect(screen.getAllByText("Before disconnect")).toHaveLength(1);
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+      "Unsent reply",
+    );
   });
 
   it("does not fan periodic refreshes out through hidden visited views", async () => {
@@ -453,7 +571,8 @@ describe("App agent routes", () => {
 
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
     expect(api.messages).toHaveBeenCalledTimes(1);
-    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+    expect(api.agentMessages).toHaveBeenCalledTimes(2);
+    expect(api.agentMessages).toHaveBeenLastCalledWith(agent.id, { limit: 50 });
     expect(api.agentProjectWorktrees).toHaveBeenCalledTimes(1);
     expect(api.agentScopes).toHaveBeenCalledTimes(1);
     expect(api.agentChannelSubscriptions).toHaveBeenCalledTimes(1);

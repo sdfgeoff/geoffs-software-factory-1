@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Agent, Ticket } from "../types";
+import type { Agent, AgentMessagePage, Ticket } from "../types";
 import { AgentWorkspace } from "./AgentWorkspace";
 
 const messageContentRender = vi.hoisted(() => vi.fn());
@@ -73,12 +73,15 @@ const ticket: Ticket = {
 };
 
 describe("AgentWorkspace", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.agentChannelSubscriptions).mockResolvedValue([]);
-    vi.mocked(api.agentMessages).mockResolvedValue([]);
+    vi.mocked(api.agentMessages).mockResolvedValue({ messages: [], has_more: false });
     vi.mocked(api.agentProjectSubscriptions).mockResolvedValue([1]);
     vi.mocked(api.agentProjectWorktrees).mockResolvedValue([
       {
@@ -102,15 +105,16 @@ describe("AgentWorkspace", () => {
   });
 
   it("does not rerender a 500-message history while typing", async () => {
-    vi.mocked(api.agentMessages).mockResolvedValue(
-      Array.from({ length: 500 }, (_, index) => ({
+    vi.mocked(api.agentMessages).mockResolvedValue({
+      messages: Array.from({ length: 500 }, (_, index) => ({
         id: index + 1,
         agent_id: agent.id,
         role: index % 2 === 0 ? "user" : "agent",
         body: `History ${index + 1}`,
         created_at: index,
       })),
-    );
+      has_more: false,
+    });
     render(
       <AgentWorkspace
         agents={[agent]}
@@ -134,6 +138,115 @@ describe("AgentWorkspace", () => {
       target: { value: "draft" },
     });
     expect(messageContentRender).not.toHaveBeenCalled();
+  });
+
+  it("prepends older agent messages without losing the draft or scroll position", async () => {
+    const initial = [
+      { id: 51, agent_id: agent.id, role: "agent" as const, body: "Message 51", created_at: 51 },
+      { id: 52, agent_id: agent.id, role: "agent" as const, body: "Message 52", created_at: 52 },
+    ];
+    let resolveOlder!: (value: AgentMessagePage) => void;
+    vi.mocked(api.agentMessages)
+      .mockResolvedValueOnce({ messages: initial, has_more: true })
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveOlder = resolve;
+      }));
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { container } = render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    const loadOlder = await screen.findByRole("button", { name: "Load older messages" });
+    const draft = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(draft, { target: { value: "Unsent draft" } });
+    const list = container.querySelector<HTMLElement>(".agent-chat")!;
+    let height = 1_000;
+    Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => height });
+    list.scrollTop = 100;
+
+    fireEvent.click(loadOlder);
+    expect(api.agentMessages).toHaveBeenLastCalledWith(agent.id, {
+      before_id: 51,
+      limit: 50,
+    });
+    height = 1_400;
+    await act(async () => {
+      resolveOlder({
+        messages: [
+          { id: 49, agent_id: agent.id, role: "user", body: "Message 49", created_at: 49 },
+          { id: 50, agent_id: agent.id, role: "agent", body: "Message 50", created_at: 50 },
+          initial[0],
+        ],
+        has_more: false,
+      });
+    });
+
+    expect((draft as HTMLTextAreaElement).value).toBe("Unsent draft");
+    expect(list.scrollTop).toBe(500);
+    expect(screen.getAllByText("Message 51")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
+  });
+
+  it("catches up agent messages after reconnect without losing the draft", async () => {
+    const first = {
+      id: 10,
+      agent_id: agent.id,
+      role: "agent" as const,
+      body: "Before disconnect",
+      created_at: 10,
+    };
+    vi.mocked(api.agentMessages)
+      .mockResolvedValueOnce({ messages: [first], has_more: false })
+      .mockResolvedValueOnce({
+        messages: [
+          first,
+          { ...first, id: 11, body: "While disconnected", created_at: 11 },
+        ],
+        has_more: false,
+      });
+    const props = {
+      agents: [agent],
+      channels: [],
+      tickets: [],
+      selectedAgentId: agent.id,
+      view: "chat" as const,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { rerender } = render(<AgentWorkspace {...props} catchUp={0} />);
+    await screen.findByText("Before disconnect");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "Unsent draft" },
+    });
+
+    rerender(<AgentWorkspace {...props} catchUp={1} />);
+
+    expect(await screen.findByText("While disconnected")).toBeTruthy();
+    expect(api.agentMessages).toHaveBeenNthCalledWith(2, agent.id, {
+      after_id: 10,
+      limit: 100,
+    });
+    expect(screen.getAllByText("Before disconnect")).toHaveLength(1);
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value)
+      .toBe("Unsent draft");
   });
 
   it("assigns the review capability with one explicit save", async () => {
