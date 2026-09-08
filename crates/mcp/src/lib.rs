@@ -15,6 +15,8 @@ use multi_agent_board_protocol::{
     TicketSummary, TicketSummaryPage, UpdateTicketRequest, WakeEvent,
 };
 
+pub mod tool;
+
 #[derive(Debug)]
 pub struct McpError(String);
 
