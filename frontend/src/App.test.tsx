@@ -217,6 +217,37 @@ describe("App agent routes", () => {
     expect(screen.getByRole("heading", { name: "Board settings" })).toBeTruthy();
   });
 
+  it("refreshes history when chat becomes visible after a completion", async () => {
+    vi.mocked(api.agentMessages).mockResolvedValue([
+      {
+        id: 1,
+        agent_id: agent.id,
+        role: "agent",
+        body: "Current history",
+        created_at: 1,
+      },
+    ]);
+    render(<App />);
+    await screen.findByRole("heading", { name: "Agent settings" });
+    expect(api.agentMessages).not.toHaveBeenCalled();
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: agent.id,
+          kind: "message",
+          data: {},
+        }),
+      } as MessageEvent);
+    });
+    expect(api.agentMessages).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("link", { name: "Back to chat" }));
+    expect(await screen.findByText("Current history")).toBeTruthy();
+    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+    expect(api.agentMessages).toHaveBeenCalledWith(agent.id);
+  });
+
   it("shows a useful fallback for a missing entity", async () => {
     window.history.replaceState(null, "", "#agents/999");
     render(<App />);

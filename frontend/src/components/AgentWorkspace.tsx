@@ -175,6 +175,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
     );
   }, [selected]);
   useEffect(() => {
+    if (view !== "chat") return;
     let current = true;
     setMessages([]);
     setMessagesLoading(Boolean(selectedAgentId));
@@ -195,7 +196,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
     return () => {
       current = false;
     };
-  }, [selectedAgentId, refresh, onError]);
+  }, [selectedAgentId, refresh, view, onError]);
   useEffect(() => {
     let current = true;
     setWorktrees([]);
