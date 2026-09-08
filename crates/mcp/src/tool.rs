@@ -6,8 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{BoardClient, McpError};
 
-pub type ToolFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, McpError>> + Send + 'a>>;
+pub type ToolFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, McpError>> + Send + 'a>>;
 
 pub trait Tool: Send + Sync + 'static {
     type Arguments: DeserializeOwned + JsonSchema + Send;
@@ -22,8 +21,7 @@ pub trait Tool: Send + Sync + 'static {
     ) -> ToolFuture<'a, Self::Output>;
 }
 
-type Execute<A, O> =
-    dyn for<'a> Fn(&'a BoardClient, A) -> ToolFuture<'a, O> + Send + Sync;
+type Execute<A, O> = dyn for<'a> Fn(&'a BoardClient, A) -> ToolFuture<'a, O> + Send + Sync;
 
 pub struct ToolDefinition<A, O> {
     name: &'static str,
@@ -36,10 +34,7 @@ impl<A, O> ToolDefinition<A, O> {
     pub fn new(
         name: &'static str,
         description: &'static str,
-        execute: impl for<'a> Fn(&'a BoardClient, A) -> ToolFuture<'a, O>
-        + Send
-        + Sync
-        + 'static,
+        execute: impl for<'a> Fn(&'a BoardClient, A) -> ToolFuture<'a, O> + Send + Sync + 'static,
     ) -> Self {
         Self {
             name,
@@ -112,7 +107,11 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn register<T: Tool>(&mut self, tool: T) -> Result<(), McpError> {
-        if self.tools.iter().any(|existing| existing.name() == tool.name()) {
+        if self
+            .tools
+            .iter()
+            .any(|existing| existing.name() == tool.name())
+        {
             return Err(McpError::bad_request(format!(
                 "duplicate tool: {}",
                 tool.name()
@@ -168,15 +167,19 @@ mod tests {
     }
 
     fn echo() -> ToolDefinition<EchoArguments, EchoOutput> {
-        ToolDefinition::new("echo", "Echo a message", |_board, arguments: EchoArguments| {
-            Box::pin(async move {
-                let message = match arguments.mode {
-                    Mode::Quiet => arguments.message,
-                    Mode::Loud => arguments.message.to_uppercase(),
-                };
-                Ok(EchoOutput { message })
-            })
-        })
+        ToolDefinition::new(
+            "echo",
+            "Echo a message",
+            |_board, arguments: EchoArguments| {
+                Box::pin(async move {
+                    let message = match arguments.mode {
+                        Mode::Quiet => arguments.message,
+                        Mode::Loud => arguments.message.to_uppercase(),
+                    };
+                    Ok(EchoOutput { message })
+                })
+            },
+        )
     }
 
     #[tokio::test]
@@ -186,7 +189,10 @@ mod tests {
         let definition = &registry.definitions()[0];
         assert_eq!(definition["name"], "echo");
         assert_eq!(definition["description"], "Echo a message");
-        assert_eq!(definition["inputSchema"]["required"], json!(["message", "mode"]));
+        assert_eq!(
+            definition["inputSchema"]["required"],
+            json!(["message", "mode"])
+        );
         assert_eq!(
             definition.pointer("/inputSchema/$defs/Mode/enum").unwrap(),
             &json!(["quiet", "loud"])
@@ -194,11 +200,7 @@ mod tests {
 
         let board = BoardClient::new("http://127.0.0.1:1".into(), 1);
         let output = registry
-            .call(
-                &board,
-                "echo",
-                json!({"message": "hello", "mode": "loud"}),
-            )
+            .call(&board, "echo", json!({"message": "hello", "mode": "loud"}))
             .await
             .unwrap();
         assert_eq!(output, json!({"message": "HELLO"}));
@@ -210,6 +212,9 @@ mod tests {
     fn duplicate_names_are_rejected() {
         let mut registry = ToolRegistry::default();
         registry.register(echo()).unwrap();
-        assert_eq!(registry.register(echo()).unwrap_err().to_string(), "duplicate tool: echo");
+        assert_eq!(
+            registry.register(echo()).unwrap_err().to_string(),
+            "duplicate tool: echo"
+        );
     }
 }
