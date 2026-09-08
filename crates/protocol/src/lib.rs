@@ -108,6 +108,12 @@ pub struct Message {
     pub created_at: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MessagePage {
+    pub messages: Vec<Message>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
@@ -173,6 +179,12 @@ pub struct AgentMessage {
     pub role: AgentMessageRole,
     pub body: String,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMessagePage {
+    pub messages: Vec<AgentMessage>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -488,9 +500,10 @@ pub struct ClaimTicketRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct MessageRangeQuery {
-    pub start_time: Option<i64>,
-    pub end_time: Option<i64>,
+pub struct MessagePageQuery {
+    pub before_id: Option<i64>,
+    pub after_id: Option<i64>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

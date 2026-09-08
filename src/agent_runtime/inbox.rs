@@ -131,8 +131,13 @@ impl AgentManager {
     pub async fn messages(
         &self,
         agent_id: i64,
-    ) -> Result<Vec<crate::domain::AgentMessage>, AppError> {
-        self.store.agent_messages(agent_id).await
+        before_id: Option<i64>,
+        after_id: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<(Vec<crate::domain::AgentMessage>, bool), AppError> {
+        self.store
+            .agent_messages(agent_id, before_id, after_id, limit)
+            .await
     }
 
     pub async fn send_message(&self, agent_id: i64, message: &str) -> Result<Agent, AppError> {
@@ -674,7 +679,13 @@ mod tests {
         assert_eq!(updated.state, AgentState::Running);
         assert_eq!(updated.active_turn_id.as_deref(), Some("turn-1"));
         assert_eq!(
-            manager.store.agent_messages(agent.id).await.unwrap().len(),
+            manager
+                .store
+                .agent_messages(agent.id, None, None, None)
+                .await
+                .unwrap()
+                .0
+                .len(),
             1
         );
         assert_eq!(
@@ -1070,7 +1081,11 @@ mod tests {
             events[0].delivery_state,
             crate::domain::WakeEventState::Delivered
         );
-        let history = manager.store.agent_messages(agent.id).await.unwrap();
+        let (history, _) = manager
+            .store
+            .agent_messages(agent.id, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(history.len(), 1);
         assert!(history[0].body.contains("Actual delivery time:"));
         assert!(history[0].body.ends_with("Check the deployment"));
@@ -1218,7 +1233,15 @@ mod tests {
             let unchanged = manager.send_message(agent.id, "Wait here").await.unwrap();
 
             assert_eq!(unchanged.state, state);
-            assert_eq!(store.agent_messages(agent.id).await.unwrap().len(), 1);
+            assert_eq!(
+                store
+                    .agent_messages(agent.id, None, None, None)
+                    .await
+                    .unwrap()
+                    .0
+                    .len(),
+                1
+            );
             assert_eq!(
                 store.wake_events(agent.id).await.unwrap()[0].delivery_state,
                 crate::domain::WakeEventState::Pending

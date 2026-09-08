@@ -18,6 +18,33 @@ pub(crate) use settings::MERGE_NOTIFICATION_CHANNEL_DESCRIPTION;
 pub(crate) use tickets::MergeNotification;
 pub use tickets::{NewTicket, ReviewSubmission, TicketChanges};
 
+pub(crate) const DEFAULT_MESSAGE_PAGE_SIZE: i64 = 50;
+pub(crate) const MAX_MESSAGE_PAGE_SIZE: i64 = 100;
+
+fn message_page_size(
+    before_id: Option<i64>,
+    after_id: Option<i64>,
+    limit: Option<i64>,
+) -> Result<i64, crate::error::AppError> {
+    if before_id.is_some() && after_id.is_some() {
+        return Err(crate::error::AppError::bad_request(
+            "before_id and after_id cannot be combined",
+        ));
+    }
+    if before_id.is_some_and(|id| id <= 0) || after_id.is_some_and(|id| id <= 0) {
+        return Err(crate::error::AppError::bad_request(
+            "message cursor IDs must be positive",
+        ));
+    }
+    let limit = limit.unwrap_or(DEFAULT_MESSAGE_PAGE_SIZE);
+    if !(1..=MAX_MESSAGE_PAGE_SIZE).contains(&limit) {
+        return Err(crate::error::AppError::bad_request(format!(
+            "message page size must be between 1 and {MAX_MESSAGE_PAGE_SIZE}",
+        )));
+    }
+    Ok(limit)
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,

@@ -4,12 +4,12 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, Agent, AgentMessage, AgentProjectWorktree, BoardSettings, Channel,
+    AGENT_ID_HEADER, Agent, AgentMessagePage, AgentProjectWorktree, BoardSettings, Channel,
     ClaimTicketRequest, CreateAgentRequest, CreateChannelRequest, CreateTicketRequest,
-    CreateWakeEventRequest, ErrorResponse, Message, MessageRangeQuery, PostMessageRequest, Project,
-    RegisterProjectRequest, Reminder, RenameAgentRequest, RequestChangesRequest,
-    ReserveTicketsRequest, ReviewRevisionRequest, ScheduleSelfReminderRequest,
-    SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
+    CreateWakeEventRequest, ErrorResponse, Message, MessagePage, MessagePageQuery,
+    PostMessageRequest, Project, RegisterProjectRequest, Reminder, RenameAgentRequest,
+    RequestChangesRequest, ReserveTicketsRequest, ReviewRevisionRequest,
+    ScheduleSelfReminderRequest, SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
     SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
     SetBoardSettingsRequest, SetProjectRequest, Ticket, TicketActivity, TicketClaimResponse,
     UpdateTicketRequest, WakeEvent,
@@ -254,14 +254,17 @@ impl BoardClient {
     pub async fn messages(
         &self,
         name: &str,
-        range: &MessageRangeQuery,
-    ) -> Result<Vec<Message>, McpError> {
+        page: &MessagePageQuery,
+    ) -> Result<MessagePage, McpError> {
         let mut query = Vec::new();
-        if let Some(start) = range.start_time {
-            query.push(format!("start_time={start}"));
+        if let Some(before_id) = page.before_id {
+            query.push(format!("before_id={before_id}"));
         }
-        if let Some(end) = range.end_time {
-            query.push(format!("end_time={end}"));
+        if let Some(after_id) = page.after_id {
+            query.push(format!("after_id={after_id}"));
+        }
+        if let Some(limit) = page.limit {
+            query.push(format!("limit={limit}"));
         }
         let suffix = if query.is_empty() {
             String::new()
@@ -415,8 +418,28 @@ impl BoardClient {
             .await
     }
 
-    pub async fn agent_messages(&self, agent_id: i64) -> Result<Vec<AgentMessage>, McpError> {
-        self.get(&format!("/agents/{agent_id}/messages")).await
+    pub async fn agent_messages(
+        &self,
+        agent_id: i64,
+        page: &MessagePageQuery,
+    ) -> Result<AgentMessagePage, McpError> {
+        let mut query = Vec::new();
+        if let Some(before_id) = page.before_id {
+            query.push(format!("before_id={before_id}"));
+        }
+        if let Some(after_id) = page.after_id {
+            query.push(format!("after_id={after_id}"));
+        }
+        if let Some(limit) = page.limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/agents/{agent_id}/messages{suffix}"))
+            .await
     }
 
     pub async fn send_agent_message(
@@ -725,7 +748,7 @@ fn tools() -> Value {
         tool(
             "read_message_board_channel",
             "Read messages in an optional inclusive time range",
-            json!({"type":"object","properties":{"channel_name":{"type":"string"},"start_time":{"type":"integer"},"end_time":{"type":"integer"}},"required":["channel_name"]})
+            json!({"type":"object","properties":{"channel_name":{"type":"string"},"before_id":{"type":"integer","minimum":1},"after_id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["channel_name"]})
         ),
         tool(
             "post_to_message_board",
@@ -804,14 +827,16 @@ struct TicketChangesRequest {
 #[derive(Deserialize)]
 struct ReadChannelRequest {
     channel_name: String,
-    start_time: Option<i64>,
-    end_time: Option<i64>,
+    before_id: Option<i64>,
+    after_id: Option<i64>,
+    limit: Option<i64>,
 }
 
 #[derive(Serialize)]
 struct ReadChannelResponse {
     channel: Channel,
     messages: Vec<Message>,
+    has_more: bool,
 }
 
 #[derive(Deserialize)]
@@ -950,17 +975,20 @@ async fn call_tool(
         }
         "read_message_board_channel" => {
             let request: ReadChannelRequest = decode(&args)?;
+            let page = board
+                .messages(
+                    &request.channel_name,
+                    &MessagePageQuery {
+                        before_id: request.before_id,
+                        after_id: request.after_id,
+                        limit: request.limit,
+                    },
+                )
+                .await?;
             encode(ReadChannelResponse {
                 channel: board.channel(&request.channel_name).await?,
-                messages: board
-                    .messages(
-                        &request.channel_name,
-                        &MessageRangeQuery {
-                            start_time: request.start_time,
-                            end_time: request.end_time,
-                        },
-                    )
-                    .await?,
+                messages: page.messages,
+                has_more: page.has_more,
             })?
         }
         "post_to_message_board" => {

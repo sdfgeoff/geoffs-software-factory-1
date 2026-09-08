@@ -10,7 +10,7 @@ use jiff::Timestamp;
 use multi_agent_board_protocol::{self as protocol, Patch};
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
-    CreateWakeEventRequest, MessageRangeQuery, PostMessageRequest, RegisterProjectRequest,
+    CreateWakeEventRequest, MessagePageQuery, PostMessageRequest, RegisterProjectRequest,
     ReserveTicketsRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
     SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetProjectRequest,
     UpdateTicketRequest,
@@ -685,16 +685,15 @@ async fn create_channel(
 async fn read_messages(
     State(store): State<Store>,
     Path(name): Path<String>,
-    Query(range): Query<MessageRangeQuery>,
-) -> Result<Json<Vec<protocol::Message>>, AppError> {
-    Ok(Json(
-        store
-            .messages(&name, range.start_time, range.end_time)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    ))
+    Query(query): Query<MessagePageQuery>,
+) -> Result<Json<protocol::MessagePage>, AppError> {
+    let (messages, has_more) = store
+        .messages(&name, query.before_id, query.after_id, query.limit)
+        .await?;
+    Ok(Json(protocol::MessagePage {
+        messages: messages.into_iter().map(Into::into).collect(),
+        has_more,
+    }))
 }
 
 async fn post_message(
@@ -764,6 +763,45 @@ mod tests {
         .unwrap()
         .trim()
         .into()
+    }
+
+    #[tokio::test]
+    async fn channel_message_endpoint_returns_typed_pages() {
+        let store = Store::memory().await.unwrap();
+        for number in 1..=3 {
+            store
+                .post_message("general", None, "human", &format!("Message {number}"))
+                .await
+                .unwrap();
+        }
+        let app = test_router(store);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/channels/general/messages?limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(page["messages"][0]["body"], "Message 2");
+        assert_eq!(page["messages"][1]["body"], "Message 3");
+        assert_eq!(page["has_more"], true);
+
+        let invalid = app
+            .oneshot(
+                Request::get("/channels/general/messages?limit=101")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 
     fn test_router(store: Store) -> Router {

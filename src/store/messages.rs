@@ -5,7 +5,7 @@ use crate::{
     error::AppError,
 };
 
-use super::Store;
+use super::{Store, message_page_size};
 
 pub(super) struct MessageWrite<'a> {
     pub(super) channel: &'a str,
@@ -70,25 +70,43 @@ impl Store {
     pub async fn messages(
         &self,
         channel: &str,
-        start: Option<i64>,
-        end: Option<i64>,
-    ) -> Result<Vec<Message>, AppError> {
+        before_id: Option<i64>,
+        after_id: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<(Vec<Message>, bool), AppError> {
         validate_channel(channel)?;
         if !self.channel_exists(channel).await? {
             return Err(AppError::not_found("channel not found"));
         }
-        Ok(sqlx::query_as(
-            "SELECT id, channel_name, agent_id, author, body, created_at FROM messages \
-             WHERE channel_name = ? AND (? IS NULL OR created_at >= ?) \
-             AND (? IS NULL OR created_at <= ?) ORDER BY created_at, id",
-        )
-        .bind(channel)
-        .bind(start)
-        .bind(start)
-        .bind(end)
-        .bind(end)
-        .fetch_all(&self.pool)
-        .await?)
+        let page_size = message_page_size(before_id, after_id, limit)?;
+        let mut messages: Vec<Message> = if let Some(after_id) = after_id {
+            sqlx::query_as(
+                "SELECT id, channel_name, agent_id, author, body, created_at FROM messages \
+                 WHERE channel_name = ? AND id > ? ORDER BY id LIMIT ?",
+            )
+            .bind(channel)
+            .bind(after_id)
+            .bind(page_size + 1)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, channel_name, agent_id, author, body, created_at FROM messages \
+                 WHERE channel_name = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?",
+            )
+            .bind(channel)
+            .bind(before_id)
+            .bind(before_id)
+            .bind(page_size + 1)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = messages.len() > page_size as usize;
+        messages.truncate(page_size as usize);
+        if after_id.is_none() {
+            messages.reverse();
+        }
+        Ok((messages, has_more))
     }
 
     pub async fn post_message(
@@ -417,6 +435,62 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn message_pages_are_cursor_ordered_and_capped() {
+        let store = Store::memory().await.unwrap();
+        let mut inserted = Vec::new();
+        for number in 1..=5 {
+            inserted.push(
+                store
+                    .post_message("general", None, "human", &format!("Message {number}"))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let (newest, has_more) = store
+            .messages("general", None, None, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            newest.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![inserted[3].id, inserted[4].id]
+        );
+        assert!(has_more);
+
+        let (older, has_more) = store
+            .messages("general", Some(inserted[3].id), None, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            older.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![inserted[1].id, inserted[2].id]
+        );
+        assert!(has_more);
+
+        let (newer, has_more) = store
+            .messages("general", None, Some(inserted[1].id), Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            newer.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![inserted[2].id, inserted[3].id]
+        );
+        assert!(has_more);
+        assert!(
+            store
+                .messages("general", Some(1), Some(2), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .messages("general", None, None, Some(101))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn channel_description_migration_preserves_existing_channels() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query("CREATE TABLE channels (name TEXT PRIMARY KEY)")
@@ -453,9 +527,10 @@ mod tests {
         assert_eq!(channel.description, "Backend coordination");
         assert!(
             store
-                .messages("backend", None, None)
+                .messages("backend", None, None, None)
                 .await
                 .unwrap()
+                .0
                 .is_empty()
         );
         store
@@ -466,9 +541,10 @@ mod tests {
         assert_eq!(store.channels().await.unwrap().len(), 2);
         assert_eq!(
             store
-                .messages("backend", None, None)
+                .messages("backend", None, None, None)
                 .await
                 .unwrap()
+                .0
                 .first()
                 .unwrap()
                 .body,
@@ -510,7 +586,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(retry.id, first.id);
-        assert_eq!(store.messages("merges", None, None).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .messages("merges", None, None, None)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -570,7 +654,7 @@ mod tests {
 
         assert_eq!(renamed.name, "builder");
         assert_eq!(renamed.home_path, "/tmp/worker.agent-home");
-        let messages = store.messages("general", None, None).await.unwrap();
+        let (messages, _) = store.messages("general", None, None, None).await.unwrap();
         assert_eq!(messages[0].author, "human");
         assert_eq!(messages[0].agent_id, None);
         assert_eq!(messages[1].author, "human");

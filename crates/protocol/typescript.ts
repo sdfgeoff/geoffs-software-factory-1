@@ -87,6 +87,11 @@ export interface Message {
 
 export type BoardMessage = Message;
 
+export interface MessagePage {
+  messages: Message[];
+  has_more: boolean;
+}
+
 export type AgentState = "paused" | "idle" | "running" | "awaiting_approval" | "error";
 
 export interface Agent {
@@ -122,6 +127,11 @@ export interface AgentMessage {
   role: AgentMessageRole;
   body: string;
   created_at: number;
+}
+
+export interface AgentMessagePage {
+  messages: AgentMessage[];
+  has_more: boolean;
 }
 
 export type ReminderState = "scheduled" | "enqueued" | "cancelled";
@@ -280,9 +290,10 @@ export interface ClaimTicketRequest {
   expected_revision?: number | null;
 }
 
-export interface MessageRangeQuery {
-  start_time?: number | null;
-  end_time?: number | null;
+export interface MessagePageQuery {
+  before_id?: number | null;
+  after_id?: number | null;
+  limit?: number | null;
 }
 
 export interface PostMessageRequest {

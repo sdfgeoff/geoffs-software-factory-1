@@ -6,7 +6,7 @@ use crate::{
     error::AppError,
 };
 
-use super::Store;
+use super::{Store, message_page_size};
 
 impl Store {
     pub async fn agent_scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
@@ -490,17 +490,45 @@ impl Store {
         Ok(self.agent(id).await?)
     }
 
-    pub async fn agent_messages(&self, agent_id: i64) -> Result<Vec<AgentMessage>, AppError> {
+    pub async fn agent_messages(
+        &self,
+        agent_id: i64,
+        before_id: Option<i64>,
+        after_id: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<(Vec<AgentMessage>, bool), AppError> {
         if self.agent(agent_id).await?.is_none() {
             return Err(AppError::not_found("agent not found"));
         }
-        Ok(sqlx::query_as(
-            "SELECT id, agent_id, role, body, created_at FROM agent_messages \
-             WHERE agent_id = ? ORDER BY created_at, id",
-        )
-        .bind(agent_id)
-        .fetch_all(&self.pool)
-        .await?)
+        let page_size = message_page_size(before_id, after_id, limit)?;
+        let mut messages: Vec<AgentMessage> = if let Some(after_id) = after_id {
+            sqlx::query_as(
+                "SELECT id, agent_id, role, body, created_at FROM agent_messages \
+                 WHERE agent_id = ? AND id > ? ORDER BY id LIMIT ?",
+            )
+            .bind(agent_id)
+            .bind(after_id)
+            .bind(page_size + 1)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, agent_id, role, body, created_at FROM agent_messages \
+                 WHERE agent_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?",
+            )
+            .bind(agent_id)
+            .bind(before_id)
+            .bind(before_id)
+            .bind(page_size + 1)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        let has_more = messages.len() > page_size as usize;
+        messages.truncate(page_size as usize);
+        if after_id.is_none() {
+            messages.reverse();
+        }
+        Ok((messages, has_more))
     }
 
     pub async fn add_agent_message(
@@ -625,6 +653,41 @@ mod tests {
     use sqlx::SqlitePool;
 
     use super::*;
+
+    #[tokio::test]
+    async fn agent_message_pages_are_cursor_ordered() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let mut inserted = Vec::new();
+        for number in 1..=4 {
+            inserted.push(
+                store
+                    .add_agent_message(agent.id, "agent", &format!("Message {number}"))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let (newest, has_more) = store
+            .agent_messages(agent.id, None, None, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            newest.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![inserted[2].id, inserted[3].id]
+        );
+        assert!(has_more);
+
+        let (older, has_more) = store
+            .agent_messages(agent.id, Some(inserted[2].id), None, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            older.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![inserted[0].id, inserted[1].id]
+        );
+        assert!(!has_more);
+    }
 
     #[tokio::test]
     async fn project_subscriptions_default_to_the_agents_initial_project() {

@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -93,16 +93,19 @@ async fn agent_project_worktrees(
 async fn list_messages(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<protocol::AgentMessage>>, AppError> {
-    Ok(Json(
-        manager
-            .messages(id)
-            .await?
+    Query(query): Query<protocol::MessagePageQuery>,
+) -> Result<Json<protocol::AgentMessagePage>, AppError> {
+    let (messages, has_more) = manager
+        .messages(id, query.before_id, query.after_id, query.limit)
+        .await?;
+    Ok(Json(protocol::AgentMessagePage {
+        messages: messages
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<_, _>>()
             .map_err(AppError::internal)?,
-    ))
+        has_more,
+    }))
 }
 
 async fn send_message(
@@ -335,6 +338,40 @@ mod tests {
         .expect("keep-alive body should be readable");
 
         assert_eq!(chunk.as_ref(), b": keep-alive\n\n");
+    }
+
+    #[tokio::test]
+    async fn agent_message_endpoint_returns_typed_pages() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        for number in 1..=3 {
+            store
+                .add_agent_message(agent.id, "agent", &format!("Message {number}"))
+                .await
+                .unwrap();
+        }
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+
+        let response = router(manager)
+            .oneshot(
+                Request::get(format!("/agents/{}/messages?limit=2", agent.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(page["messages"][0]["body"], "Message 2");
+        assert_eq!(page["messages"][1]["body"], "Message 3");
+        assert_eq!(page["has_more"], true);
     }
 
     #[tokio::test]

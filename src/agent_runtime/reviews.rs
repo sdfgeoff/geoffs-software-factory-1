@@ -488,9 +488,10 @@ mod tests {
         assert_eq!(unchanged.revision, ticket.revision);
         assert!(
             store
-                .messages("merges", None, None)
+                .messages("merges", None, None, None)
                 .await
                 .unwrap()
+                .0
                 .is_empty()
         );
         assert!(events.try_recv().is_err());
@@ -567,7 +568,7 @@ mod tests {
         let resulting_commit = git_text(repository.to_str().unwrap(), &["rev-parse", "HEAD"])
             .await
             .unwrap();
-        let messages = store.messages("merges", None, None).await.unwrap();
+        let (messages, _) = store.messages("merges", None, None, None).await.unwrap();
         assert_eq!(messages.len(), 1);
         let source_branch = format!("Source branch: `agents/{}`", worker.id);
         for expected in [
@@ -661,7 +662,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.state, TicketState::Done);
-        assert_eq!(store.messages("merges", None, None).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .messages("merges", None, None, None)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
         assert_eq!(
             git_text(
                 repository.to_str().unwrap(),
@@ -867,9 +876,10 @@ mod tests {
         );
         assert!(
             store
-                .messages("general", None, None)
+                .messages("general", None, None, None)
                 .await
                 .unwrap()
+                .0
                 .is_empty()
         );
         std::fs::remove_dir_all(base).unwrap();
