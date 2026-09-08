@@ -456,7 +456,7 @@ describe("App agent routes", () => {
     window.history.replaceState(null, "", "#agents/1");
     render(<App />);
     await screen.findByRole("heading", { name: "worker" });
-    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.agentMessages).toHaveBeenCalledTimes(1));
 
     act(() => {
       const visible = {
@@ -649,6 +649,9 @@ describe("App agent routes", () => {
     render(<App />);
     const title = await screen.findByDisplayValue(ticket.title);
     fireEvent.change(title, { target: { value: "My unfinished title" } });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("My unfinished title")).toBeTruthy(),
+    );
 
     act(() => {
       latestEventSource.onmessage?.({
