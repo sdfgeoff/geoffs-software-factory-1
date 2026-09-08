@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -19,7 +20,7 @@ const messageSchema: SanitizeOptions = {
   },
 };
 
-export function MessageContent({ source }: { source: string }) {
+export const MessageContent = memo(function MessageContent({ source }: { source: string }) {
   return (
     <div className="message-content">
       <ReactMarkdown
@@ -34,4 +35,4 @@ export function MessageContent({ source }: { source: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});

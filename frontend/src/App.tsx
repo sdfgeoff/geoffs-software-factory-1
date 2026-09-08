@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import {
   AgentWorkspace,
@@ -104,6 +104,14 @@ export function App() {
   const [deltas, setDeltas] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const reloadTimer = useRef<number | null>(null);
+  const deltaTimer = useRef<number | null>(null);
+  const pendingDelta = useRef<{ agentId: number; text: string } | null>(null);
+  const activeAgentId =
+    route.view === "agents" && route.agentView === "chat"
+      ? route.agentId
+      : null;
+  const activeAgentIdRef = useRef(activeAgentId);
+  activeAgentIdRef.current = activeAgentId;
   const [visitedViews, setVisitedViews] = useState(() => new Set([route.view]));
   const [lastBoardRoute, setLastBoardRoute] = useState(() =>
     route.view === "board"
@@ -191,15 +199,37 @@ export function App() {
   useEffect(() => {
     void reload();
     const source = new EventSource("/api/events");
+    let opened = false;
+    source.onopen = () => {
+      if (opened) scheduleReload();
+      opened = true;
+    };
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as AgentEvent;
       switch (event.kind) {
         case "agent_message_delta":
-          setDeltas((current) => ({
-            ...current,
-            [event.agent_id]:
-              (current[event.agent_id] ?? "") + event.data.delta,
-          }));
+          if (event.agent_id !== activeAgentIdRef.current) break;
+          if (pendingDelta.current?.agentId === event.agent_id) {
+            pendingDelta.current.text += event.data.delta;
+          } else {
+            pendingDelta.current = {
+              agentId: event.agent_id,
+              text: event.data.delta,
+            };
+          }
+          if (deltaTimer.current === null) {
+            deltaTimer.current = window.setTimeout(() => {
+              deltaTimer.current = null;
+              const pending = pendingDelta.current;
+              pendingDelta.current = null;
+              if (!pending || pending.agentId !== activeAgentIdRef.current) return;
+              setDeltas((current) => ({
+                ...current,
+                [pending.agentId]:
+                  (current[pending.agentId] ?? "") + pending.text,
+              }));
+            }, 16);
+          }
           break;
         case "agent_updated":
         case "agent_created":
@@ -218,6 +248,10 @@ export function App() {
           }));
           break;
         case "message":
+          if (event.agent_id !== activeAgentIdRef.current) break;
+          if (pendingDelta.current?.agentId === event.agent_id) {
+            pendingDelta.current = null;
+          }
           setDeltas((current) => ({ ...current, [event.agent_id]: "" }));
           setAgentMessageRefresh((value) => value + 1);
           break;
@@ -241,8 +275,14 @@ export function App() {
     return () => {
       source.close();
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
+      if (deltaTimer.current !== null) window.clearTimeout(deltaTimer.current);
     };
   }, [mergeAgent, mergeTickets, reload, scheduleReload]);
+
+  useEffect(() => {
+    pendingDelta.current = null;
+    setDeltas((current) => Object.keys(current).length === 0 ? current : {});
+  }, [activeAgentId]);
 
   useEffect(() => {
     const followRoute = () => setRoute(parseRoute(window.location.hash));
@@ -269,6 +309,14 @@ export function App() {
     }
     setRoute(nextRoute);
   }, []);
+  const selectMessageChannel = useCallback(
+    (channel: string) => navigate({ view: "messages", channel }),
+    [navigate],
+  );
+  const selectAgent = useCallback(
+    (agentId: number) => navigate({ view: "agents", agentId, agentView: "chat" }),
+    [navigate],
+  );
   const report = useCallback(
     (cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause)),
@@ -283,6 +331,18 @@ export function App() {
     route.view === "board" && route.ticketId
       ? tickets.find((ticket) => ticket.id === route.ticketId)
       : null;
+  const changeAgentView = useCallback(
+    (nextView: AgentView) => {
+      if (selectedAgentId) {
+        navigate({ view: "agents", agentId: selectedAgentId, agentView: nextView });
+      }
+    },
+    [navigate, selectedAgentId],
+  );
+  const liveBoardMessages = useMemo(
+    () => Object.values(boardMessages),
+    [boardMessages],
+  );
   const missingEntity = loaded && (
     route.view === "not_found"
       ? "Page not found"
@@ -412,11 +472,9 @@ export function App() {
           channels={channels}
           selectedChannelName={route.view === "messages" ? route.channel : lastMessageChannel}
           refresh={0}
-          liveMessages={Object.values(boardMessages)}
-          onSelectChannel={(channel) => navigate({ view: "messages", channel })}
-          onSelectAgent={(agentId) =>
-            navigate({ view: "agents", agentId, agentView: "chat" })
-          }
+          liveMessages={liveBoardMessages}
+          onSelectChannel={selectMessageChannel}
+          onSelectAgent={selectAgent}
           onChanged={mergeChannel}
           onError={report}
         />
@@ -431,21 +489,11 @@ export function App() {
           projects={projects}
           selectedAgentId={selectedAgentId}
           view={agentView}
-          refresh={agentMessageRefresh}
-          detailRefresh={agentDetailRefresh}
+          refresh={route.view === "agents" ? agentMessageRefresh : -1}
+          detailRefresh={route.view === "agents" ? agentDetailRefresh : -1}
           deltas={deltas}
-          onSelectAgent={(agentId) =>
-            navigate({ view: "agents", agentId, agentView: "chat" })
-          }
-          onViewChange={(nextView) => {
-            if (selectedAgentId) {
-              navigate({
-                view: "agents",
-                agentId: selectedAgentId,
-                agentView: nextView,
-              });
-            }
-          }}
+          onSelectAgent={selectAgent}
+          onViewChange={changeAgentView}
           onChanged={mergeAgent}
           onError={report}
         />

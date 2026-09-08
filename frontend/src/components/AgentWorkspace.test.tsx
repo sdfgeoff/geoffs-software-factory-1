@@ -4,6 +4,15 @@ import { api } from "../api";
 import type { Agent, Ticket } from "../types";
 import { AgentWorkspace } from "./AgentWorkspace";
 
+const messageContentRender = vi.hoisted(() => vi.fn());
+
+vi.mock("./MessageContent", () => ({
+  MessageContent: ({ source }: { source: string }) => {
+    messageContentRender(source);
+    return <div>{source}</div>;
+  },
+}));
+
 vi.mock("../api", () => ({
   api: {
     agentChannelSubscriptions: vi.fn(),
@@ -90,6 +99,41 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.setAgentChannelSubscriptions).mockResolvedValue(["general"]);
     vi.mocked(api.setAgentProjectSubscriptions).mockResolvedValue([]);
     vi.mocked(api.setAgentWakeSettings).mockResolvedValue(agent);
+  });
+
+  it("does not rerender a 500-message history while typing", async () => {
+    vi.mocked(api.agentMessages).mockResolvedValue(
+      Array.from({ length: 500 }, (_, index) => ({
+        id: index + 1,
+        agent_id: agent.id,
+        role: index % 2 === 0 ? "user" : "agent",
+        body: `History ${index + 1}`,
+        created_at: index,
+      })),
+    );
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("History 500")).toBeTruthy();
+    expect(messageContentRender).toHaveBeenCalledTimes(500);
+    messageContentRender.mockClear();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "draft" },
+    });
+    expect(messageContentRender).not.toHaveBeenCalled();
   });
 
   it("assigns the review capability with one explicit save", async () => {

@@ -623,6 +623,10 @@ aside button.selected {
 .streaming {
   opacity: 0.75;
 }
+
+.streaming-text {
+  white-space: pre-wrap;
+}
 .agent-button {
   justify-content: space-between;
   align-items: center;

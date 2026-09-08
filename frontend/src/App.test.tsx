@@ -78,6 +78,7 @@ const ticket: Ticket = {
 };
 
 class MockEventSource {
+  onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   constructor() {
     latestEventSource = this;
@@ -262,7 +263,7 @@ describe("App agent routes", () => {
       } as MessageEvent);
     });
 
-    expect(screen.getByText("Working")).toBeTruthy();
+    expect(await screen.findByText("Working")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "architect" })).toBeTruthy();
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
     expect(api.agents).toHaveBeenCalledTimes(1);
@@ -298,6 +299,63 @@ describe("App agent routes", () => {
     expect(api.tickets).toHaveBeenCalledTimes(3);
     expect(api.channels).toHaveBeenCalledTimes(3);
     expect(api.settings).toHaveBeenCalledTimes(3);
+  });
+
+  it("coalesces visible-agent deltas and ignores unrelated agents", async () => {
+    window.history.replaceState(null, "", "#agents/1");
+    render(<App />);
+    await screen.findByRole("heading", { name: "worker" });
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 2,
+          kind: "agent_message_delta",
+          data: { delta: "Hidden" },
+        }),
+      } as MessageEvent);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ agent_id: 2, kind: "message", data: {} }),
+      } as MessageEvent);
+      for (const delta of ["One ", "two ", "three"]) {
+        latestEventSource.onmessage?.({
+          data: JSON.stringify({
+            agent_id: agent.id,
+            kind: "agent_message_delta",
+            data: { delta },
+          }),
+        } as MessageEvent);
+      }
+    });
+
+    expect(screen.queryByText("Hidden")).toBeNull();
+    expect(screen.queryByText("One two three")).toBeNull();
+    expect(await screen.findByText("One two three")).toBeTruthy();
+    expect(screen.queryByText("Hidden")).toBeNull();
+    expect(api.agentMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders incomplete streaming text without the rich-content pipeline", async () => {
+    window.history.replaceState(null, "", "#agents/1");
+    render(<App />);
+    await screen.findByRole("heading", { name: "worker" });
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: agent.id,
+          kind: "agent_message_delta",
+          data: { delta: "**unfinished**" },
+        }),
+      } as MessageEvent);
+    });
+
+    const stream = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(".streaming-text");
+      expect(element?.textContent).toBe("**unfinished**");
+      return element!;
+    });
+    expect(stream.querySelector("strong")).toBeNull();
   });
 
   it("merges board messages without treating agent-thread messages as channel posts", async () => {
@@ -369,6 +427,23 @@ describe("App agent routes", () => {
     expect(api.agentScopes).toHaveBeenCalledTimes(1);
     expect(api.agentChannelSubscriptions).toHaveBeenCalledTimes(1);
     expect(api.agentProjectSubscriptions).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs once after reconnect without reloading for the initial open", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Agent settings" });
+
+    act(() => latestEventSource.onopen?.());
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
+    expect(api.agents).toHaveBeenCalledTimes(1);
+
+    act(() => latestEventSource.onopen?.());
+    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
+    expect(api.project).toHaveBeenCalledTimes(2);
+    expect(api.projects).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(2);
+    expect(api.channels).toHaveBeenCalledTimes(2);
+    expect(api.settings).toHaveBeenCalledTimes(2);
   });
 
   it("refreshes agent details for the project_subscriptions event", async () => {

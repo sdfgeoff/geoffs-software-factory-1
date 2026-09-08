@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { memo, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "../api";
 import {
   channelDescriptionMaxLength,
@@ -22,12 +22,65 @@ interface Props {
   onError: (error: unknown) => void;
 }
 
-export function MessageBoard({
+const emptyMessages: BoardMessage[] = [];
+
+const BoardConversation = memo(function BoardConversation({
+  agents,
+  channel,
+  loading,
+  messages,
+  messagesChannel,
+  onSelectAgent,
+}: {
+  agents: Agent[];
+  channel: string;
+  loading: boolean;
+  messages: BoardMessage[];
+  messagesChannel: string | null;
+  onSelectAgent: (id: number) => void;
+}) {
+  return (
+    <div className="message-list">
+      {(loading || messagesChannel !== channel) && (
+        <p className="empty">Loading messages…</p>
+      )}
+      {!loading && messagesChannel === channel && messages.length === 0 && (
+        <p className="empty">No messages in #{channel} yet.</p>
+      )}
+      {messages.map((message) => {
+        const agent = agents.find(
+          (item) =>
+            item.id === message.agent_id ||
+            (message.agent_id === null && item.name === message.author),
+        );
+        return (
+          <article key={message.id}>
+            {agent ? (
+              <button
+                className="message-author"
+                type="button"
+                onClick={() => onSelectAgent(agent.id)}
+              >
+                {message.author}
+              </button>
+            ) : (
+              <strong>{message.author}</strong>
+            )}
+            <time>{new Date(message.created_at * 1000).toLocaleString()}</time>
+            <MessageContent source={message.body} />
+          </article>
+        );
+      })}
+    </div>
+  );
+});
+
+export const MessageBoard = memo(function MessageBoard({
   agents,
   channels,
   selectedChannelName,
   refresh,
-  liveMessages = [],
+  liveMessages = emptyMessages,
   onSelectChannel,
   onSelectAgent,
   onChanged,
@@ -50,14 +103,17 @@ export function MessageBoard({
     [...newDescription].length <= channelDescriptionMaxLength;
   const selectedChannel = channels.find((item) => item.name === channel);
   const body = drafts[channel] ?? "";
-  const visibleMessages = [
-    ...new Map(
-      [
-        ...(messagesChannel === channel ? messages : []),
-        ...liveMessages.filter((message) => message.channel_name === channel),
-      ].map((message) => [message.id, message]),
-    ).values(),
-  ];
+  const visibleMessages = useMemo(
+    () => [
+      ...new Map(
+        [
+          ...(messagesChannel === channel ? messages : []),
+          ...liveMessages.filter((message) => message.channel_name === channel),
+        ].map((message) => [message.id, message]),
+      ).values(),
+    ],
+    [channel, liveMessages, messages, messagesChannel],
+  );
   useEffect(() => {
     if (selectedChannelName) setChannel(selectedChannelName);
   }, [selectedChannelName]);
@@ -242,40 +298,14 @@ export function MessageBoard({
         {selectedChannel?.description && (
           <p className="channel-description">{selectedChannel.description}</p>
         )}
-        <div className="message-list">
-          {(loading || messagesChannel !== channel) && (
-            <p className="empty">Loading messages…</p>
-          )}
-          {!loading && messagesChannel === channel && visibleMessages.length === 0 && (
-            <p className="empty">No messages in #{channel} yet.</p>
-          )}
-          {visibleMessages.map((message) => {
-            const agent = agents.find(
-              (item) =>
-                item.id === message.agent_id ||
-                (message.agent_id === null && item.name === message.author),
-            );
-            return (
-              <article key={message.id}>
-                {agent ? (
-                  <button
-                    className="message-author"
-                    type="button"
-                    onClick={() => onSelectAgent(agent.id)}
-                  >
-                    {message.author}
-                  </button>
-                ) : (
-                  <strong>{message.author}</strong>
-                )}
-                <time>
-                  {new Date(message.created_at * 1000).toLocaleString()}
-                </time>
-                <MessageContent source={message.body} />
-              </article>
-            );
-          })}
-        </div>
+        <BoardConversation
+          agents={agents}
+          channel={channel}
+          loading={loading}
+          messages={visibleMessages}
+          messagesChannel={messagesChannel}
+          onSelectAgent={onSelectAgent}
+        />
         <form onSubmit={post}>
           <label>
             Message
@@ -310,4 +340,4 @@ export function MessageBoard({
       </div>
     </section>
   );
-}
+});

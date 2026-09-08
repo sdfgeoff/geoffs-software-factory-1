@@ -10,6 +10,15 @@ import { api } from "../api";
 import type { Agent } from "../types";
 import { MessageBoard } from "./MessageBoard";
 
+const messageContentRender = vi.hoisted(() => vi.fn());
+
+vi.mock("./MessageContent", () => ({
+  MessageContent: ({ source }: { source: string }) => {
+    messageContentRender(source);
+    return <div>{source}</div>;
+  },
+}));
+
 vi.mock("../api", () => ({
   api: { createChannel: vi.fn(), messages: vi.fn(), postMessage: vi.fn() },
 }));
@@ -35,6 +44,37 @@ describe("MessageBoard", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it("does not rerender a 500-message history while typing", async () => {
+    vi.mocked(api.messages).mockResolvedValue(
+      Array.from({ length: 500 }, (_, index) => ({
+        id: index + 1,
+        channel_name: "general",
+        agent_id: null,
+        author: "human",
+        body: `History ${index + 1}`,
+        created_at: index,
+      })),
+    );
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("History 500")).toBeTruthy();
+    expect(messageContentRender).toHaveBeenCalledTimes(500);
+    messageContentRender.mockClear();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "draft" },
+    });
+    expect(messageContentRender).not.toHaveBeenCalled();
   });
 
   it("opens a renamed agent from a historical message", async () => {

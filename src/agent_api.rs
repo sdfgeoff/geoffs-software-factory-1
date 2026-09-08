@@ -272,38 +272,70 @@ async fn events(
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
     let mut receiver = manager.subscribe();
     let stream = async_stream::stream! {
-        let mut refresh = tokio::time::interval(Duration::from_secs(2));
         loop {
-            tokio::select! {
-                event = receiver.recv() => match event {
-                    Ok(event) => {
-                        let event = protocol::AgentEvent::try_from(event)
-                            .unwrap_or(protocol::AgentEvent::Refresh);
-                        yield Ok(Event::default().json_data(event).unwrap());
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        yield Ok(Event::default().json_data(protocol::AgentEvent::Refresh).unwrap());
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                },
-                _ = refresh.tick() => yield Ok(Event::default().json_data(protocol::AgentEvent::Refresh).unwrap()),
+            match receiver.recv().await {
+                Ok(event) => {
+                    let event = protocol::AgentEvent::try_from(event)
+                        .unwrap_or(protocol::AgentEvent::Refresh);
+                    yield Ok(Event::default().json_data(event).unwrap());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    yield Ok(Event::default().json_data(protocol::AgentEvent::Refresh).unwrap());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     };
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(2))
+            .text("keep-alive"),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{future::poll_fn, pin::Pin};
+
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use futures_core::Stream;
     use serde_json::Value;
     use tower::ServiceExt;
 
     use super::*;
     use crate::{domain::AgentState, store::Store};
+
+    #[tokio::test]
+    async fn event_stream_uses_transport_keep_alives_without_refresh_payloads() {
+        let store = Store::memory().await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(manager);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut body = Box::pin(response.into_body().into_data_stream());
+
+        let chunk = tokio::time::timeout(
+            Duration::from_millis(2_500),
+            poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+        )
+        .await
+        .expect("keep-alive should arrive")
+        .expect("stream should remain open")
+        .expect("keep-alive body should be readable");
+
+        assert_eq!(chunk.as_ref(), b": keep-alive\n\n");
+    }
 
     #[tokio::test]
     async fn agent_can_be_renamed_over_http() {

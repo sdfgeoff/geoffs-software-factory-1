@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { memo, useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type {
   Agent,
@@ -41,7 +41,41 @@ interface AgentSettingsDraft {
 
 type SettingsSaveState = "saved" | "dirty" | "saving" | "error";
 
-export function AgentWorkspace({
+const AgentConversation = memo(function AgentConversation({
+  agentId,
+  delta,
+  loading,
+  messages,
+  messagesAgentId,
+}: {
+  agentId: number;
+  delta: string;
+  loading: boolean;
+  messages: AgentMessage[];
+  messagesAgentId: number | null;
+}) {
+  return (
+    <div className="message-list agent-chat">
+      {(loading || messagesAgentId !== agentId) && (
+        <p className="empty">Loading messages…</p>
+      )}
+      {messagesAgentId === agentId && messages.map((message) => (
+        <article className={message.role} key={message.id}>
+          <strong>{message.role}</strong>
+          <MessageContent source={message.body} />
+        </article>
+      ))}
+      {delta && (
+        <article className="agent streaming">
+          <strong>agent</strong>
+          <div className="message-content streaming-text">{delta}</div>
+        </article>
+      )}
+    </div>
+  );
+});
+
+export const AgentWorkspace = memo(function AgentWorkspace({
   agents,
   channels,
   tickets,
@@ -648,23 +682,13 @@ export function AgentWorkspace({
               </form>
             </section>
             <section className="agent-chat-panel" hidden={view !== "chat"}>
-              <div className="message-list agent-chat">
-                {(messagesLoading || messagesAgentId !== selected.id) && (
-                  <p className="empty">Loading messages…</p>
-                )}
-                {messagesAgentId === selected.id && messages.map((message) => (
-                  <article className={message.role} key={message.id}>
-                    <strong>{message.role}</strong>
-                    <MessageContent source={message.body} />
-                  </article>
-                ))}
-                {deltas[selected.id] && (
-                  <article className="agent streaming">
-                    <strong>agent</strong>
-                    <MessageContent source={deltas[selected.id]} />
-                  </article>
-                )}
-              </div>
+              <AgentConversation
+                agentId={selected.id}
+                delta={deltas[selected.id] ?? ""}
+                loading={messagesLoading}
+                messages={messages}
+                messagesAgentId={messagesAgentId}
+              />
               <form onSubmit={send}>
                 <label>
                   Message
@@ -713,4 +737,4 @@ export function AgentWorkspace({
       </div>
     </section>
   );
-}
+});
