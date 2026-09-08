@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use multi_agent_board_protocol::{
     ClaimTicketRequest, CreateTicketRequest, Patch, RequestChangesRequest, ReserveTicketsRequest,
-    ReviewRevisionRequest, Ticket, TicketActivity, TicketClaimResponse, TicketState,
+    ReviewRevisionRequest, Ticket, TicketActivity, TicketClaimResponse, TicketState, TicketSummary,
     UpdateTicketRequest,
 };
 use schemars::JsonSchema;
@@ -111,9 +111,9 @@ fn ensure_unique_ticket_ids(ticket_ids: &[i64]) -> Result<(), McpError> {
 }
 
 pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
-    registry.register(ToolDefinition::<EmptyArguments, Vec<Ticket>>::new(
+    registry.register(ToolDefinition::<EmptyArguments, Vec<TicketSummary>>::new(
         "list_tickets",
-        "List all board tickets",
+        "List compact summaries for all board tickets; use get_ticket_details for full fields",
         |board, _| Box::pin(async move { board.list_tickets().await }),
     ))?;
     registry.register(ToolDefinition::<CreateTicketArguments, Ticket>::new(

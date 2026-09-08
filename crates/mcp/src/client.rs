@@ -10,7 +10,7 @@ use multi_agent_board_protocol::{
     SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
     SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
     SetBoardSettingsRequest, SetProjectRequest, Ticket, TicketActivity, TicketClaimResponse,
-    UpdateTicketRequest, WakeEvent,
+    TicketSummary, TicketSummaryPage, UpdateTicketRequest, WakeEvent,
 };
 
 #[derive(Debug)]
@@ -89,8 +89,23 @@ impl BoardClient {
         self.request::<(), _>(Method::GET, path, None).await
     }
 
-    pub async fn list_tickets(&self) -> Result<Vec<Ticket>, McpError> {
-        self.get("/tickets").await
+    pub async fn list_tickets(&self) -> Result<Vec<TicketSummary>, McpError> {
+        let mut tickets = Vec::new();
+        let mut before_id = None;
+        loop {
+            let path = before_id.map_or_else(
+                || "/tickets?limit=100".to_owned(),
+                |id| format!("/tickets?limit=100&before_id={id}"),
+            );
+            let page: TicketSummaryPage = self.get(&path).await?;
+            let next = page.tickets.iter().map(|ticket| ticket.id).min();
+            tickets.extend(page.tickets);
+            if !page.has_more {
+                break;
+            }
+            before_id = next;
+        }
+        Ok(tickets)
     }
 
     pub async fn settings(&self) -> Result<BoardSettings, McpError> {
@@ -558,7 +573,7 @@ mod tests {
         thread,
     };
 
-    use multi_agent_board_protocol::{Ticket, TicketState};
+    use multi_agent_board_protocol::{TicketState, TicketSummary, TicketSummaryPage};
 
     use super::*;
 
@@ -566,35 +581,31 @@ mod tests {
     async fn typed_client_decodes_protocol_response() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let response = serde_json::to_string(&vec![Ticket {
-            id: 47,
-            project_id: 1,
-            title: "Typed response".into(),
-            description: String::new(),
-            state: TicketState::Todo,
-            created_by_agent_id: None,
-            reserved_for_agent_id: None,
-            assignee_id: None,
-            implementation_branch: None,
-            review_commit: None,
-            review_target_branch: None,
-            review_project_id: None,
-            review_project_path: None,
-            reviewer_id: None,
-            review_feedback: None,
-            blocker_ids: Vec::new(),
-            unresolved_blockers: Vec::new(),
-            revision: 1,
-            created_at: 10,
-            updated_at: 10,
-        }])
+        let response = serde_json::to_string(&TicketSummaryPage {
+            tickets: vec![TicketSummary {
+                id: 47,
+                project_id: 1,
+                title: "Typed response".into(),
+                state: TicketState::Todo,
+                created_by_agent_id: None,
+                reserved_for_agent_id: None,
+                assignee_id: None,
+                reviewer_id: None,
+                has_review_feedback: false,
+                unresolved_blockers: Vec::new(),
+                revision: 1,
+                created_at: 10,
+                updated_at: 10,
+            }],
+            has_more: false,
+        })
         .unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 2048];
             let length = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..length]);
-            assert!(request.starts_with("GET /tickets HTTP/1.1"));
+            assert!(request.starts_with("GET /tickets?limit=100 HTTP/1.1"));
             assert!(
                 request
                     .to_ascii_lowercase()
@@ -617,5 +628,58 @@ mod tests {
         assert_eq!(tickets.len(), 1);
         assert_eq!(tickets[0].id, 47);
         assert_eq!(tickets[0].title, "Typed response");
+    }
+
+    #[tokio::test]
+    async fn ticket_discovery_intentionally_reads_all_pages() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for (expected_path, id, has_more) in [
+                ("/tickets?limit=100", 101, true),
+                ("/tickets?limit=100&before_id=101", 100, false),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 2048];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                assert!(request.starts_with(&format!("GET {expected_path} HTTP/1.1")));
+                let response = serde_json::json!({
+                    "tickets": [{
+                        "id": id,
+                        "project_id": 1,
+                        "title": format!("Ticket {id}"),
+                        "state": "done",
+                        "created_by_agent_id": null,
+                        "reserved_for_agent_id": null,
+                        "assignee_id": null,
+                        "reviewer_id": null,
+                        "has_review_feedback": false,
+                        "unresolved_blockers": [],
+                        "revision": 1,
+                        "created_at": 1,
+                        "updated_at": 1
+                    }],
+                    "has_more": has_more
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                    response.len()
+                )
+                .unwrap();
+            }
+        });
+
+        let tickets = BoardClient::new(format!("http://{address}"), 2)
+            .list_tickets()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            tickets.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+            [101, 100]
+        );
     }
 }
