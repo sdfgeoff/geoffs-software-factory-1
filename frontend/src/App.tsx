@@ -65,6 +65,10 @@ function positiveId(value: string | null) {
   return value && Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+function isNotFound(cause: unknown) {
+  return cause instanceof Error && "status" in cause && cause.status === 404;
+}
+
 function parseRoute(hash: string): Route {
   const value = hash.replace(/^#\/?/, "");
   if (!value || value === "board") {
@@ -131,6 +135,7 @@ export function App() {
   const [tickets, setTickets] = useState<TicketSummary[]>([]);
   const [ticketDetails, setTicketDetails] = useState<Record<number, Ticket>>({});
   const [missingTicketIds, setMissingTicketIds] = useState<Set<number>>(() => new Set());
+  const [ticketDetailRepair, setTicketDetailRepair] = useState(0);
   const [historyHasMore, setHistoryHasMore] = useState({ done: true, cancelled: true });
   const [historyBefore, setHistoryBefore] = useState<Partial<Record<"done" | "cancelled", number>>>({});
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -155,6 +160,9 @@ export function App() {
   const activeChannel = route.view === "messages" ? route.channel : null;
   const activeChannelRef = useRef(activeChannel);
   activeChannelRef.current = activeChannel;
+  const activeTicketId = route.view === "board" ? route.ticketId : null;
+  const activeTicketIdRef = useRef(activeTicketId);
+  activeTicketIdRef.current = activeTicketId;
   const [visitedViews, setVisitedViews] = useState(() => new Set([route.view]));
   const [lastBoardRoute, setLastBoardRoute] = useState(() =>
     route.view === "board"
@@ -170,7 +178,16 @@ export function App() {
       : { view: "agents", agentId: null, agentView: "chat" } as const,
   );
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (repair = false) => {
+    if (repair) {
+      setMissingTicketIds((ids) => {
+        const next = new Set(ids);
+        const selectedId = activeTicketIdRef.current;
+        if (selectedId) next.delete(selectedId);
+        return next;
+      });
+      setTicketDetailRepair((value) => value + 1);
+    }
     try {
       const [nextProject, nextProjects, activePages, nextChannels, nextAgents, nextSettings] =
         await Promise.all([
@@ -197,11 +214,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (route.view !== "board" || !route.ticketId || ticketDetails[route.ticketId] || missingTicketIds.has(route.ticketId)) {
+    if (
+      route.view !== "board" ||
+      !route.ticketId ||
+      missingTicketIds.has(route.ticketId) ||
+      (ticketDetails[route.ticketId] && ticketDetailRepair === 0)
+    ) {
       return;
     }
     let current = true;
-    void api.ticket(route.ticketId).then((ticket) => {
+    const id = route.ticketId;
+    const apply = (ticket: Ticket) => {
       if (!current) return;
       setTicketDetails((details) => ({ ...details, [ticket.id]: ticket }));
       setTickets((summaries) => {
@@ -210,11 +233,32 @@ export function App() {
           ? summaries.map((item) => item.id === ticket.id ? summary : item)
           : [...summaries, summary];
       });
-    }).catch(() => {
-      if (current) setMissingTicketIds((ids) => new Set(ids).add(route.ticketId!));
-    });
+    };
+    const load = async () => {
+      try {
+        apply(await api.ticket(id));
+      } catch (cause) {
+        if (!current) return;
+        if (isNotFound(cause)) {
+          setMissingTicketIds((ids) => new Set(ids).add(id));
+          return;
+        }
+        setError(cause instanceof Error ? cause.message : String(cause));
+        try {
+          apply(await api.ticket(id));
+        } catch (retryCause) {
+          if (!current) return;
+          if (isNotFound(retryCause)) {
+            setMissingTicketIds((ids) => new Set(ids).add(id));
+          } else {
+            setError(retryCause instanceof Error ? retryCause.message : String(retryCause));
+          }
+        }
+      }
+    };
+    void load();
     return () => { current = false; };
-  }, [missingTicketIds, route, ticketDetails]);
+  }, [activeTicketId, missingTicketIds, route.view, ticketDetailRepair]);
 
   const reloadProjects = useCallback(async () => {
     try {
@@ -283,7 +327,7 @@ export function App() {
     if (reloadTimer.current !== null) return;
     reloadTimer.current = window.setTimeout(() => {
       reloadTimer.current = null;
-      void reload();
+      void reload(true);
     }, 50);
   }, [reload]);
 

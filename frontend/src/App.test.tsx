@@ -201,6 +201,56 @@ describe("App agent routes", () => {
     expect(window.location.hash).toBe("#board?project=2&ticket=7");
   });
 
+  it("retries transient ticket detail failures without marking the route missing", async () => {
+    window.history.replaceState(null, "", "#board?project=2&ticket=7");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.ticket)
+      .mockRejectedValueOnce(new Error("Temporary detail failure"))
+      .mockResolvedValue(ticket);
+
+    render(<App />);
+
+    expect(await screen.findByDisplayValue(ticket.title)).toBeTruthy();
+    expect(api.ticket).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("heading", { name: "Ticket not found" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Temporary detail failure");
+  });
+
+  it("marks only a 404 ticket detail response as missing", async () => {
+    window.history.replaceState(null, "", "#board?project=2&ticket=7");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.ticket).mockRejectedValue(
+      Object.assign(new Error("ticket not found"), { status: 404 }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Ticket not found" })).toBeTruthy();
+    expect(api.ticket).toHaveBeenCalledTimes(1);
+  });
+
+  it("revalidates an open ticket detail during repair reloads", async () => {
+    window.history.replaceState(null, "", "#board?project=2&ticket=7");
+    const repaired = { ...ticket, title: "Changed while disconnected", revision: 2 };
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.ticket)
+      .mockResolvedValueOnce(ticket)
+      .mockResolvedValue(repaired);
+
+    render(<App />);
+    expect(await screen.findByDisplayValue(ticket.title)).toBeTruthy();
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ kind: "refresh" }),
+      } as MessageEvent);
+    });
+
+    expect(await screen.findByDisplayValue(repaired.title)).toBeTruthy();
+    expect(api.ticket).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(6);
+  });
+
   it("loads terminal history on demand and details only when opened", async () => {
     window.history.replaceState(null, "", "#board");
     const completed = { ...ticket, id: 80, title: "Historical work", state: "done" as const };

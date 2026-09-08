@@ -13,6 +13,12 @@ import type {
   TicketSummaryQuery,
 } from "./types";
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 function pageQuery(query: MessagePageQuery = {}) {
   const search = new URLSearchParams();
   if (query.before_id !== undefined && query.before_id !== null) {
@@ -49,7 +55,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const body = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(body?.error ?? `${response.status} ${response.statusText}`);
+    throw new ApiError(
+      body?.error ?? `${response.status} ${response.statusText}`,
+      response.status,
+    );
   }
   return response.status === 204
     ? (undefined as T)
