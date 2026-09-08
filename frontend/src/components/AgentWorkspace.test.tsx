@@ -201,6 +201,55 @@ describe("AgentWorkspace", () => {
     expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
   });
 
+  it("ignores an older-page response after switching agents", async () => {
+    const second = { ...agent, id: 2, name: "builder" };
+    let resolveOlder!: (value: AgentMessagePage) => void;
+    vi.mocked(api.agentMessages)
+      .mockResolvedValueOnce({
+        messages: [{ id: 20, agent_id: agent.id, role: "agent", body: "Reviewer current", created_at: 20 }],
+        has_more: true,
+      })
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveOlder = resolve;
+      }))
+      .mockResolvedValueOnce({
+        messages: [{ id: 30, agent_id: second.id, role: "agent", body: "Builder current", created_at: 30 }],
+        has_more: false,
+      });
+    const animationFrame = vi.fn(() => 1);
+    vi.stubGlobal("requestAnimationFrame", animationFrame);
+    const props = {
+      agents: [agent, second],
+      channels: [],
+      tickets: [],
+      view: "chat" as const,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { rerender } = render(
+      <AgentWorkspace {...props} selectedAgentId={agent.id} />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    rerender(<AgentWorkspace {...props} selectedAgentId={second.id} />);
+    expect(await screen.findByText("Builder current")).toBeTruthy();
+    await act(async () => {
+      resolveOlder({
+        messages: [{ id: 19, agent_id: agent.id, role: "agent", body: "Reviewer older", created_at: 19 }],
+        has_more: false,
+      });
+    });
+
+    expect(screen.queryByText("Reviewer older")).toBeNull();
+    expect(screen.getByText("Builder current")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
+    expect(animationFrame).not.toHaveBeenCalled();
+  });
+
   it("catches up agent messages after reconnect without losing the draft", async () => {
     const first = {
       id: 10,

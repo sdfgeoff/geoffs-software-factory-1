@@ -115,6 +115,9 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
   const lastCatchUp = useRef(catchUp);
+  const olderMessageRequest = useRef(0);
+  const selectedAgentRef = useRef(selectedAgentId);
+  selectedAgentRef.current = selectedAgentId;
   const [messagesAgentId, setMessagesAgentId] = useState<number | null>(null);
   const [worktrees, setWorktrees] = useState<AgentProjectWorktree[]>([]);
   const [detailsAgentId, setDetailsAgentId] = useState<number | null>(null);
@@ -207,6 +210,8 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   useEffect(() => {
     if (view !== "chat") return;
     let current = true;
+    olderMessageRequest.current += 1;
+    setLoadingOlderMessages(false);
     lastCatchUp.current = catchUp;
     setMessages([]);
     setMessagesLoading(Boolean(selectedAgentId));
@@ -271,6 +276,8 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const loadOlderMessages = useCallback(async () => {
     const beforeId = visibleMessages[0]?.id;
     if (!beforeId || !selectedAgentId || loadingOlderMessages) return;
+    const targetAgentId = selectedAgentId;
+    const request = ++olderMessageRequest.current;
     const list = messageListRef.current;
     const previousHeight = list?.scrollHeight ?? 0;
     setLoadingOlderMessages(true);
@@ -279,15 +286,19 @@ export const AgentWorkspace = memo(function AgentWorkspace({
         before_id: beforeId,
         limit: 50,
       });
+      if (
+        request !== olderMessageRequest.current ||
+        selectedAgentRef.current !== targetAgentId
+      ) return;
       setMessages((current) => mergeMessages(page.messages, current));
       setHasOlderMessages(page.has_more);
       window.requestAnimationFrame(() => {
         if (list) list.scrollTop += list.scrollHeight - previousHeight;
       });
     } catch (error) {
-      onError(error);
+      if (request === olderMessageRequest.current) onError(error);
     } finally {
-      setLoadingOlderMessages(false);
+      if (request === olderMessageRequest.current) setLoadingOlderMessages(false);
     }
   }, [loadingOlderMessages, onError, selectedAgentId, visibleMessages]);
   useEffect(() => {

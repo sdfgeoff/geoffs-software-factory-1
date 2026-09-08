@@ -136,6 +136,49 @@ describe("MessageBoard", () => {
     expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
   });
 
+  it("ignores an older-page response after switching channels", async () => {
+    let resolveOlder!: (value: MessagePage) => void;
+    vi.mocked(api.messages)
+      .mockResolvedValueOnce(page([
+        { id: 20, channel_name: "general", agent_id: null, author: "human", body: "General current", created_at: 20 },
+      ], true))
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveOlder = resolve;
+      }))
+      .mockResolvedValueOnce(page([
+        { id: 30, channel_name: "backend", agent_id: null, author: "human", body: "Backend current", created_at: 30 },
+      ]));
+    const animationFrame = vi.fn(() => 1);
+    vi.stubGlobal("requestAnimationFrame", animationFrame);
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[
+          { name: "general", description: "", most_recent_message_at: 0 },
+          { name: "backend", description: "", most_recent_message_at: 0 },
+        ]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    fireEvent.click(screen.getByRole("button", { name: "#backend" }));
+    expect(await screen.findByText("Backend current")).toBeTruthy();
+    await act(async () => {
+      resolveOlder(page([
+        { id: 19, channel_name: "general", agent_id: null, author: "human", body: "General older", created_at: 19 },
+      ]));
+    });
+
+    expect(screen.queryByText("General older")).toBeNull();
+    expect(screen.getByText("Backend current")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
+    expect(animationFrame).not.toHaveBeenCalled();
+  });
+
   it("opens a renamed agent from a historical message", async () => {
     vi.mocked(api.messages).mockResolvedValue(page([
       {

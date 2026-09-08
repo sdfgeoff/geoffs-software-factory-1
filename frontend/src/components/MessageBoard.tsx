@@ -111,6 +111,9 @@ export const MessageBoard = memo(function MessageBoard({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const lastCatchUp = useRef(catchUp);
+  const olderRequest = useRef(0);
+  const channelRef = useRef(channel);
+  channelRef.current = channel;
   const [creatingChannel, setCreatingChannel] = useState(false);
   const [newChannel, setNewChannel] = useState("");
   const [newDescription, setNewDescription] = useState("");
@@ -135,6 +138,8 @@ export const MessageBoard = memo(function MessageBoard({
   }, [selectedChannelName]);
   useEffect(() => {
     let current = true;
+    olderRequest.current += 1;
+    setLoadingOlder(false);
     lastCatchUp.current = catchUp;
     setMessages([]);
     setLoading(true);
@@ -189,20 +194,23 @@ export const MessageBoard = memo(function MessageBoard({
   const loadOlder = useCallback(async () => {
     const beforeId = visibleMessages[0]?.id;
     if (!beforeId || loadingOlder) return;
+    const targetChannel = channel;
+    const request = ++olderRequest.current;
     const list = listRef.current;
     const previousHeight = list?.scrollHeight ?? 0;
     setLoadingOlder(true);
     try {
       const page = await api.messages(channel, { before_id: beforeId, limit: 50 });
+      if (request !== olderRequest.current || channelRef.current !== targetChannel) return;
       setMessages((current) => mergeMessages(page.messages, current));
       setHasOlder(page.has_more);
       window.requestAnimationFrame(() => {
         if (list) list.scrollTop += list.scrollHeight - previousHeight;
       });
     } catch (error) {
-      onError(error);
+      if (request === olderRequest.current) onError(error);
     } finally {
-      setLoadingOlder(false);
+      if (request === olderRequest.current) setLoadingOlder(false);
     }
   }, [channel, loadingOlder, onError, visibleMessages]);
   async function post(event: FormEvent) {
