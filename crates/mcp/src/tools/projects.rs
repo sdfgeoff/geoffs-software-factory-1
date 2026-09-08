@@ -9,6 +9,7 @@ use crate::{
 };
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RegisterProjectArguments {
     name: String,
     path: String,
@@ -16,6 +17,7 @@ struct RegisterProjectArguments {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProjectIdArguments {
     project_id: i64,
 }

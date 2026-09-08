@@ -11,6 +11,7 @@ use crate::{
 };
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ChannelListArguments {
     channels: Vec<String>,
 }
@@ -24,6 +25,7 @@ impl From<ChannelListArguments> for SetAgentChannelSubscriptionsRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProjectListArguments {
     project_ids: Vec<i64>,
 }

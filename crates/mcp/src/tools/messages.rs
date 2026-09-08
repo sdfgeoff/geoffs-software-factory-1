@@ -11,6 +11,7 @@ use crate::{
 };
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateChannelArguments {
     name: String,
     #[serde(default)]
@@ -18,6 +19,7 @@ struct CreateChannelArguments {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReadChannelArguments {
     channel_name: String,
     #[schemars(range(min = 1))]
@@ -36,6 +38,7 @@ struct ReadChannelOutput {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PostMessageArguments {
     channel_name: String,
     author: String,

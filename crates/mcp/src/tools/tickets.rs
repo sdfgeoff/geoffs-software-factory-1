@@ -15,6 +15,7 @@ use crate::{
 };
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateTicketArguments {
     project_id: Option<i64>,
     title: String,
@@ -25,11 +26,13 @@ struct CreateTicketArguments {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TicketIdArguments {
     ticket_id: i64,
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReserveTicketsArguments {
     #[schemars(length(min = 1), extend("uniqueItems" = true))]
     ticket_ids: Vec<i64>,
@@ -75,6 +78,7 @@ impl From<EditableTicketState> for TicketState {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetTicketDetailsArguments {
     ticket_id: i64,
     title: Option<String>,
@@ -88,12 +92,14 @@ struct SetTicketDetailsArguments {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TicketRevisionArguments {
     ticket_id: i64,
     expected_revision: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TicketChangesArguments {
     ticket_id: i64,
     feedback: String,

@@ -9,6 +9,7 @@ use crate::{
 };
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(extend(
     "oneOf" = [
         {"required": ["deliver_at"]},
@@ -25,6 +26,7 @@ struct ScheduleReminderArguments {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReminderIdArguments {
     reminder_id: i64,
 }

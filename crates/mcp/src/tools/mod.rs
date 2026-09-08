@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::{McpError, tool::ToolRegistry};
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct EmptyArguments {}
 
 pub fn registry() -> Result<ToolRegistry, McpError> {
@@ -139,6 +140,36 @@ mod tests {
                         "delay_seconds": 10
                     }),
                 )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_fields_are_rejected_for_typed_and_empty_arguments() {
+        let registry = registry().unwrap();
+        let definitions = registry.definitions();
+        for name in ["get_ticket_details", "list_projects"] {
+            assert_eq!(
+                definition(&definitions, name).pointer("/inputSchema/additionalProperties"),
+                Some(&json!(false))
+            );
+        }
+
+        let board = BoardClient::new("http://127.0.0.1:1".into(), 1);
+        assert!(
+            registry
+                .call(
+                    &board,
+                    "get_ticket_details",
+                    json!({"ticket_id": 1, "bogus": true}),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .call(&board, "list_projects", json!({"bogus": true}))
                 .await
                 .is_err()
         );

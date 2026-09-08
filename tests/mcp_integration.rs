@@ -336,10 +336,13 @@ async fn mcp_manages_only_the_calling_agents_channel_subscriptions() {
         json!({"channels":["backend"], "agent_id":second.id}),
     )
     .await;
-    assert_eq!(tool_content(&isolated), json!(["backend"]));
+    assert_eq!(
+        isolated.pointer("/result/isError"),
+        Some(&Value::Bool(true))
+    );
     assert_eq!(
         store.agent_channel_subscriptions(first.id).await.unwrap(),
-        vec!["backend"]
+        vec!["general"]
     );
     assert_eq!(
         store.agent_channel_subscriptions(second.id).await.unwrap(),
@@ -353,7 +356,10 @@ async fn mcp_manages_only_the_calling_agents_channel_subscriptions() {
         json!({"agent_id":second.id}),
     )
     .await;
-    assert_eq!(tool_content(&isolated_read), json!(["backend"]));
+    assert_eq!(
+        isolated_read.pointer("/result/isError"),
+        Some(&Value::Bool(true))
+    );
 
     for (id, channel, expected) in [
         (7, "bad channel", "channel names may contain"),
@@ -433,7 +439,10 @@ async fn mcp_manages_only_the_calling_agents_project_subscriptions() {
         json!({"project_ids":[second_project.id], "agent_id":second.id}),
     )
     .await;
-    assert_eq!(tool_content(&replaced), json!([second_project.id]));
+    assert_eq!(
+        replaced.pointer("/result/isError"),
+        Some(&Value::Bool(true))
+    );
     let listed = mcp_tool(
         &base_url,
         first.id,
@@ -442,7 +451,11 @@ async fn mcp_manages_only_the_calling_agents_project_subscriptions() {
         json!({"agent_id":second.id}),
     )
     .await;
-    assert_eq!(tool_content(&listed), json!([second_project.id]));
+    assert_eq!(listed.pointer("/result/isError"), Some(&Value::Bool(true)));
+    assert_eq!(
+        store.agent_project_subscriptions(first.id).await.unwrap(),
+        vec![first_project.id]
+    );
     assert_eq!(
         store.agent_project_subscriptions(second.id).await.unwrap(),
         Vec::<i64>::new()
@@ -577,19 +590,31 @@ async fn mcp_manages_only_the_calling_agents_reminders() {
         first.id,
         1,
         "schedule_self_reminder",
-        json!({"message":"Check CI","delay_seconds":60,"agent_id":second.id}),
+        json!({"message":"Check CI","delay_seconds":60}),
     )
     .await;
     let reminder = tool_content(&scheduled);
     assert_eq!(reminder["agent_id"], first.id);
     assert_eq!(reminder["state"], "scheduled");
 
-    let listed = mcp_tool(&base_url, first.id, 2, "list_my_reminders", json!({})).await;
+    let rejected_override = mcp_tool(
+        &base_url,
+        first.id,
+        2,
+        "list_my_reminders",
+        json!({"agent_id":second.id}),
+    )
+    .await;
+    assert_eq!(
+        rejected_override.pointer("/result/isError"),
+        Some(&Value::Bool(true))
+    );
+    let listed = mcp_tool(&base_url, first.id, 3, "list_my_reminders", json!({})).await;
     assert_eq!(tool_content(&listed).as_array().unwrap().len(), 1);
     let hidden = mcp_tool(
         &base_url,
         second.id,
-        3,
+        4,
         "cancel_my_reminder",
         json!({"reminder_id":reminder["id"]}),
     )
@@ -599,9 +624,9 @@ async fn mcp_manages_only_the_calling_agents_reminders() {
     let cancelled = mcp_tool(
         &base_url,
         first.id,
-        4,
+        5,
         "cancel_my_reminder",
-        json!({"reminder_id":reminder["id"],"agent_id":second.id}),
+        json!({"reminder_id":reminder["id"]}),
     )
     .await;
     assert_eq!(tool_content(&cancelled)["state"], "cancelled");
@@ -609,7 +634,7 @@ async fn mcp_manages_only_the_calling_agents_reminders() {
     let invalid = mcp_tool(
         &base_url,
         first.id,
-        5,
+        6,
         "schedule_self_reminder",
         json!({"message":"No time"}),
     )
