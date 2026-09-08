@@ -251,6 +251,40 @@ describe("App agent routes", () => {
     expect(api.tickets).toHaveBeenCalledTimes(6);
   });
 
+  it("keeps a newer typed ticket event over delayed detail and summary responses", async () => {
+    window.history.replaceState(null, "", "#board?project=2&ticket=7");
+    const newer = { ...ticket, title: "Newer event title", revision: 2 };
+    let resolveDetail!: (value: Ticket) => void;
+    let resolveSummary!: (value: Awaited<ReturnType<typeof api.tickets>>) => void;
+    const detail = new Promise<Ticket>((resolve) => { resolveDetail = resolve; });
+    const summary = new Promise<Awaited<ReturnType<typeof api.tickets>>>((resolve) => {
+      resolveSummary = resolve;
+    });
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.ticket).mockReturnValue(detail);
+    vi.mocked(api.tickets).mockImplementation(({ state } = {}) =>
+      state === "in_progress"
+        ? summary
+        : Promise.resolve({ tickets: [], has_more: false }),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(api.ticket).toHaveBeenCalledTimes(1));
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ agent_id: 0, kind: "ticket_updated", data: newer }),
+      } as MessageEvent);
+    });
+    await act(async () => {
+      resolveDetail(ticket);
+      resolveSummary({ tickets: [{ ...ticket, has_review_feedback: false }], has_more: false });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByDisplayValue(newer.title)).toBeTruthy();
+    expect(screen.queryByDisplayValue(ticket.title)).toBeNull();
+  });
+
   it("loads terminal history on demand and details only when opened", async () => {
     window.history.replaceState(null, "", "#board");
     const completed = { ...ticket, id: 80, title: "Historical work", state: "done" as const };

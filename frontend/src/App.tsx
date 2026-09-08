@@ -41,6 +41,17 @@ function summarizeTicket(ticket: Ticket): TicketSummary {
   };
 }
 
+function mergeByRevision<T extends { id: number; revision: number }>(
+  current: T[],
+  updates: T[],
+) {
+  const byId = new Map(current.map((item) => [item.id, item]));
+  updates.forEach((item) => {
+    if ((byId.get(item.id)?.revision ?? -1) <= item.revision) byId.set(item.id, item);
+  });
+  return [...byId.values()];
+}
+
 async function loadTicketState(state: TicketState) {
   const tickets: TicketSummary[] = [];
   let before_id: number | undefined;
@@ -151,6 +162,8 @@ export function App() {
   const reloadTimer = useRef<number | null>(null);
   const deltaTimer = useRef<number | null>(null);
   const pendingDelta = useRef<{ agentId: number; text: string } | null>(null);
+  const ticketsRef = useRef(tickets);
+  ticketsRef.current = tickets;
   const activeAgentId =
     route.view === "agents" && route.agentView === "chat"
       ? route.agentId
@@ -179,6 +192,9 @@ export function App() {
   );
 
   const reload = useCallback(async (repair = false) => {
+    const startingRevisions = new Map(
+      ticketsRef.current.map((ticket) => [ticket.id, ticket.revision]),
+    );
     if (repair) {
       setMissingTicketIds((ids) => {
         const next = new Set(ids);
@@ -200,10 +216,17 @@ export function App() {
         ]);
       setProject(nextProject);
       setProjects(nextProjects);
-      setTickets((current) => [
-        ...current.filter((ticket) => !activeTicketStates.includes(ticket.state)),
-        ...activePages.flat(),
-      ]);
+      setTickets((current) => {
+        const active = activePages.flat();
+        const activeIds = new Set(active.map((ticket) => ticket.id));
+        const unchanged = current.filter(
+          (ticket) =>
+            !activeTicketStates.includes(ticket.state) ||
+            activeIds.has(ticket.id) ||
+            ticket.revision !== startingRevisions.get(ticket.id),
+        );
+        return mergeByRevision(unchanged, active);
+      });
       setChannels(nextChannels);
       setAgents(nextAgents);
       setSettings(nextSettings);
@@ -226,13 +249,12 @@ export function App() {
     const id = route.ticketId;
     const apply = (ticket: Ticket) => {
       if (!current) return;
-      setTicketDetails((details) => ({ ...details, [ticket.id]: ticket }));
-      setTickets((summaries) => {
-        const summary = summarizeTicket(ticket);
-        return summaries.some((item) => item.id === ticket.id)
-          ? summaries.map((item) => item.id === ticket.id ? summary : item)
-          : [...summaries, summary];
-      });
+      setTicketDetails((details) =>
+        (details[ticket.id]?.revision ?? -1) <= ticket.revision
+          ? { ...details, [ticket.id]: ticket }
+          : details,
+      );
+      setTickets((summaries) => mergeByRevision(summaries, [summarizeTicket(ticket)]));
     };
     const load = async () => {
       try {
@@ -275,14 +297,12 @@ export function App() {
 
   const mergeTickets = useCallback((updates: Ticket | Ticket[]) => {
     const next = Array.isArray(updates) ? updates : [updates];
-    setTickets((current) => {
-      const byId = new Map(current.map((ticket) => [ticket.id, ticket]));
-      next.forEach((ticket) => byId.set(ticket.id, summarizeTicket(ticket)));
-      return [...byId.values()];
-    });
+    setTickets((current) => mergeByRevision(current, next.map(summarizeTicket)));
     setTicketDetails((current) => {
       const updated = { ...current };
-      next.forEach((ticket) => { updated[ticket.id] = ticket; });
+      next.forEach((ticket) => {
+        if ((updated[ticket.id]?.revision ?? -1) <= ticket.revision) updated[ticket.id] = ticket;
+      });
       return updated;
     });
   }, []);
@@ -290,11 +310,7 @@ export function App() {
   const loadHistory = useCallback(async (state: "done" | "cancelled") => {
     try {
       const page = await api.tickets({ state, before_id: historyBefore[state], limit: 50 });
-      setTickets((current) => {
-        const byId = new Map(current.map((ticket) => [ticket.id, ticket]));
-        page.tickets.forEach((ticket) => byId.set(ticket.id, ticket));
-        return [...byId.values()];
-      });
+      setTickets((current) => mergeByRevision(current, page.tickets));
       if (page.tickets.length) {
         setHistoryBefore((current) => ({
           ...current,
