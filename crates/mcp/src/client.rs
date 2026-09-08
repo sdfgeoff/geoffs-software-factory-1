@@ -549,3 +549,73 @@ impl BoardClient {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    use multi_agent_board_protocol::{Ticket, TicketState};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn typed_client_decodes_protocol_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = serde_json::to_string(&vec![Ticket {
+            id: 47,
+            project_id: 1,
+            title: "Typed response".into(),
+            description: String::new(),
+            state: TicketState::Todo,
+            created_by_agent_id: None,
+            reserved_for_agent_id: None,
+            assignee_id: None,
+            implementation_branch: None,
+            review_commit: None,
+            review_target_branch: None,
+            review_project_id: None,
+            review_project_path: None,
+            reviewer_id: None,
+            review_feedback: None,
+            blocker_ids: Vec::new(),
+            unresolved_blockers: Vec::new(),
+            revision: 1,
+            created_at: 10,
+            updated_at: 10,
+        }])
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(request.starts_with("GET /tickets HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-multi-agent-board-agent-id: 2")
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .unwrap();
+        });
+
+        let tickets = BoardClient::new(format!("http://{address}"), 2)
+            .list_tickets()
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].id, 47);
+        assert_eq!(tickets[0].title, "Typed response");
+    }
+}
