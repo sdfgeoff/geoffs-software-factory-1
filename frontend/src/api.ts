@@ -9,6 +9,8 @@ import type {
   MessagePageQuery,
   Project,
   Ticket,
+  TicketSummaryPage,
+  TicketSummaryQuery,
 } from "./types";
 
 function pageQuery(query: MessagePageQuery = {}) {
@@ -22,6 +24,16 @@ function pageQuery(query: MessagePageQuery = {}) {
   if (query.limit !== undefined && query.limit !== null) {
     search.set("limit", String(query.limit));
   }
+  const suffix = search.toString();
+  return suffix ? `?${suffix}` : "";
+}
+
+function ticketPageQuery(query: TicketSummaryQuery = {}) {
+  const search = new URLSearchParams();
+  if (query.project_id != null) search.set("project_id", String(query.project_id));
+  if (query.state != null) search.set("state", query.state);
+  if (query.before_id != null) search.set("before_id", String(query.before_id));
+  if (query.limit != null) search.set("limit", String(query.limit));
   const suffix = search.toString();
   return suffix ? `?${suffix}` : "";
 }
@@ -67,7 +79,9 @@ export const api = {
     }),
   archiveProject: (id: number) =>
     request<Project>(`/projects/${id}/archive`, { method: "POST" }),
-  tickets: () => request<Ticket[]>("/tickets"),
+  tickets: (query: TicketSummaryQuery = {}) =>
+    request<TicketSummaryPage>(`/tickets${ticketPageQuery(query)}`),
+  ticket: (id: number) => request<Ticket>(`/tickets/${id}`),
   createTicket: (title: string, projectId?: number) =>
     request<Ticket>("/tickets", {
       method: "POST",

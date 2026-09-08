@@ -6,11 +6,11 @@ import {
   type MouseEvent,
 } from "react";
 import { api } from "../api";
-import type { Agent, Project, Ticket, TicketState } from "../types";
+import type { Agent, Project, Ticket, TicketState, TicketSummary } from "../types";
 
 interface Props {
   ticket: Ticket;
-  tickets: Ticket[];
+  tickets: (TicketSummary | Ticket)[];
   agents: Agent[];
   project?: Project;
   onClose: () => void;

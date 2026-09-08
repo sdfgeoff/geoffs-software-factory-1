@@ -51,6 +51,24 @@ pub struct Ticket {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Debug, FromRow, PartialEq, Eq)]
+pub struct TicketSummary {
+    pub id: i64,
+    pub project_id: i64,
+    pub title: String,
+    pub state: TicketState,
+    pub created_by_agent_id: Option<i64>,
+    pub reserved_for_agent_id: Option<i64>,
+    pub assignee_id: Option<i64>,
+    pub reviewer_id: Option<i64>,
+    pub has_review_feedback: bool,
+    #[sqlx(skip)]
+    pub unresolved_blockers: Vec<TicketBlocker>,
+    pub revision: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
 pub struct TicketActivity {
     pub id: i64,
@@ -511,6 +529,30 @@ impl From<Ticket> for wire::Ticket {
             reviewer_id: value.reviewer_id,
             review_feedback: value.review_feedback,
             blocker_ids: value.blocker_ids,
+            unresolved_blockers: value
+                .unresolved_blockers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            revision: value.revision,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<TicketSummary> for wire::TicketSummary {
+    fn from(value: TicketSummary) -> Self {
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            title: value.title,
+            state: value.state.into(),
+            created_by_agent_id: value.created_by_agent_id,
+            reserved_for_agent_id: value.reserved_for_agent_id,
+            assignee_id: value.assignee_id,
+            reviewer_id: value.reviewer_id,
+            has_review_feedback: value.has_review_feedback,
             unresolved_blockers: value
                 .unresolved_blockers
                 .into_iter()

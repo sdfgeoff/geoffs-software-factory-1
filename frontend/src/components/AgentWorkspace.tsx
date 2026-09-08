@@ -8,6 +8,7 @@ import type {
   Channel,
   Project,
   Ticket,
+  TicketSummary,
 } from "../types";
 import { MessageContent } from "./MessageContent";
 
@@ -16,7 +17,7 @@ export type AgentView = "chat" | "settings";
 interface Props {
   agents: Agent[];
   channels: Channel[];
-  tickets: Ticket[];
+  tickets: (TicketSummary | Ticket)[];
   projects?: Project[];
   selectedAgentId: number | null;
   view: AgentView;

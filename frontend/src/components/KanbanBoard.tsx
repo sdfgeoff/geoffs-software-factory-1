@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { Agent, Project, Ticket, TicketState } from "../types";
+import type { Agent, Project, Ticket, TicketState, TicketSummary } from "../types";
 import {
   TicketDetailPanel,
   type TicketDraft,
@@ -14,15 +14,18 @@ const columns: { state: TicketState; label: string }[] = [
   { state: "cancelled", label: "Cancelled" },
 ];
 interface Props {
-  tickets: Ticket[];
+  tickets: (TicketSummary | Ticket)[];
   agents: Agent[];
   projects?: Project[];
   currentProjectId?: number | null;
   filterProjectId?: number | null;
   selectedTicketId?: number | null;
+  selectedTicket?: Ticket | null;
   onFilterProject?: (projectId: number | null) => void;
   onSelectTicket?: (ticketId: number | null) => void;
   onChanged: (tickets: Ticket | Ticket[]) => void | Promise<void>;
+  historyHasMore?: Partial<Record<"done" | "cancelled", boolean>>;
+  onLoadHistory?: (state: "done" | "cancelled") => void;
   onError: (error: unknown) => void;
 }
 
@@ -33,10 +36,13 @@ export function KanbanBoard({
   currentProjectId = null,
   filterProjectId: routedProjectId,
   selectedTicketId: routedTicketId,
+  selectedTicket: loadedTicket,
   onFilterProject,
   onSelectTicket,
   onChanged,
   onError,
+  historyHasMore = {},
+  onLoadHistory,
 }: Props) {
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
@@ -60,10 +66,13 @@ export function KanbanBoard({
       setFilterProjectId(routedProjectId?.toString() ?? "all");
     }
   }, [routedProjectId]);
-  const selectedTicket = tickets.find(
+  const selectedSummary = tickets.find(
     (ticket) => ticket.id === selectedTicketId,
   );
-  const showingCancelled = showCancelled || selectedTicket?.state === "cancelled";
+  const selectedTicket = loadedTicket === undefined && selectedSummary && "description" in selectedSummary
+    ? selectedSummary as unknown as Ticket
+    : loadedTicket;
+  const showingCancelled = showCancelled || selectedSummary?.state === "cancelled";
   const visibleTickets = tickets.filter(
     (ticket) =>
       (showingCancelled || ticket.state !== "cancelled") &&
@@ -193,6 +202,12 @@ export function KanbanBoard({
                   onSelect={selectTicket}
                 />
               ))}
+            {(column.state === "done" || column.state === "cancelled") &&
+              historyHasMore[column.state] && (
+                <button type="button" className="ghost" onClick={() => onLoadHistory?.(column.state as "done" | "cancelled")}>
+                  Load older tickets
+                </button>
+              )}
           </section>
         ))}
       </div>
@@ -227,7 +242,7 @@ function TicketCard({
   selected,
   onSelect,
 }: {
-  ticket: Ticket;
+  ticket: TicketSummary | Ticket;
   agents: Agent[];
   project?: Project;
   selected: boolean;
@@ -270,7 +285,7 @@ function TicketCard({
             .join(", ")}
         </span>
       )}
-      {ticket.review_feedback && (
+      {("has_review_feedback" in ticket ? ticket.has_review_feedback : ticket.review_feedback !== null) && (
         <span className="ticket-card-review">Changes requested</span>
       )}
     </button>

@@ -46,6 +46,34 @@ export interface Ticket {
   updated_at: number;
 }
 
+export interface TicketSummary {
+  id: number;
+  project_id: number;
+  title: string;
+  state: TicketState;
+  created_by_agent_id: number | null;
+  reserved_for_agent_id: number | null;
+  assignee_id: number | null;
+  reviewer_id: number | null;
+  has_review_feedback: boolean;
+  unresolved_blockers: TicketBlocker[];
+  revision: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface TicketSummaryPage {
+  tickets: TicketSummary[];
+  has_more: boolean;
+}
+
+export interface TicketSummaryQuery {
+  project_id?: number | null;
+  state?: TicketState | null;
+  before_id?: number | null;
+  limit?: number | null;
+}
+
 export interface TicketActivity {
   id: number;
   ticket_id: number;

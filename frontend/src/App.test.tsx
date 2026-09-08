@@ -24,6 +24,7 @@ vi.mock("./api", () => ({
     projects: vi.fn(),
     settings: vi.fn(),
     tickets: vi.fn(),
+    ticket: vi.fn(),
     messages: vi.fn(),
   },
 }));
@@ -97,7 +98,8 @@ describe("App agent routes", () => {
     vi.mocked(api.settings).mockResolvedValue({
       merge_notification_channel: null,
     });
-    vi.mocked(api.tickets).mockResolvedValue([]);
+    vi.mocked(api.tickets).mockResolvedValue({ tickets: [], has_more: false });
+    vi.mocked(api.ticket).mockResolvedValue(ticket);
     vi.mocked(api.channels).mockResolvedValue([]);
     vi.mocked(api.agents).mockResolvedValue([agent]);
     vi.mocked(api.agentMessages).mockResolvedValue({ messages: [], has_more: false });
@@ -178,7 +180,10 @@ describe("App agent routes", () => {
   it("restores a project filter and open ticket from a direct link", async () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);
-    vi.mocked(api.tickets).mockResolvedValue([ticket]);
+    vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
+      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false }] : [],
+      has_more: false,
+    }));
 
     render(<App />);
 
@@ -189,10 +194,35 @@ describe("App agent routes", () => {
     expect(
       screen.getByRole("heading", { name: "Durable routes" }),
     ).toBeTruthy();
+    expect(api.ticket).toHaveBeenCalledWith(ticket.id);
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(window.location.hash).toBe("#board?project=2");
     fireEvent.click(screen.getByText("Durable routes").closest("button")!);
     expect(window.location.hash).toBe("#board?project=2&ticket=7");
+  });
+
+  it("loads terminal history on demand and details only when opened", async () => {
+    window.history.replaceState(null, "", "#board");
+    const completed = { ...ticket, id: 80, title: "Historical work", state: "done" as const };
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
+      tickets: state === "done" ? [{ ...completed, has_review_feedback: false }] : [],
+      has_more: false,
+    }));
+    vi.mocked(api.ticket).mockResolvedValue(completed);
+
+    render(<App />);
+    await screen.findByLabelText("Filter projects");
+    expect(screen.queryByText(completed.title)).toBeNull();
+    expect(api.ticket).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older tickets" }));
+    expect(await screen.findByText(completed.title)).toBeTruthy();
+    expect(api.ticket).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText(completed.title).closest("button")!);
+    expect(await screen.findByDisplayValue(completed.title)).toBeTruthy();
+    expect(api.ticket).toHaveBeenCalledWith(completed.id);
   });
 
   it("uses browser Back and Forward to traverse views", async () => {
@@ -299,7 +329,7 @@ describe("App agent routes", () => {
     expect(screen.getByRole("heading", { name: "architect" })).toBeTruthy();
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
     expect(api.agents).toHaveBeenCalledTimes(1);
-    expect(api.tickets).toHaveBeenCalledTimes(1);
+    expect(api.tickets).toHaveBeenCalledTimes(3);
     expect(api.settings).toHaveBeenCalledTimes(1);
 
     act(() => {
@@ -311,7 +341,7 @@ describe("App agent routes", () => {
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
     expect(api.project).toHaveBeenCalledTimes(2);
     expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(6);
     expect(api.channels).toHaveBeenCalledTimes(2);
     expect(api.settings).toHaveBeenCalledTimes(2);
 
@@ -328,7 +358,7 @@ describe("App agent routes", () => {
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(3));
     expect(api.project).toHaveBeenCalledTimes(3);
     expect(api.projects).toHaveBeenCalledTimes(3);
-    expect(api.tickets).toHaveBeenCalledTimes(3);
+    expect(api.tickets).toHaveBeenCalledTimes(9);
     expect(api.channels).toHaveBeenCalledTimes(3);
     expect(api.settings).toHaveBeenCalledTimes(3);
   });
@@ -591,7 +621,7 @@ describe("App agent routes", () => {
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
     expect(api.project).toHaveBeenCalledTimes(2);
     expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(6);
     expect(api.channels).toHaveBeenCalledTimes(2);
     expect(api.settings).toHaveBeenCalledTimes(2);
   });
@@ -645,7 +675,10 @@ describe("App agent routes", () => {
   it("preserves a dirty ticket when that ticket changes remotely", async () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);
-    vi.mocked(api.tickets).mockResolvedValue([ticket]);
+    vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
+      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false }] : [],
+      has_more: false,
+    }));
     render(<App />);
     const title = await screen.findByDisplayValue(ticket.title);
     fireEvent.change(title, { target: { value: "My unfinished title" } });
@@ -665,6 +698,6 @@ describe("App agent routes", () => {
 
     expect(screen.getByDisplayValue("My unfinished title")).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("updated elsewhere");
-    expect(api.tickets).toHaveBeenCalledTimes(1);
+    expect(api.tickets).toHaveBeenCalledTimes(3);
   });
 });

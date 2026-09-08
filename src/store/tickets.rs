@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use sqlx::{Sqlite, Transaction};
+use sqlx::{QueryBuilder, Sqlite, Transaction};
 
 use crate::{
     domain::{
-        Message, Project, Ticket, TicketActivity, TicketBlocker, TicketState, TicketWakePayload,
-        TicketWakeTicket, WakeDeliveryPolicy, WakeEventData,
+        Message, Project, Ticket, TicketActivity, TicketBlocker, TicketState, TicketSummary,
+        TicketWakePayload, TicketWakeTicket, WakeDeliveryPolicy, WakeEventData,
     },
     error::AppError,
 };
@@ -47,6 +47,17 @@ pub struct ReviewSubmission<'a> {
     pub target_branch: &'a str,
     pub project_id: i64,
     pub project_path: &'a str,
+}
+
+pub const DEFAULT_TICKET_PAGE_SIZE: i64 = 50;
+pub const MAX_TICKET_PAGE_SIZE: i64 = 100;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TicketSummaryFilter {
+    pub project_id: Option<i64>,
+    pub state: Option<TicketState>,
+    pub before_id: Option<i64>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -277,11 +288,46 @@ impl Store {
         )
         .fetch_all(&mut *transaction)
         .await?;
-        for ticket in &mut tickets {
-            load_ticket_dependencies(&mut transaction, ticket).await?;
-        }
+        load_ticket_dependencies_batch(&mut transaction, &mut tickets).await?;
         transaction.commit().await?;
         Ok(tickets)
+    }
+
+    pub async fn ticket_summaries(
+        &self,
+        filter: TicketSummaryFilter,
+    ) -> Result<(Vec<TicketSummary>, bool), AppError> {
+        if filter.project_id.is_some_and(|id| id < 1)
+            || filter.before_id.is_some_and(|id| id < 1)
+            || filter.limit.is_some_and(|limit| limit < 1)
+        {
+            return Err(AppError::bad_request(
+                "ticket page parameters must be positive",
+            ));
+        }
+        let limit = filter
+            .limit
+            .unwrap_or(DEFAULT_TICKET_PAGE_SIZE)
+            .min(MAX_TICKET_PAGE_SIZE);
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT id, project_id, title, state, created_by_agent_id, reserved_for_agent_id, assignee_id, reviewer_id, review_feedback IS NOT NULL AS has_review_feedback, revision, created_at, updated_at FROM tickets WHERE 1 = 1",
+        );
+        if let Some(project_id) = filter.project_id {
+            query.push(" AND project_id = ").push_bind(project_id);
+        }
+        if let Some(state) = filter.state {
+            query.push(" AND state = ").push_bind(state);
+        }
+        if let Some(before_id) = filter.before_id {
+            query.push(" AND id < ").push_bind(before_id);
+        }
+        query.push(" ORDER BY id DESC LIMIT ").push_bind(limit + 1);
+        let mut summaries: Vec<TicketSummary> =
+            query.build_query_as().fetch_all(&self.pool).await?;
+        let has_more = summaries.len() > limit as usize;
+        summaries.truncate(limit as usize);
+        load_summary_dependencies(&self.pool, &mut summaries).await?;
+        Ok((summaries, has_more))
     }
 
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
@@ -1001,6 +1047,70 @@ async fn load_ticket_dependencies(
     Ok(())
 }
 
+async fn load_ticket_dependencies_batch(
+    transaction: &mut Transaction<'_, Sqlite>,
+    tickets: &mut [Ticket],
+) -> Result<(), sqlx::Error> {
+    if tickets.is_empty() {
+        return Ok(());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT dependency.ticket_id, blocker.id, blocker.title, blocker.state FROM ticket_dependencies dependency JOIN tickets blocker ON blocker.id = dependency.blocker_id WHERE dependency.ticket_id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for ticket in tickets.iter() {
+        separated.push_bind(ticket.id);
+    }
+    separated.push_unseparated(") ORDER BY dependency.ticket_id, blocker.id");
+    let blockers: Vec<(i64, i64, String, TicketState)> =
+        query.build_query_as().fetch_all(&mut **transaction).await?;
+    let by_id: HashMap<_, _> = tickets
+        .iter()
+        .enumerate()
+        .map(|(index, ticket)| (ticket.id, index))
+        .collect();
+    for (ticket_id, blocker_id, title, state) in blockers {
+        let ticket = &mut tickets[*by_id.get(&ticket_id).expect("queried ticket exists")];
+        ticket.blocker_ids.push(blocker_id);
+        if state != TicketState::Done {
+            ticket.unresolved_blockers.push(TicketBlocker {
+                id: blocker_id,
+                title,
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn load_summary_dependencies(
+    pool: &sqlx::SqlitePool,
+    summaries: &mut [TicketSummary],
+) -> Result<(), sqlx::Error> {
+    if summaries.is_empty() {
+        return Ok(());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT dependency.ticket_id, blocker.id, blocker.title FROM ticket_dependencies dependency JOIN tickets blocker ON blocker.id = dependency.blocker_id WHERE blocker.state != 'done' AND dependency.ticket_id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for summary in summaries.iter() {
+        separated.push_bind(summary.id);
+    }
+    separated.push_unseparated(") ORDER BY dependency.ticket_id, blocker.id");
+    let blockers: Vec<(i64, i64, String)> = query.build_query_as().fetch_all(pool).await?;
+    let by_id: HashMap<_, _> = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, ticket)| (ticket.id, index))
+        .collect();
+    for (ticket_id, id, title) in blockers {
+        summaries[*by_id.get(&ticket_id).expect("queried ticket exists")]
+            .unresolved_blockers
+            .push(TicketBlocker { id, title });
+    }
+    Ok(())
+}
+
 async fn replace_ticket_dependencies(
     transaction: &mut Transaction<'_, Sqlite>,
     ticket_id: i64,
@@ -1233,9 +1343,62 @@ fn validate_title(title: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use sqlx::SqlitePool;
 
     use super::*;
+
+    #[tokio::test]
+    async fn ticket_summary_pages_filter_order_and_scale_to_1000_tickets() {
+        let store = Store::memory().await.unwrap();
+        sqlx::query(
+            "WITH RECURSIVE sequence(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM sequence WHERE id < 1000) \
+             INSERT INTO tickets (id, project_id, title, state) SELECT id, 1, 'Ticket ' || id, CASE WHEN id = 1 THEN 'todo' ELSE 'done' END FROM sequence",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO ticket_dependencies (ticket_id, blocker_id) VALUES (1000, 1)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let started = Instant::now();
+        let (first, has_more) = store
+            .ticket_summaries(TicketSummaryFilter {
+                state: Some(TicketState::Done),
+                limit: Some(25),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        eprintln!("1,000-ticket summary page: {:?}", started.elapsed());
+        assert!(has_more);
+        assert_eq!(first.len(), 25);
+        assert_eq!((first[0].id, first[24].id), (1000, 976));
+        assert_eq!(first[0].unresolved_blockers[0].id, 1);
+
+        let (second, _) = store
+            .ticket_summaries(TicketSummaryFilter {
+                state: Some(TicketState::Done),
+                before_id: Some(976),
+                limit: Some(25),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!((second[0].id, second[24].id), (975, 951));
+
+        let (capped, _) = store
+            .ticket_summaries(TicketSummaryFilter {
+                limit: Some(1_000),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(capped.len(), MAX_TICKET_PAGE_SIZE as usize);
+    }
 
     #[tokio::test]
     async fn cancelled_state_migration_preserves_existing_tickets() {

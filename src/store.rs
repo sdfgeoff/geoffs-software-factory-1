@@ -16,7 +16,7 @@ pub(crate) use messages::validate_channel;
 pub(crate) use reminders::MAX_REMINDER_DELAY_SECONDS;
 pub(crate) use settings::MERGE_NOTIFICATION_CHANNEL_DESCRIPTION;
 pub(crate) use tickets::MergeNotification;
-pub use tickets::{NewTicket, ReviewSubmission, TicketChanges};
+pub use tickets::{NewTicket, ReviewSubmission, TicketChanges, TicketSummaryFilter};
 
 pub(crate) const DEFAULT_MESSAGE_PAGE_SIZE: i64 = 50;
 pub(crate) const MAX_MESSAGE_PAGE_SIZE: i64 = 100;

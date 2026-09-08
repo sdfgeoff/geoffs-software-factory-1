@@ -17,7 +17,41 @@ import type {
   Channel,
   Project,
   Ticket,
+  TicketState,
+  TicketSummary,
 } from "./types";
+
+const activeTicketStates: TicketState[] = ["todo", "in_progress", "review"];
+
+function summarizeTicket(ticket: Ticket): TicketSummary {
+  return {
+    id: ticket.id,
+    project_id: ticket.project_id,
+    title: ticket.title,
+    state: ticket.state,
+    created_by_agent_id: ticket.created_by_agent_id,
+    reserved_for_agent_id: ticket.reserved_for_agent_id,
+    assignee_id: ticket.assignee_id,
+    reviewer_id: ticket.reviewer_id,
+    has_review_feedback: ticket.review_feedback !== null,
+    unresolved_blockers: ticket.unresolved_blockers,
+    revision: ticket.revision,
+    created_at: ticket.created_at,
+    updated_at: ticket.updated_at,
+  };
+}
+
+async function loadTicketState(state: TicketState) {
+  const tickets: TicketSummary[] = [];
+  let before_id: number | undefined;
+  do {
+    const page = await api.tickets({ state, before_id, limit: 100 });
+    tickets.push(...page.tickets);
+    if (!page.has_more) break;
+    before_id = Math.min(...page.tickets.map((ticket) => ticket.id));
+  } while (before_id);
+  return tickets;
+}
 
 type Route =
   | { view: "board"; projectId: number | null; ticketId: number | null }
@@ -94,7 +128,11 @@ export function App() {
   const [route, setRoute] = useState(() => parseRoute(window.location.hash));
   const [project, setProject] = useState<Project | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [tickets, setTickets] = useState<TicketSummary[]>([]);
+  const [ticketDetails, setTicketDetails] = useState<Record<number, Ticket>>({});
+  const [missingTicketIds, setMissingTicketIds] = useState<Set<number>>(() => new Set());
+  const [historyHasMore, setHistoryHasMore] = useState({ done: true, cancelled: true });
+  const [historyBefore, setHistoryBefore] = useState<Partial<Record<"done" | "cancelled", number>>>({});
   const [channels, setChannels] = useState<Channel[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -134,18 +172,21 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [nextProject, nextProjects, nextTickets, nextChannels, nextAgents, nextSettings] =
+      const [nextProject, nextProjects, activePages, nextChannels, nextAgents, nextSettings] =
         await Promise.all([
           api.project(),
           api.projects(),
-          api.tickets(),
+          Promise.all(activeTicketStates.map(loadTicketState)),
           api.channels(),
           api.agents(),
           api.settings(),
         ]);
       setProject(nextProject);
       setProjects(nextProjects);
-      setTickets(nextTickets);
+      setTickets((current) => [
+        ...current.filter((ticket) => !activeTicketStates.includes(ticket.state)),
+        ...activePages.flat(),
+      ]);
       setChannels(nextChannels);
       setAgents(nextAgents);
       setSettings(nextSettings);
@@ -154,6 +195,26 @@ export function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
+
+  useEffect(() => {
+    if (route.view !== "board" || !route.ticketId || ticketDetails[route.ticketId] || missingTicketIds.has(route.ticketId)) {
+      return;
+    }
+    let current = true;
+    void api.ticket(route.ticketId).then((ticket) => {
+      if (!current) return;
+      setTicketDetails((details) => ({ ...details, [ticket.id]: ticket }));
+      setTickets((summaries) => {
+        const summary = summarizeTicket(ticket);
+        return summaries.some((item) => item.id === ticket.id)
+          ? summaries.map((item) => item.id === ticket.id ? summary : item)
+          : [...summaries, summary];
+      });
+    }).catch(() => {
+      if (current) setMissingTicketIds((ids) => new Set(ids).add(route.ticketId!));
+    });
+    return () => { current = false; };
+  }, [missingTicketIds, route, ticketDetails]);
 
   const reloadProjects = useCallback(async () => {
     try {
@@ -172,10 +233,35 @@ export function App() {
     const next = Array.isArray(updates) ? updates : [updates];
     setTickets((current) => {
       const byId = new Map(current.map((ticket) => [ticket.id, ticket]));
-      next.forEach((ticket) => byId.set(ticket.id, ticket));
+      next.forEach((ticket) => byId.set(ticket.id, summarizeTicket(ticket)));
       return [...byId.values()];
     });
+    setTicketDetails((current) => {
+      const updated = { ...current };
+      next.forEach((ticket) => { updated[ticket.id] = ticket; });
+      return updated;
+    });
   }, []);
+
+  const loadHistory = useCallback(async (state: "done" | "cancelled") => {
+    try {
+      const page = await api.tickets({ state, before_id: historyBefore[state], limit: 50 });
+      setTickets((current) => {
+        const byId = new Map(current.map((ticket) => [ticket.id, ticket]));
+        page.tickets.forEach((ticket) => byId.set(ticket.id, ticket));
+        return [...byId.values()];
+      });
+      if (page.tickets.length) {
+        setHistoryBefore((current) => ({
+          ...current,
+          [state]: Math.min(...page.tickets.map((ticket) => ticket.id)),
+        }));
+      }
+      setHistoryHasMore((current) => ({ ...current, [state]: page.has_more }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [historyBefore]);
   const mergeAgent = useCallback((updated: Agent) => {
     setAgents((current) => {
       const index = current.findIndex((agent) => agent.id === updated.id);
@@ -342,7 +428,7 @@ export function App() {
     route.view === "agents" ? route.agentView : lastAgentRoute.agentView;
   const selectedTicket =
     route.view === "board" && route.ticketId
-      ? tickets.find((ticket) => ticket.id === route.ticketId)
+      ? ticketDetails[route.ticketId] ?? null
       : null;
   const changeAgentView = useCallback(
     (nextView: AgentView) => {
@@ -367,7 +453,7 @@ export function App() {
           route.projectId &&
           !projects.some((item) => item.id === route.projectId)
         ? "Project not found"
-        : route.view === "board" && route.ticketId && !selectedTicket
+        : route.view === "board" && route.ticketId && missingTicketIds.has(route.ticketId)
           ? "Ticket not found"
           : route.view === "board" &&
               route.projectId &&
@@ -467,6 +553,9 @@ export function App() {
           currentProjectId={project?.id ?? null}
           filterProjectId={route.view === "board" ? route.projectId : lastBoardRoute.projectId}
           selectedTicketId={route.view === "board" ? route.ticketId : lastBoardRoute.ticketId}
+          selectedTicket={selectedTicket}
+          historyHasMore={historyHasMore}
+          onLoadHistory={loadHistory}
           onFilterProject={(projectId) =>
             navigate({ view: "board", projectId, ticketId: null })
           }

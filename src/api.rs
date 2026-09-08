@@ -13,14 +13,14 @@ use multi_agent_board_protocol::{
     CreateWakeEventRequest, MessagePageQuery, PostMessageRequest, RegisterProjectRequest,
     ReserveTicketsRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
     SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetProjectRequest,
-    UpdateTicketRequest,
+    TicketSummaryQuery, UpdateTicketRequest,
 };
 
 use crate::{
     agent_runtime::AgentManager,
     domain::{TicketClaimResponse, WakeDeliveryPolicy},
     error::AppError,
-    store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges},
+    store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges, TicketSummaryFilter},
 };
 
 pub fn router(store: Store, agents: AgentManager) -> Router {
@@ -236,13 +236,32 @@ async fn current_branch(root: &std::path::Path) -> Result<String, AppError> {
 async fn list_tickets(
     State(store): State<Store>,
     headers: HeaderMap,
-) -> Result<Json<Vec<protocol::Ticket>>, AppError> {
-    let mut tickets = store.tickets().await?;
+    Query(query): Query<TicketSummaryQuery>,
+) -> Result<Json<protocol::TicketSummaryPage>, AppError> {
+    list_ticket_summaries(store, headers, query).await
+}
+
+async fn list_ticket_summaries(
+    store: Store,
+    headers: HeaderMap,
+    query: TicketSummaryQuery,
+) -> Result<Json<protocol::TicketSummaryPage>, AppError> {
+    let (mut tickets, has_more) = store
+        .ticket_summaries(TicketSummaryFilter {
+            project_id: query.project_id,
+            state: query.state.map(Into::into),
+            before_id: query.before_id,
+            limit: query.limit,
+        })
+        .await?;
     if let Some(agent_id) = agent_header(&headers)? {
         let subscriptions = store.agent_project_subscriptions(agent_id).await?;
         tickets.sort_by_key(|ticket| !subscriptions.contains(&ticket.project_id));
     }
-    Ok(Json(tickets.into_iter().map(Into::into).collect()))
+    Ok(Json(protocol::TicketSummaryPage {
+        tickets: tickets.into_iter().map(Into::into).collect(),
+        has_more,
+    }))
 }
 
 async fn create_ticket(
@@ -1144,6 +1163,7 @@ mod tests {
         assert_eq!(ticket["project_id"], 1);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::patch(format!("/tickets/{}", ticket["id"]))
                     .header(header::CONTENT_TYPE, "application/json")
@@ -1156,6 +1176,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::get("/tickets?project_id=1&state=in_progress&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(page["tickets"][0]["id"], ticket["id"]);
+        assert_eq!(page["has_more"], false);
+        assert!(page["tickets"][0].get("description").is_none());
     }
 
     #[tokio::test]
@@ -1202,8 +1237,8 @@ mod tests {
         let tickets: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(tickets[0]["id"], preferred_ticket.id);
-        assert_eq!(tickets[1]["id"], other_ticket.id);
+        assert_eq!(tickets["tickets"][0]["id"], preferred_ticket.id);
+        assert_eq!(tickets["tickets"][1]["id"], other_ticket.id);
     }
 
     #[tokio::test]

@@ -63,6 +63,37 @@ pub struct Ticket {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TicketSummary {
+    pub id: i64,
+    pub project_id: i64,
+    pub title: String,
+    pub state: TicketState,
+    pub created_by_agent_id: Option<i64>,
+    pub reserved_for_agent_id: Option<i64>,
+    pub assignee_id: Option<i64>,
+    pub reviewer_id: Option<i64>,
+    pub has_review_feedback: bool,
+    pub unresolved_blockers: Vec<TicketBlocker>,
+    pub revision: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TicketSummaryPage {
+    pub tickets: Vec<TicketSummary>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TicketSummaryQuery {
+    pub project_id: Option<i64>,
+    pub state: Option<TicketState>,
+    pub before_id: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TicketActivity {
     pub id: i64,
     pub ticket_id: i64,
@@ -640,6 +671,35 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<TicketClaimResponse>(encoded).unwrap(),
             response
+        );
+    }
+
+    #[test]
+    fn ticket_summary_page_omits_full_review_and_description_fields() {
+        let page = TicketSummaryPage {
+            tickets: vec![TicketSummary {
+                id: 47,
+                project_id: 1,
+                title: "Typed wire contract".into(),
+                state: TicketState::Done,
+                created_by_agent_id: Some(2),
+                reserved_for_agent_id: None,
+                assignee_id: Some(2),
+                reviewer_id: Some(3),
+                has_review_feedback: true,
+                unresolved_blockers: Vec::new(),
+                revision: 4,
+                created_at: 10,
+                updated_at: 20,
+            }],
+            has_more: true,
+        };
+        let encoded = serde_json::to_value(&page).unwrap();
+        assert_eq!(encoded["tickets"][0]["has_review_feedback"], true);
+        assert!(encoded["tickets"][0].get("description").is_none());
+        assert_eq!(
+            serde_json::from_value::<TicketSummaryPage>(encoded).unwrap(),
+            page
         );
     }
 
