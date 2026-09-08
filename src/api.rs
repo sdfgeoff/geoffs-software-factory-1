@@ -768,11 +768,14 @@ mod tests {
     #[tokio::test]
     async fn channel_message_endpoint_returns_typed_pages() {
         let store = Store::memory().await.unwrap();
+        let mut inserted = Vec::new();
         for number in 1..=3 {
-            store
-                .post_message("general", None, "human", &format!("Message {number}"))
-                .await
-                .unwrap();
+            inserted.push(
+                store
+                    .post_message("general", None, "human", &format!("Message {number}"))
+                    .await
+                    .unwrap(),
+            );
         }
         let app = test_router(store);
 
@@ -792,6 +795,24 @@ mod tests {
         assert_eq!(page["messages"][0]["body"], "Message 2");
         assert_eq!(page["messages"][1]["body"], "Message 3");
         assert_eq!(page["has_more"], true);
+
+        let older = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/channels/general/messages?before_id={}&limit=2",
+                    inserted[1].id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let older: Value =
+            serde_json::from_slice(&to_bytes(older.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(older["messages"][0]["body"], "Message 1");
+        assert_eq!(older["has_more"], false);
 
         let invalid = app
             .oneshot(

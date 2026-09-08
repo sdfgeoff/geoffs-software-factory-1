@@ -344,11 +344,14 @@ mod tests {
     async fn agent_message_endpoint_returns_typed_pages() {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let mut inserted = Vec::new();
         for number in 1..=3 {
-            store
-                .add_agent_message(agent.id, "agent", &format!("Message {number}"))
-                .await
-                .unwrap();
+            inserted.push(
+                store
+                    .add_agent_message(agent.id, "agent", &format!("Message {number}"))
+                    .await
+                    .unwrap(),
+            );
         }
         let manager = AgentManager::new(
             store,
@@ -357,7 +360,9 @@ mod tests {
             "http://127.0.0.1:1/api".into(),
         );
 
-        let response = router(manager)
+        let app = router(manager);
+        let response = app
+            .clone()
             .oneshot(
                 Request::get(format!("/agents/{}/messages?limit=2", agent.id))
                     .body(Body::empty())
@@ -372,6 +377,23 @@ mod tests {
         assert_eq!(page["messages"][0]["body"], "Message 2");
         assert_eq!(page["messages"][1]["body"], "Message 3");
         assert_eq!(page["has_more"], true);
+
+        let older = app
+            .oneshot(
+                Request::get(format!(
+                    "/agents/{}/messages?before_id={}&limit=2",
+                    agent.id, inserted[1].id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let older: Value =
+            serde_json::from_slice(&to_bytes(older.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(older["messages"][0]["body"], "Message 1");
+        assert_eq!(older["has_more"], false);
     }
 
     #[tokio::test]

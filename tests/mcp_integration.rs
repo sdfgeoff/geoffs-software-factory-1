@@ -505,6 +505,7 @@ async fn mcp_creates_and_describes_empty_channels() {
         "Architecture decisions"
     );
     assert_eq!(tool_content(&read)["messages"], json!([]));
+    assert_eq!(tool_content(&read)["has_more"], false);
 
     for (id, name, arguments, expected) in [
         (
