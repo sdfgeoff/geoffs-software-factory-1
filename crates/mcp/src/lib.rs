@@ -747,7 +747,7 @@ fn tools() -> Value {
         ),
         tool(
             "read_message_board_channel",
-            "Read messages in an optional inclusive time range",
+            "Read a cursor-paginated message-board channel",
             json!({"type":"object","properties":{"channel_name":{"type":"string"},"before_id":{"type":"integer","minimum":1},"after_id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["channel_name"]})
         ),
         tool(

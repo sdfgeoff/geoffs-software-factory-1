@@ -1,13 +1,30 @@
 import type {
   Agent,
-  AgentMessage,
+  AgentMessagePage,
   AgentProjectWorktree,
   BoardMessage,
   BoardSettings,
   Channel,
+  MessagePage,
+  MessagePageQuery,
   Project,
   Ticket,
 } from "./types";
+
+function pageQuery(query: MessagePageQuery = {}) {
+  const search = new URLSearchParams();
+  if (query.before_id !== undefined && query.before_id !== null) {
+    search.set("before_id", String(query.before_id));
+  }
+  if (query.after_id !== undefined && query.after_id !== null) {
+    search.set("after_id", String(query.after_id));
+  }
+  if (query.limit !== undefined && query.limit !== null) {
+    search.set("limit", String(query.limit));
+  }
+  const suffix = search.toString();
+  return suffix ? `?${suffix}` : "";
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -88,9 +105,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, description }),
     }),
-  messages: (channel: string) =>
-    request<BoardMessage[]>(
-      `/channels/${encodeURIComponent(channel)}/messages`,
+  messages: (channel: string, query: MessagePageQuery = {}) =>
+    request<MessagePage>(
+      `/channels/${encodeURIComponent(channel)}/messages${pageQuery(query)}`,
     ),
   postMessage: (channel: string, body: string) =>
     request<BoardMessage>(`/channels/${encodeURIComponent(channel)}/messages`, {
@@ -146,8 +163,8 @@ export const api = {
     request<Agent>(`/agents/${id}/pause`, { method: "POST" }),
   resumeAgent: (id: number) =>
     request<Agent>(`/agents/${id}/resume`, { method: "POST" }),
-  agentMessages: (id: number) =>
-    request<AgentMessage[]>(`/agents/${id}/messages`),
+  agentMessages: (id: number, query: MessagePageQuery = {}) =>
+    request<AgentMessagePage>(`/agents/${id}/messages${pageQuery(query)}`),
   agentProjectWorktrees: (id: number) =>
     request<AgentProjectWorktree[]>(`/agents/${id}/project-worktrees`),
   sendAgentMessage: (id: number, message: string) =>
