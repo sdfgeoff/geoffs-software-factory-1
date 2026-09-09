@@ -51,6 +51,7 @@ const project: Project = {
   name: "Router",
   path: "/repo/router",
   default_branch: "main",
+  completion_workflow: "board_managed",
   archived_at: null,
   updated_at: 0,
 };
@@ -73,6 +74,10 @@ const ticket: Ticket = {
   review_project_path: null,
   reviewer_id: null,
   review_feedback: null,
+  review_completion_workflow: null,
+  external_change_url: null,
+  external_merge_reference: null,
+  external_merged_at: null,
   revision: 1,
   created_at: 0,
   updated_at: 0,
@@ -248,7 +253,7 @@ describe("App agent routes", () => {
 
     expect(await screen.findByDisplayValue(repaired.title)).toBeTruthy();
     expect(api.ticket).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(6);
+    expect(api.tickets).toHaveBeenCalledTimes(8);
   });
 
   it("keeps a newer typed ticket event over delayed detail and summary responses", async () => {
@@ -413,7 +418,7 @@ describe("App agent routes", () => {
     expect(screen.getByRole("heading", { name: "architect" })).toBeTruthy();
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
     expect(api.agents).toHaveBeenCalledTimes(1);
-    expect(api.tickets).toHaveBeenCalledTimes(3);
+    expect(api.tickets).toHaveBeenCalledTimes(4);
     expect(api.settings).toHaveBeenCalledTimes(1);
 
     act(() => {
@@ -425,7 +430,7 @@ describe("App agent routes", () => {
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
     expect(api.project).toHaveBeenCalledTimes(2);
     expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(6);
+    expect(api.tickets).toHaveBeenCalledTimes(8);
     expect(api.channels).toHaveBeenCalledTimes(2);
     expect(api.settings).toHaveBeenCalledTimes(2);
 
@@ -442,7 +447,7 @@ describe("App agent routes", () => {
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(3));
     expect(api.project).toHaveBeenCalledTimes(3);
     expect(api.projects).toHaveBeenCalledTimes(3);
-    expect(api.tickets).toHaveBeenCalledTimes(9);
+    expect(api.tickets).toHaveBeenCalledTimes(12);
     expect(api.channels).toHaveBeenCalledTimes(3);
     expect(api.settings).toHaveBeenCalledTimes(3);
   });
@@ -705,7 +710,7 @@ describe("App agent routes", () => {
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
     expect(api.project).toHaveBeenCalledTimes(2);
     expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(6);
+    expect(api.tickets).toHaveBeenCalledTimes(8);
     expect(api.channels).toHaveBeenCalledTimes(2);
     expect(api.settings).toHaveBeenCalledTimes(2);
   });
@@ -782,6 +787,6 @@ describe("App agent routes", () => {
 
     expect(screen.getByDisplayValue("My unfinished title")).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("updated elsewhere");
-    expect(api.tickets).toHaveBeenCalledTimes(3);
+    expect(api.tickets).toHaveBeenCalledTimes(4);
   });
 });

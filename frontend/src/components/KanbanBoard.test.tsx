@@ -35,6 +35,10 @@ const ticket: Ticket = {
   review_project_path: null,
   reviewer_id: null,
   review_feedback: null,
+  review_completion_workflow: null,
+  external_change_url: null,
+  external_merge_reference: null,
+  external_merged_at: null,
   blocker_ids: [],
   unresolved_blockers: [],
   revision: 1,
@@ -48,6 +52,7 @@ const projects: Project[] = [
     name: "Board",
     path: "/board",
     default_branch: "main",
+    completion_workflow: "board_managed",
     archived_at: null,
     updated_at: 0,
   },
@@ -56,6 +61,7 @@ const projects: Project[] = [
     name: "API",
     path: "/api",
     default_branch: "main",
+    completion_workflow: "board_managed",
     archived_at: null,
     updated_at: 0,
   },
@@ -443,7 +449,7 @@ describe("KanbanBoard", () => {
 
     const status = screen.getByRole("combobox", { name: "Ticket status" });
     expect(container.querySelector(".column-todo.mobile-active")).toBeTruthy();
-    expect(container.querySelectorAll(".column")).toHaveLength(4);
+    expect(container.querySelectorAll(".column")).toHaveLength(5);
     fireEvent.change(status, { target: { value: "review" } });
     expect(container.querySelector(".column-review.mobile-active")).toBeTruthy();
     expect(container.querySelector(".column-todo.mobile-active")).toBeNull();

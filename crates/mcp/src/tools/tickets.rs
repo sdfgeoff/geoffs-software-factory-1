@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 
 use multi_agent_board_protocol::{
-    ClaimTicketRequest, CreateTicketRequest, Patch, RequestChangesRequest, ReserveTicketsRequest,
-    ReviewRevisionRequest, Ticket, TicketActivity, TicketClaimResponse, TicketState, TicketSummary,
-    UpdateTicketRequest,
+    ClaimTicketRequest, CompleteExternalMergeRequest, CreateTicketRequest, Patch,
+    RequestChangesRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
+    ReviewRevisionRequest, SetExternalChangeRequest, Ticket, TicketActivity, TicketClaimResponse,
+    TicketState, TicketSummary, UpdateTicketRequest,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
@@ -103,6 +104,31 @@ struct TicketRevisionArguments {
 struct TicketChangesArguments {
     ticket_id: i64,
     feedback: String,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetExternalChangeArguments {
+    ticket_id: i64,
+    external_change_url: String,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReturnExternalMergeArguments {
+    ticket_id: i64,
+    reason: String,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CompleteExternalMergeArguments {
+    ticket_id: i64,
+    confirmation: String,
+    merge_reference: Option<String>,
     expected_revision: Option<i64>,
 }
 
@@ -275,5 +301,59 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
                     .await
             })
         },
-    ))
+    ))?;
+    registry.register(ToolDefinition::<SetExternalChangeArguments, Ticket>::new(
+        "set_external_change",
+        "Set or replace the provider-neutral change URL for an external-workflow ticket",
+        |board, arguments| {
+            Box::pin(async move {
+                board
+                    .set_external_change(
+                        arguments.ticket_id,
+                        &SetExternalChangeRequest {
+                            external_change_url: arguments.external_change_url,
+                            expected_revision: arguments.expected_revision,
+                        },
+                    )
+                    .await
+            })
+        },
+    ))?;
+    registry.register(ToolDefinition::<ReturnExternalMergeArguments, Ticket>::new(
+        "return_external_merge",
+        "Return an externally approved ticket to implementation with a reason",
+        |board, arguments| {
+            Box::pin(async move {
+                board
+                    .return_external_merge(
+                        arguments.ticket_id,
+                        &ReturnExternalMergeRequest {
+                            reason: arguments.reason,
+                            expected_revision: arguments.expected_revision,
+                        },
+                    )
+                    .await
+            })
+        },
+    ))?;
+    registry.register(
+        ToolDefinition::<CompleteExternalMergeArguments, Ticket>::new(
+            "complete_external_merge",
+            "Confirm that an externally approved change was merged and record its final reference",
+            |board, arguments| {
+                Box::pin(async move {
+                    board
+                        .complete_external_merge(
+                            arguments.ticket_id,
+                            &CompleteExternalMergeRequest {
+                                confirmation: arguments.confirmation,
+                                merge_reference: arguments.merge_reference,
+                                expected_revision: arguments.expected_revision,
+                            },
+                        )
+                        .await
+                })
+            },
+        ),
+    )
 }

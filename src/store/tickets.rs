@@ -4,8 +4,9 @@ use sqlx::{QueryBuilder, Sqlite, Transaction};
 
 use crate::{
     domain::{
-        Message, Project, Ticket, TicketActivity, TicketBlocker, TicketState, TicketSummary,
-        TicketWakePayload, TicketWakeTicket, WakeDeliveryPolicy, WakeEventData,
+        Message, Project, ProjectCompletionWorkflow, Ticket, TicketActivity, TicketBlocker,
+        TicketState, TicketSummary, TicketWakePayload, TicketWakeTicket, WakeDeliveryPolicy,
+        WakeEventData,
     },
     error::AppError,
 };
@@ -71,7 +72,7 @@ enum TicketWakeReason {
 impl Store {
     pub async fn project(&self) -> Result<Option<Project>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT p.id, p.name, p.path, p.default_branch, p.archived_at, p.updated_at FROM projects p \
+            "SELECT p.id, p.name, p.path, p.default_branch, p.completion_workflow, p.archived_at, p.updated_at FROM projects p \
              JOIN board_state state ON state.current_project_id = p.id WHERE state.id = 1",
         )
         .fetch_optional(&self.pool)
@@ -80,7 +81,7 @@ impl Store {
 
     pub async fn project_by_id(&self, id: i64) -> Result<Option<Project>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE id = ?",
         )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -89,7 +90,7 @@ impl Store {
 
     pub async fn project_by_path(&self, path: &str) -> Result<Option<Project>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE path = ?",
+            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE path = ?",
         )
         .bind(path)
         .fetch_optional(&self.pool)
@@ -136,7 +137,7 @@ impl Store {
         .execute(&mut *transaction)
         .await?;
         let project =
-            sqlx::query_as("SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?")
+            sqlx::query_as("SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE id = ?")
                 .bind(id)
                 .fetch_one(&mut *transaction)
                 .await?;
@@ -146,10 +147,26 @@ impl Store {
 
     pub async fn projects(&self) -> Result<Vec<Project>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects ORDER BY id",
+            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await
+    }
+
+    pub async fn set_project_completion_workflow(
+        &self,
+        id: i64,
+        completion_workflow: ProjectCompletionWorkflow,
+    ) -> Result<Project, AppError> {
+        sqlx::query_as(
+            "UPDATE projects SET completion_workflow = ?, updated_at = unixepoch() WHERE id = ? \
+             RETURNING id, name, path, default_branch, completion_workflow, archived_at, updated_at",
+        )
+        .bind(completion_workflow)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("project not found"))
     }
 
     pub async fn register_project(
@@ -157,6 +174,7 @@ impl Store {
         name: &str,
         path: &str,
         default_branch: &str,
+        completion_workflow: ProjectCompletionWorkflow,
     ) -> Result<Project, AppError> {
         let name = name.trim();
         let default_branch = default_branch.trim();
@@ -176,10 +194,11 @@ impl Store {
         {
             return Err(AppError::conflict("project root is already registered"));
         }
-        let id = sqlx::query("INSERT INTO projects (name, path, default_branch) VALUES (?, ?, ?)")
+        let id = sqlx::query("INSERT INTO projects (name, path, default_branch, completion_workflow) VALUES (?, ?, ?, ?)")
             .bind(name)
             .bind(path)
             .bind(default_branch)
+            .bind(completion_workflow)
             .execute(&mut *transaction)
             .await?
             .last_insert_rowid();
@@ -191,7 +210,7 @@ impl Store {
         .execute(&mut *transaction)
         .await?;
         let project = sqlx::query_as(
-            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE id = ?",
         )
         .bind(id)
         .fetch_one(&mut *transaction)
@@ -203,7 +222,7 @@ impl Store {
     pub async fn archive_project(&self, id: i64) -> Result<Project, AppError> {
         let mut transaction = self.pool.begin().await?;
         let project: Option<Project> = sqlx::query_as(
-            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&mut *transaction)
@@ -211,7 +230,7 @@ impl Store {
         let project = project.ok_or_else(|| AppError::not_found("project not found"))?;
         if project.archived_at.is_none() {
             let active_work: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM tickets WHERE project_id = ? AND state IN ('in_progress', 'review'))",
+                "SELECT EXISTS(SELECT 1 FROM tickets WHERE project_id = ? AND state IN ('in_progress', 'review', 'awaiting_external_merge'))",
             )
             .bind(id)
             .fetch_one(&mut *transaction)
@@ -248,7 +267,7 @@ impl Store {
             .await?;
         }
         let archived = sqlx::query_as(
-            "SELECT id, name, path, default_branch, archived_at, updated_at FROM projects WHERE id = ?",
+            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE id = ?",
         )
         .bind(id)
         .fetch_one(&mut *transaction)
@@ -283,7 +302,7 @@ impl Store {
     pub async fn tickets(&self) -> Result<Vec<Ticket>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let mut tickets: Vec<Ticket> = sqlx::query_as(
-            "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at \
              FROM tickets ORDER BY id",
         )
         .fetch_all(&mut *transaction)
@@ -333,7 +352,7 @@ impl Store {
     pub async fn ticket(&self, id: i64) -> Result<Option<Ticket>, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let ticket: Option<Ticket> = sqlx::query_as(
-            "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at \
+            "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at \
              FROM tickets WHERE id = ?",
         )
         .bind(id)
@@ -438,7 +457,12 @@ impl Store {
         let state = changes.state.unwrap_or(current.state);
         if current.state != state {
             match (current.state, state) {
-                (TicketState::Todo | TicketState::InProgress, TicketState::Cancelled) => {}
+                (
+                    TicketState::Todo
+                    | TicketState::InProgress
+                    | TicketState::AwaitingExternalMerge,
+                    TicketState::Cancelled,
+                ) => {}
                 (TicketState::Review, TicketState::Cancelled) => {
                     return Err(AppError::conflict(
                         "a ticket under review cannot be cancelled",
@@ -449,6 +473,16 @@ impl Store {
                 }
                 (TicketState::Cancelled, _) => {
                     return Err(AppError::conflict("a cancelled ticket is terminal"));
+                }
+                (TicketState::AwaitingExternalMerge, _) => {
+                    return Err(AppError::conflict(
+                        "use an external merge operation to return or complete this ticket",
+                    ));
+                }
+                (_, TicketState::AwaitingExternalMerge) => {
+                    return Err(AppError::conflict(
+                        "only external review approval can enter awaiting external merge",
+                    ));
                 }
                 _ => {}
             }
@@ -688,7 +722,7 @@ impl Store {
             return Err(AppError::not_found("ticket not found"));
         }
         Ok(sqlx::query_as(
-            "SELECT id, ticket_id, action, actor_agent_id, previous_reserved_for_agent_id, \
+            "SELECT id, ticket_id, action, detail, actor_agent_id, previous_reserved_for_agent_id, \
              reserved_for_agent_id, created_at FROM ticket_activity \
              WHERE ticket_id = ? ORDER BY created_at, id",
         )
@@ -741,7 +775,7 @@ impl Store {
              AND NOT EXISTS (SELECT 1 FROM ticket_dependencies d JOIN tickets blocker ON blocker.id = d.blocker_id \
              WHERE d.ticket_id = tickets.id AND blocker.state != 'done') \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at",
         )
         .bind(agent_id)
         .bind(id)
@@ -806,18 +840,19 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         let ticket = sqlx::query_as(
-            "UPDATE tickets SET state = 'review', implementation_branch = ?, review_commit = ?, review_target_branch = ?, review_project_id = ?, review_project_path = ?, reviewer_id = NULL, \
+            "UPDATE tickets SET state = 'review', implementation_branch = ?, review_commit = ?, review_target_branch = ?, review_project_id = ?, review_project_path = ?, review_completion_workflow = ?, reviewer_id = NULL, \
              revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'in_progress' AND assignee_id = ? \
              AND project_id = ? \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at",
         )
         .bind(submission.implementation_branch)
         .bind(submission.commit)
         .bind(submission.target_branch)
         .bind(submission.project_id)
         .bind(submission.project_path)
+        .bind(project.completion_workflow)
         .bind(id)
         .bind(agent_id)
         .bind(submission.project_id)
@@ -863,7 +898,7 @@ impl Store {
              AND review_project_id = project_id AND review_project_path = \
                  (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
              AND (reviewer_id IS NULL OR reviewer_id = ?) AND (? IS NULL OR revision = ?) \
-             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at",
         )
         .bind(reviewer_id)
         .bind(id)
@@ -908,7 +943,7 @@ impl Store {
              AND review_project_id = project_id AND review_project_path = \
                  (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at",
         )
         .bind(feedback.trim())
         .bind(id)
@@ -921,6 +956,235 @@ impl Store {
             AppError::conflict("review is not assigned to this agent or has changed")
         })?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
+        transaction.commit().await?;
+        Ok(ticket)
+    }
+
+    pub async fn approve_external_review(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        if !self.has_agent_scope(reviewer_id, "approve_review").await? {
+            return Err(AppError::forbidden("agent lacks approve_review scope"));
+        }
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.review_ticket_project(&current).await?;
+        let mut transaction = self.pool.begin().await?;
+        let mut ticket: Ticket = sqlx::query_as(
+            "UPDATE tickets SET state = 'awaiting_external_merge', revision = revision + 1, updated_at = unixepoch() \
+             WHERE id = ? AND state = 'review' AND reviewer_id = ? AND review_commit = ? \
+             AND review_completion_workflow = 'external' \
+             AND review_project_id = project_id AND review_project_path = \
+                 (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
+             AND (? IS NULL OR revision = ?) \
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(reviewer_id)
+        .bind(commit)
+        .bind(expected_revision)
+        .bind(expected_revision)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict("external review is not assigned to this agent or has changed")
+        })?;
+        sqlx::query(
+            "INSERT INTO ticket_activity (ticket_id, action, actor_agent_id) \
+             VALUES (?, 'external_review_approved', ?)",
+        )
+        .bind(id)
+        .bind(reviewer_id)
+        .execute(&mut *transaction)
+        .await?;
+        load_ticket_dependencies(&mut transaction, &mut ticket).await?;
+        transaction.commit().await?;
+        Ok(ticket)
+    }
+
+    pub async fn set_external_change_url(
+        &self,
+        id: i64,
+        external_change_url: &str,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        let url = external_change_url.trim();
+        if url.is_empty() || url.chars().count() > 2_048 {
+            return Err(AppError::bad_request(
+                "external change URL must contain between 1 and 2048 characters",
+            ));
+        }
+        self.update_external_merge_ticket(
+            id,
+            expected_revision,
+            "external_change_url = ?",
+            url,
+            "external_change_url_set",
+            actor_agent_id,
+        )
+        .await
+    }
+
+    async fn update_external_merge_ticket(
+        &self,
+        id: i64,
+        expected_revision: Option<i64>,
+        assignment: &str,
+        value: &str,
+        action: &str,
+        actor_agent_id: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.active_ticket_project(&current).await?;
+        if current.review_completion_workflow != Some(ProjectCompletionWorkflow::External)
+            || !matches!(
+                current.state,
+                TicketState::Review | TicketState::AwaitingExternalMerge
+            )
+        {
+            return Err(AppError::conflict(
+                "ticket is not in the external completion workflow",
+            ));
+        }
+        let sql = format!(
+            "UPDATE tickets SET {assignment}, revision = revision + 1, updated_at = unixepoch() \
+             WHERE id = ? AND revision = ?"
+        );
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(&sql)
+            .bind(value)
+            .bind(id)
+            .bind(expected_revision.unwrap_or(current.revision))
+            .execute(&mut *transaction)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::conflict("ticket was changed by another user"));
+        }
+        sqlx::query(
+            "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(action)
+        .bind(value)
+        .bind(actor_agent_id)
+        .execute(&mut *transaction)
+        .await?;
+        let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        transaction.commit().await?;
+        Ok(ticket)
+    }
+
+    pub async fn return_external_merge(
+        &self,
+        id: i64,
+        reason: &str,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        let reason = reason.trim();
+        if reason.is_empty() || reason.chars().count() > 10_000 {
+            return Err(AppError::bad_request(
+                "return reason must contain between 1 and 10000 characters",
+            ));
+        }
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.active_ticket_project(&current).await?;
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE tickets SET state = 'in_progress', review_feedback = ?, revision = revision + 1, updated_at = unixepoch() \
+             WHERE id = ? AND state = 'awaiting_external_merge' AND review_completion_workflow = 'external' \
+             AND revision = ?",
+        )
+        .bind(reason)
+        .bind(id)
+        .bind(expected_revision.unwrap_or(current.revision))
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "ticket is not awaiting an external merge or has changed",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id) \
+             VALUES (?, 'external_merge_returned', ?, ?)",
+        )
+        .bind(id)
+        .bind(reason)
+        .bind(actor_agent_id)
+        .execute(&mut *transaction)
+        .await?;
+        let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        transaction.commit().await?;
+        Ok(ticket)
+    }
+
+    pub async fn complete_external_merge(
+        &self,
+        id: i64,
+        confirmation: &str,
+        merge_reference: Option<&str>,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<Ticket, AppError> {
+        let confirmation = confirmation.trim();
+        if confirmation.is_empty() || confirmation.chars().count() > 10_000 {
+            return Err(AppError::bad_request(
+                "confirmation must contain between 1 and 10000 characters",
+            ));
+        }
+        let merge_reference = merge_reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if merge_reference.is_some_and(|value| value.chars().count() > 2_048) {
+            return Err(AppError::bad_request(
+                "external merge reference cannot exceed 2048 characters",
+            ));
+        }
+        let current = self
+            .ticket(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.active_ticket_project(&current).await?;
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE tickets SET state = 'done', external_merge_reference = ?, external_merged_at = unixepoch(), \
+             revision = revision + 1, updated_at = unixepoch() WHERE id = ? \
+             AND state = 'awaiting_external_merge' AND review_completion_workflow = 'external' AND revision = ?",
+        )
+        .bind(merge_reference)
+        .bind(id)
+        .bind(expected_revision.unwrap_or(current.revision))
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "ticket is not awaiting an external merge or has changed",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id) \
+             VALUES (?, 'external_merge_completed', ?, ?)",
+        )
+        .bind(id)
+        .bind(confirmation)
+        .bind(actor_agent_id)
+        .execute(&mut *transaction)
+        .await?;
+        let ticket = ticket_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
         Ok(ticket)
     }
@@ -985,10 +1249,11 @@ impl Store {
         let ticket = sqlx::query_as(
             "UPDATE tickets SET state = 'done', revision = revision + 1, updated_at = unixepoch() \
              WHERE id = ? AND state = 'review' AND reviewer_id = ? AND review_commit = ? \
+             AND (review_completion_workflow IS NULL OR review_completion_workflow = 'board_managed') \
              AND review_project_id = project_id AND review_project_path = \
                  (SELECT path FROM projects WHERE id = tickets.project_id AND archived_at IS NULL) \
              AND (? IS NULL OR revision = ?) \
-             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at",
+             RETURNING id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at",
         )
         .bind(id)
         .bind(reviewer_id)
@@ -1016,7 +1281,7 @@ async fn ticket_in_transaction(
 ) -> Result<Ticket, AppError> {
     let mut ticket = sqlx::query_as(
         "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, \
-         review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, revision, created_at, updated_at \
+         review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at \
          FROM tickets WHERE id = ?",
     )
     .bind(id)
@@ -1193,6 +1458,10 @@ fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'st
             "created_by_agent_id",
             "reserved_for_agent_id",
             "blocker_ids",
+            "review_completion_workflow",
+            "external_change_url",
+            "external_merge_reference",
+            "external_merged_at",
         ];
     };
     let mut fields = Vec::new();
@@ -1225,6 +1494,18 @@ fn ticket_changed_fields(previous: Option<&Ticket>, ticket: &Ticket) -> Vec<&'st
     }
     if previous.review_feedback != ticket.review_feedback {
         fields.push("review_feedback");
+    }
+    if previous.review_completion_workflow != ticket.review_completion_workflow {
+        fields.push("review_completion_workflow");
+    }
+    if previous.external_change_url != ticket.external_change_url {
+        fields.push("external_change_url");
+    }
+    if previous.external_merge_reference != ticket.external_merge_reference {
+        fields.push("external_merge_reference");
+    }
+    if previous.external_merged_at != ticket.external_merged_at {
+        fields.push("external_merged_at");
     }
     if previous.blocker_ids != ticket.blocker_ids {
         fields.push("blocker_ids");
@@ -1343,7 +1624,7 @@ fn validate_title(title: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use sqlx::SqlitePool;
 
@@ -1440,6 +1721,106 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_workflow_migration_preserves_and_snapshots_existing_reviews() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 26) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        let project_id = sqlx::query(
+            "INSERT INTO projects (name, path, default_branch) VALUES ('Board', '/board', 'main')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO tickets (id, project_id, title, state) VALUES \
+             (7, ?, 'Existing review', 'review'), (8, ?, 'Existing done', 'done')",
+        )
+        .bind(project_id)
+        .bind(project_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 26)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let workflow: String =
+            sqlx::query_scalar("SELECT completion_workflow FROM projects WHERE id = ?")
+                .bind(project_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(workflow, "board_managed");
+        let snapshots: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT state, review_completion_workflow FROM tickets ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            snapshots,
+            vec![
+                ("review".into(), Some("board_managed".into())),
+                ("done".into(), None),
+            ]
+        );
+        let foreign_key_errors: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(foreign_key_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn awaiting_external_merge_survives_restart() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mab-external-workflow-{unique}.sqlite3"));
+        let store = Store::open(&path).await.unwrap();
+        store
+            .set_project("/tmp/multi-agent-board-test-project")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tickets (project_id, title, state, review_completion_workflow, external_change_url) \
+             VALUES (1, 'Waiting outside', 'awaiting_external_merge', 'external', 'https://example.test/change')",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        store.close().await;
+
+        let reopened = Store::open(&path).await.unwrap();
+        let ticket = reopened.ticket(1).await.unwrap().unwrap();
+        assert_eq!(ticket.state, TicketState::AwaitingExternalMerge);
+        assert_eq!(
+            ticket.external_change_url.as_deref(),
+            Some("https://example.test/change")
+        );
+        let cancelled = reopened
+            .update_ticket(
+                ticket.id,
+                TicketChanges {
+                    state: Some(TicketState::Cancelled),
+                    expected_revision: Some(ticket.revision),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.state, TicketState::Cancelled);
+        reopened.close().await;
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -2169,5 +2550,214 @@ mod tests {
         assert_eq!(ticket.state, TicketState::InProgress);
         assert_eq!(ticket.assignee_id, Some(worker.id));
         assert_eq!(ticket.review_feedback.as_deref(), Some("Please add a test"));
+    }
+
+    #[tokio::test]
+    async fn external_review_snapshot_survives_project_changes_and_records_completion() {
+        let store = Store::memory().await.unwrap();
+        let project = store
+            .set_project_completion_workflow(1, ProjectCompletionWorkflow::External)
+            .await
+            .unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Merge elsewhere".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = store
+            .submit_review(
+                ticket.id,
+                worker.id,
+                ReviewSubmission {
+                    implementation_branch: Some("tickets/external"),
+                    commit: "reviewed-commit",
+                    target_branch: "main",
+                    project_id: project.id,
+                    project_path: &project.path,
+                },
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ticket.review_completion_workflow,
+            Some(ProjectCompletionWorkflow::External)
+        );
+
+        store
+            .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::BoardManaged)
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = store
+            .set_external_change_url(
+                ticket.id,
+                "https://example.test/change/123",
+                Some(worker.id),
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        let ticket = store
+            .approve_external_review(
+                ticket.id,
+                reviewer.id,
+                "reviewed-commit",
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ticket.state, TicketState::AwaitingExternalMerge);
+        assert!(
+            store
+                .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+                .await
+                .is_err()
+        );
+
+        let returned = store
+            .return_external_merge(
+                ticket.id,
+                "External checks failed",
+                None,
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(returned.state, TicketState::InProgress);
+        assert_eq!(returned.external_change_url, ticket.external_change_url);
+
+        store
+            .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::External)
+            .await
+            .unwrap();
+        let resubmitted = store
+            .submit_review(
+                returned.id,
+                worker.id,
+                ReviewSubmission {
+                    implementation_branch: Some("tickets/external"),
+                    commit: "second-reviewed-commit",
+                    target_branch: "main",
+                    project_id: project.id,
+                    project_path: &project.path,
+                },
+                Some(returned.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resubmitted.review_completion_workflow,
+            Some(ProjectCompletionWorkflow::External)
+        );
+        let approved = store
+            .claim_review(resubmitted.id, reviewer.id, Some(resubmitted.revision))
+            .await
+            .unwrap();
+        let approved = store
+            .approve_external_review(
+                approved.id,
+                reviewer.id,
+                "second-reviewed-commit",
+                Some(approved.revision),
+            )
+            .await
+            .unwrap();
+        let done = store
+            .complete_external_merge(
+                approved.id,
+                "Merged after external checks",
+                Some("squash-commit-not-equal-to-reviewed-commit"),
+                None,
+                Some(approved.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(done.state, TicketState::Done);
+        assert_eq!(
+            done.external_merge_reference.as_deref(),
+            Some("squash-commit-not-equal-to-reviewed-commit")
+        );
+        assert!(done.external_merged_at.is_some());
+        let activity = store.ticket_activity(done.id).await.unwrap();
+        assert!(activity.iter().any(|entry| {
+            entry.action == "external_merge_returned"
+                && entry.detail.as_deref() == Some("External checks failed")
+        }));
+        assert!(activity.iter().any(|entry| {
+            entry.action == "external_merge_completed"
+                && entry.detail.as_deref() == Some("Merged after external checks")
+        }));
+
+        store
+            .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::BoardManaged)
+            .await
+            .unwrap();
+        let board_ticket = store
+            .create_ticket(NewTicket {
+                title: "Keep board merge snapshot".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let board_ticket = store
+            .claim_ticket(board_ticket.id, worker.id, Some(board_ticket.revision))
+            .await
+            .unwrap();
+        let board_ticket = store
+            .submit_review(
+                board_ticket.id,
+                worker.id,
+                ReviewSubmission {
+                    implementation_branch: Some("tickets/board"),
+                    commit: "board-reviewed-commit",
+                    target_branch: "main",
+                    project_id: project.id,
+                    project_path: &project.path,
+                },
+                Some(board_ticket.revision),
+            )
+            .await
+            .unwrap();
+        store
+            .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::External)
+            .await
+            .unwrap();
+        let board_ticket = store
+            .claim_review(board_ticket.id, reviewer.id, Some(board_ticket.revision))
+            .await
+            .unwrap();
+        let board_ticket = store
+            .complete_review(
+                board_ticket.id,
+                reviewer.id,
+                "board-reviewed-commit",
+                Some(board_ticket.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(board_ticket.state, TicketState::Done);
     }
 }

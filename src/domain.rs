@@ -21,8 +21,18 @@ pub struct Project {
     pub name: String,
     pub path: String,
     pub default_branch: String,
+    pub completion_workflow: ProjectCompletionWorkflow,
     pub archived_at: Option<i64>,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum ProjectCompletionWorkflow {
+    #[default]
+    BoardManaged,
+    External,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, FromRow, PartialEq, Eq)]
@@ -42,6 +52,10 @@ pub struct Ticket {
     pub review_project_path: Option<String>,
     pub reviewer_id: Option<i64>,
     pub review_feedback: Option<String>,
+    pub review_completion_workflow: Option<ProjectCompletionWorkflow>,
+    pub external_change_url: Option<String>,
+    pub external_merge_reference: Option<String>,
+    pub external_merged_at: Option<i64>,
     #[sqlx(skip)]
     pub blocker_ids: Vec<i64>,
     #[sqlx(skip)]
@@ -74,6 +88,7 @@ pub struct TicketActivity {
     pub id: i64,
     pub ticket_id: i64,
     pub action: String,
+    pub detail: Option<String>,
     pub actor_agent_id: Option<i64>,
     pub previous_reserved_for_agent_id: Option<i64>,
     pub reserved_for_agent_id: Option<i64>,
@@ -111,6 +126,7 @@ pub enum TicketState {
     Todo,
     InProgress,
     Review,
+    AwaitingExternalMerge,
     Done,
     Cancelled,
 }
@@ -462,8 +478,27 @@ impl From<Project> for wire::Project {
             name: value.name,
             path: value.path,
             default_branch: value.default_branch,
+            completion_workflow: value.completion_workflow.into(),
             archived_at: value.archived_at,
             updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<ProjectCompletionWorkflow> for wire::ProjectCompletionWorkflow {
+    fn from(value: ProjectCompletionWorkflow) -> Self {
+        match value {
+            ProjectCompletionWorkflow::BoardManaged => Self::BoardManaged,
+            ProjectCompletionWorkflow::External => Self::External,
+        }
+    }
+}
+
+impl From<wire::ProjectCompletionWorkflow> for ProjectCompletionWorkflow {
+    fn from(value: wire::ProjectCompletionWorkflow) -> Self {
+        match value {
+            wire::ProjectCompletionWorkflow::BoardManaged => Self::BoardManaged,
+            wire::ProjectCompletionWorkflow::External => Self::External,
         }
     }
 }
@@ -474,6 +509,7 @@ impl From<TicketState> for wire::TicketState {
             TicketState::Todo => Self::Todo,
             TicketState::InProgress => Self::InProgress,
             TicketState::Review => Self::Review,
+            TicketState::AwaitingExternalMerge => Self::AwaitingExternalMerge,
             TicketState::Done => Self::Done,
             TicketState::Cancelled => Self::Cancelled,
         }
@@ -486,6 +522,7 @@ impl From<wire::TicketState> for TicketState {
             wire::TicketState::Todo => Self::Todo,
             wire::TicketState::InProgress => Self::InProgress,
             wire::TicketState::Review => Self::Review,
+            wire::TicketState::AwaitingExternalMerge => Self::AwaitingExternalMerge,
             wire::TicketState::Done => Self::Done,
             wire::TicketState::Cancelled => Self::Cancelled,
         }
@@ -528,6 +565,10 @@ impl From<Ticket> for wire::Ticket {
             review_project_path: value.review_project_path,
             reviewer_id: value.reviewer_id,
             review_feedback: value.review_feedback,
+            review_completion_workflow: value.review_completion_workflow.map(Into::into),
+            external_change_url: value.external_change_url,
+            external_merge_reference: value.external_merge_reference,
+            external_merged_at: value.external_merged_at,
             blocker_ids: value.blocker_ids,
             unresolved_blockers: value
                 .unresolved_blockers
@@ -571,6 +612,7 @@ impl From<TicketActivity> for wire::TicketActivity {
             id: value.id,
             ticket_id: value.ticket_id,
             action: value.action,
+            detail: value.detail,
             actor_agent_id: value.actor_agent_id,
             previous_reserved_for_agent_id: value.previous_reserved_for_agent_id,
             reserved_for_agent_id: value.reserved_for_agent_id,

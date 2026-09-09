@@ -1,7 +1,10 @@
 use tokio::process::Command;
 
 use crate::{
-    domain::{TicketWakePayload, TicketWakeTicket, WakeDeliveryPolicy, WakeEventData},
+    domain::{
+        ProjectCompletionWorkflow, TicketWakePayload, TicketWakeTicket, WakeDeliveryPolicy,
+        WakeEventData,
+    },
     error::AppError,
     store::{MergeNotification, ReviewSubmission},
 };
@@ -183,6 +186,26 @@ impl AgentManager {
             .ok_or_else(|| AppError::conflict("review has no target branch"))?;
         let project = self.store.review_ticket_project(&ticket).await?;
 
+        if ticket.review_completion_workflow == Some(ProjectCompletionWorkflow::External) {
+            if let Some(implementation_branch) = ticket.implementation_branch.as_deref()
+                && git_text(&project.path, &["rev-parse", implementation_branch]).await? != commit
+            {
+                return Err(AppError::conflict(
+                    "implementation branch changed after review submission",
+                ));
+            }
+            let ticket = self
+                .store
+                .approve_external_review(ticket_id, reviewer_id, commit, expected_revision)
+                .await?;
+            drop(operation);
+            self.emit(AgentEvent::TicketUpdated {
+                agent_id: reviewer_id,
+                data: ticket.clone(),
+            });
+            return Ok(ticket);
+        }
+
         if !git_text(&project.path, &["status", "--porcelain"])
             .await?
             .is_empty()
@@ -297,6 +320,72 @@ impl AgentManager {
         });
         Ok(ticket)
     }
+
+    pub async fn set_external_change_url(
+        &self,
+        ticket_id: i64,
+        external_change_url: &str,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let ticket = self
+            .store
+            .set_external_change_url(
+                ticket_id,
+                external_change_url,
+                actor_agent_id,
+                expected_revision,
+            )
+            .await?;
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id: actor_agent_id.unwrap_or_default(),
+            data: ticket.clone(),
+        });
+        Ok(ticket)
+    }
+
+    pub async fn return_external_merge(
+        &self,
+        ticket_id: i64,
+        reason: &str,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let ticket = self
+            .store
+            .return_external_merge(ticket_id, reason, actor_agent_id, expected_revision)
+            .await?;
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id: actor_agent_id.unwrap_or_default(),
+            data: ticket.clone(),
+        });
+        Ok(ticket)
+    }
+
+    pub async fn complete_external_merge(
+        &self,
+        ticket_id: i64,
+        confirmation: &str,
+        merge_reference: Option<&str>,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<crate::domain::Ticket, AppError> {
+        let ticket = self
+            .store
+            .complete_external_merge(
+                ticket_id,
+                confirmation,
+                merge_reference,
+                actor_agent_id,
+                expected_revision,
+            )
+            .await?;
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id: actor_agent_id.unwrap_or_default(),
+            data: ticket.clone(),
+        });
+        Ok(ticket)
+    }
 }
 
 async fn git_output(cwd: &str, arguments: &[&str]) -> Result<std::process::Output, AppError> {
@@ -358,7 +447,7 @@ mod tests {
 
     use crate::{
         agent_runtime::{AgentEvent, AgentManager, RpcPeer, RunningAgent},
-        domain::{AgentState, TicketState},
+        domain::{AgentState, ProjectCompletionWorkflow, TicketState},
         store::{NewTicket, ReviewSubmission, Store},
     };
 
@@ -975,6 +1064,97 @@ mod tests {
                 .await
                 .unwrap(),
             other_head
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_approval_does_not_modify_or_require_a_clean_primary_worktree() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("mab-external-review-{unique}"));
+        let repository = base.join("repo");
+        std::fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Test"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["commit", "--allow-empty", "-qm", "initial"][..],
+            &["branch", "-M", "main"][..],
+        ] {
+            run_git(&repository, arguments);
+        }
+        let store = Store::memory().await.unwrap();
+        let project = store
+            .set_project(repository.to_str().unwrap())
+            .await
+            .unwrap();
+        store
+            .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::External)
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let worker = manager.create("worker").await.unwrap();
+        let worker_worktree = agent_worktree(&store, worker.id).await;
+        let reviewer = manager.create("reviewer").await.unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        std::fs::write(Path::new(&worker_worktree).join("work.txt"), "ready").unwrap();
+        run_git(Path::new(&worker_worktree), &["add", "work.txt"]);
+        run_git(
+            Path::new(&worker_worktree),
+            &["commit", "-qm", "ready for external review"],
+        );
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Merge externally".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = manager
+            .submit_review(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let ticket = manager
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let primary_head = git_text(repository.to_str().unwrap(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        std::fs::write(repository.join("user-owned.txt"), "leave me alone").unwrap();
+
+        let ticket = manager
+            .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+
+        assert_eq!(ticket.state, TicketState::AwaitingExternalMerge);
+        assert_eq!(
+            git_text(repository.to_str().unwrap(), &["rev-parse", "HEAD"])
+                .await
+                .unwrap(),
+            primary_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("user-owned.txt")).unwrap(),
+            "leave me alone"
         );
         std::fs::remove_dir_all(base).unwrap();
     }

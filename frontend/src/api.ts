@@ -11,6 +11,7 @@ import type {
   Ticket,
   TicketSummaryPage,
   TicketSummaryQuery,
+  ProjectCompletionWorkflow,
 } from "./types";
 
 export class ApiError extends Error {
@@ -81,10 +82,28 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
   projects: () => request<Project[]>("/projects"),
-  registerProject: (name: string, path: string, defaultBranch: string) =>
+  registerProject: (
+    name: string,
+    path: string,
+    defaultBranch: string,
+    completionWorkflow: ProjectCompletionWorkflow = "board_managed",
+  ) =>
     request<Project>("/projects", {
       method: "POST",
-      body: JSON.stringify({ name, path, default_branch: defaultBranch }),
+      body: JSON.stringify({
+        name,
+        path,
+        default_branch: defaultBranch,
+        completion_workflow: completionWorkflow,
+      }),
+    }),
+  setProjectCompletionWorkflow: (
+    id: number,
+    completionWorkflow: ProjectCompletionWorkflow,
+  ) =>
+    request<Project>(`/projects/${id}/completion-workflow`, {
+      method: "PUT",
+      body: JSON.stringify({ completion_workflow: completionWorkflow }),
     }),
   archiveProject: (id: number) =>
     request<Project>(`/projects/${id}/archive`, { method: "POST" }),
@@ -106,6 +125,32 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({
         reserved_for_agent_id: null,
+        expected_revision: ticket.revision,
+      }),
+    }),
+  setExternalChange: (ticket: Ticket, externalChangeUrl: string) =>
+    request<Ticket>(`/tickets/${ticket.id}/external-change`, {
+      method: "PUT",
+      body: JSON.stringify({
+        external_change_url: externalChangeUrl,
+        expected_revision: ticket.revision,
+      }),
+    }),
+  returnExternalMerge: (ticket: Ticket, reason: string) =>
+    request<Ticket>(`/tickets/${ticket.id}/return-external-merge`, {
+      method: "POST",
+      body: JSON.stringify({ reason, expected_revision: ticket.revision }),
+    }),
+  completeExternalMerge: (
+    ticket: Ticket,
+    confirmation: string,
+    mergeReference?: string,
+  ) =>
+    request<Ticket>(`/tickets/${ticket.id}/complete-external-merge`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirmation,
+        merge_reference: mergeReference || null,
         expected_revision: ticket.revision,
       }),
     }),

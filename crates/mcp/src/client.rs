@@ -3,14 +3,16 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, Agent, AgentMessagePage, AgentProjectWorktree, BoardSettings, Channel,
-    CreateAgentRequest, CreateChannelRequest, CreateTicketRequest, CreateWakeEventRequest,
-    ErrorResponse, Message, MessagePage, MessagePageQuery, PostMessageRequest, Project,
-    RegisterProjectRequest, Reminder, RenameAgentRequest, RequestChangesRequest,
-    ReserveTicketsRequest, ReviewRevisionRequest, ScheduleSelfReminderRequest,
-    SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
-    SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
-    SetBoardSettingsRequest, SetProjectRequest, Ticket, TicketActivity, TicketClaimResponse,
-    TicketSummary, TicketSummaryPage, UpdateTicketRequest, WakeEvent,
+    CompleteExternalMergeRequest, CreateAgentRequest, CreateChannelRequest, CreateTicketRequest,
+    CreateWakeEventRequest, ErrorResponse, Message, MessagePage, MessagePageQuery,
+    PostMessageRequest, Project, RegisterProjectRequest, Reminder, RenameAgentRequest,
+    RequestChangesRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
+    ReviewRevisionRequest, ScheduleSelfReminderRequest, SendAgentMessageRequest,
+    SetAgentChannelSubscriptionsRequest, SetAgentProjectSubscriptionsRequest,
+    SetAgentScopesRequest, SetAgentWakeSettingsRequest, SetBoardSettingsRequest,
+    SetExternalChangeRequest, SetProjectCompletionWorkflowRequest, SetProjectRequest, Ticket,
+    TicketActivity, TicketClaimResponse, TicketSummary, TicketSummaryPage, UpdateTicketRequest,
+    WakeEvent,
 };
 
 #[derive(Debug)]
@@ -147,6 +149,19 @@ impl BoardClient {
         .await
     }
 
+    pub async fn set_project_completion_workflow(
+        &self,
+        project_id: i64,
+        request: &SetProjectCompletionWorkflowRequest,
+    ) -> Result<Project, McpError> {
+        self.request(
+            Method::PUT,
+            &format!("/projects/{project_id}/completion-workflow"),
+            Some(request),
+        )
+        .await
+    }
+
     pub async fn create_ticket(&self, request: &CreateTicketRequest) -> Result<Ticket, McpError> {
         self.request(Method::POST, "/tickets", Some(request)).await
     }
@@ -157,6 +172,45 @@ impl BoardClient {
 
     pub async fn ticket_activity(&self, ticket_id: i64) -> Result<Vec<TicketActivity>, McpError> {
         self.get(&format!("/tickets/{ticket_id}/activity")).await
+    }
+
+    pub async fn set_external_change(
+        &self,
+        ticket_id: i64,
+        request: &SetExternalChangeRequest,
+    ) -> Result<Ticket, McpError> {
+        self.request(
+            Method::PUT,
+            &format!("/tickets/{ticket_id}/external-change"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn return_external_merge(
+        &self,
+        ticket_id: i64,
+        request: &ReturnExternalMergeRequest,
+    ) -> Result<Ticket, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/return-external-merge"),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn complete_external_merge(
+        &self,
+        ticket_id: i64,
+        request: &CompleteExternalMergeRequest,
+    ) -> Result<Ticket, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/complete-external-merge"),
+            Some(request),
+        )
+        .await
     }
 
     pub async fn reserve_tickets(

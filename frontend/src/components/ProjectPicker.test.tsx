@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   api: {
     archiveProject: vi.fn(),
     registerProject: vi.fn(),
+    setProjectCompletionWorkflow: vi.fn(),
     setProject: vi.fn(),
   },
 }));
@@ -20,12 +21,16 @@ afterEach(() => {
 
 it("selects registers and archives project roots", async () => {
   const projects: Project[] = [
-    { id: 1, name: "Board", path: "/board", default_branch: "main", archived_at: null, updated_at: 0 },
-    { id: 2, name: "API", path: "/api", default_branch: "trunk", archived_at: null, updated_at: 0 },
+    { id: 1, name: "Board", path: "/board", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
+    { id: 2, name: "API", path: "/api", default_branch: "trunk", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
   ];
   vi.mocked(api.setProject).mockResolvedValue(projects[1]);
   vi.mocked(api.registerProject).mockResolvedValue(projects[1]);
   vi.mocked(api.archiveProject).mockResolvedValue({ ...projects[1], archived_at: 1 });
+  vi.mocked(api.setProjectCompletionWorkflow).mockResolvedValue({
+    ...projects[0],
+    completion_workflow: "external",
+  });
   vi.stubGlobal("confirm", vi.fn(() => true));
   const changed = vi.fn().mockResolvedValue(undefined);
   render(
@@ -38,7 +43,21 @@ it("selects registers and archives project roots", async () => {
   fireEvent.change(screen.getByLabelText("Git root"), { target: { value: "/new" } });
   fireEvent.change(screen.getByLabelText("Default branch"), { target: { value: "develop" } });
   fireEvent.click(screen.getByRole("button", { name: "Register project" }));
-  await waitFor(() => expect(api.registerProject).toHaveBeenCalledWith("New", "/new", "develop"));
+  await waitFor(() =>
+    expect(api.registerProject).toHaveBeenCalledWith(
+      "New",
+      "/new",
+      "develop",
+      "board_managed",
+    ),
+  );
+  fireEvent.change(
+    screen.getByRole("combobox", { name: "Board completion workflow" }),
+    { target: { value: "external" } },
+  );
+  await waitFor(() =>
+    expect(api.setProjectCompletionWorkflow).toHaveBeenCalledWith(1, "external"),
+  );
   fireEvent.click(screen.getAllByRole("button", { name: "Archive" })[1]);
   await waitFor(() => expect(api.archiveProject).toHaveBeenCalledWith(2));
   expect(document.activeElement).toBe(screen.getByText("Board", { selector: "summary" }));
@@ -50,6 +69,7 @@ it("preserves a path draft when an equivalent project is refreshed", () => {
     name: "Board",
     path: "/board",
     default_branch: "main",
+    completion_workflow: "board_managed",
     archived_at: null,
     updated_at: 0,
   };
@@ -68,6 +88,7 @@ it("confirms archival and keeps the action local when the backend refuses", asyn
     name: "Board",
     path: "/board",
     default_branch: "main",
+    completion_workflow: "board_managed",
     archived_at: null,
     updated_at: 0,
   };
@@ -99,8 +120,8 @@ it("confirms archival and keeps the action local when the backend refuses", asyn
 
 it("allows only one archive while a project request is pending", async () => {
   const projects: Project[] = [
-    { id: 1, name: "Board", path: "/board", default_branch: "main", archived_at: null, updated_at: 0 },
-    { id: 2, name: "API", path: "/api", default_branch: "main", archived_at: null, updated_at: 0 },
+    { id: 1, name: "Board", path: "/board", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
+    { id: 2, name: "API", path: "/api", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
   ];
   let resolveArchive!: (project: Project) => void;
   vi.mocked(api.archiveProject).mockReturnValueOnce(

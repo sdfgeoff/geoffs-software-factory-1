@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { Project } from "../types";
+import type { Project, ProjectCompletionWorkflow } from "../types";
 
 interface Props {
   project: Project | null;
@@ -13,14 +13,18 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
   const [path, setPath] = useState(project?.path ?? "");
   const [name, setName] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
+  const [completionWorkflow, setCompletionWorkflow] =
+    useState<ProjectCompletionWorkflow>("board_managed");
   const [selecting, setSelecting] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [archivingId, setArchivingId] = useState<number | null>(null);
+  const [changingWorkflowId, setChangingWorkflowId] = useState<number | null>(null);
   const [selectionStatus, setSelectionStatus] = useState("");
   const [registerStatus, setRegisterStatus] = useState("");
   const [archiveStatus, setArchiveStatus] = useState("");
   const summaryRef = useRef<HTMLElement>(null);
-  const projectBusy = selecting || registering || archivingId !== null;
+  const projectBusy =
+    selecting || registering || archivingId !== null || changingWorkflowId !== null;
   useEffect(() => setPath(project?.path ?? ""), [project?.path]);
   async function register(event: FormEvent) {
     event.preventDefault();
@@ -28,7 +32,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
     setRegistering(true);
     setRegisterStatus("Registering…");
     try {
-      await api.registerProject(name, path, defaultBranch);
+      await api.registerProject(name, path, defaultBranch, completionWorkflow);
       setName("");
       await onChanged();
       setRegisterStatus("Project registered.");
@@ -36,6 +40,23 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       setRegisterStatus(error instanceof Error ? error.message : "Could not register project");
     } finally {
       setRegistering(false);
+    }
+  }
+  async function changeWorkflow(
+    item: Project,
+    workflow: ProjectCompletionWorkflow,
+  ) {
+    if (projectBusy) return;
+    setChangingWorkflowId(item.id);
+    setArchiveStatus(`Updating ${item.name} workflow…`);
+    try {
+      await api.setProjectCompletionWorkflow(item.id, workflow);
+      await onChanged();
+      setArchiveStatus(`${item.name} workflow updated.`);
+    } catch (error) {
+      setArchiveStatus(error instanceof Error ? error.message : "Could not update workflow");
+    } finally {
+      setChangingWorkflowId(null);
     }
   }
   async function archive(item: Project, button: HTMLButtonElement) {
@@ -131,6 +152,19 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
             required
           />
         </label>
+        <label>
+          Completion workflow
+          <select
+            value={completionWorkflow}
+            onChange={(event) =>
+              setCompletionWorkflow(event.target.value as ProjectCompletionWorkflow)
+            }
+            disabled={projectBusy}
+          >
+            <option value="board_managed">Board merges approved reviews</option>
+            <option value="external">Merge externally after approval</option>
+          </select>
+        </label>
         <button type="submit" disabled={projectBusy}>
           {registering ? "Registering…" : "Register project"}
         </button>
@@ -142,6 +176,22 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
             <span title={`${item.name} — ${item.path}`}>
               {item.name} — {item.path}
             </span>
+            {!item.archived_at && (
+              <select
+                aria-label={`${item.name} completion workflow`}
+                value={item.completion_workflow}
+                disabled={projectBusy}
+                onChange={(event) =>
+                  void changeWorkflow(
+                    item,
+                    event.target.value as ProjectCompletionWorkflow,
+                  )
+                }
+              >
+                <option value="board_managed">Board merge</option>
+                <option value="external">External merge</option>
+              </select>
+            )}
             {item.archived_at ? (
               <small>Archived</small>
             ) : (

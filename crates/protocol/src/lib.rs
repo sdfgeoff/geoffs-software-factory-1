@@ -18,8 +18,17 @@ pub struct Project {
     pub name: String,
     pub path: String,
     pub default_branch: String,
+    pub completion_workflow: ProjectCompletionWorkflow,
     pub archived_at: Option<i64>,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectCompletionWorkflow {
+    #[default]
+    BoardManaged,
+    External,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -28,6 +37,7 @@ pub enum TicketState {
     Todo,
     InProgress,
     Review,
+    AwaitingExternalMerge,
     Done,
     Cancelled,
 }
@@ -55,6 +65,10 @@ pub struct Ticket {
     pub review_project_path: Option<String>,
     pub reviewer_id: Option<i64>,
     pub review_feedback: Option<String>,
+    pub review_completion_workflow: Option<ProjectCompletionWorkflow>,
+    pub external_change_url: Option<String>,
+    pub external_merge_reference: Option<String>,
+    pub external_merged_at: Option<i64>,
     pub blocker_ids: Vec<i64>,
     pub unresolved_blockers: Vec<TicketBlocker>,
     pub revision: i64,
@@ -98,6 +112,7 @@ pub struct TicketActivity {
     pub id: i64,
     pub ticket_id: i64,
     pub action: String,
+    pub detail: Option<String>,
     pub actor_agent_id: Option<i64>,
     pub previous_reserved_for_agent_id: Option<i64>,
     pub reserved_for_agent_id: Option<i64>,
@@ -385,6 +400,7 @@ pub struct TicketWakeTicket {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     Refresh,
     AgentCreated {
@@ -447,6 +463,13 @@ pub struct RegisterProjectRequest {
     pub name: String,
     pub path: String,
     pub default_branch: String,
+    #[serde(default)]
+    pub completion_workflow: ProjectCompletionWorkflow,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SetProjectCompletionWorkflowRequest {
+    pub completion_workflow: ProjectCompletionWorkflow,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -613,6 +636,25 @@ pub struct RequestChangesRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct SetExternalChangeRequest {
+    pub external_change_url: String,
+    pub expected_revision: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ReturnExternalMergeRequest {
+    pub reason: String,
+    pub expected_revision: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CompleteExternalMergeRequest {
+    pub confirmation: String,
+    pub merge_reference: Option<String>,
+    pub expected_revision: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -639,6 +681,10 @@ mod tests {
             review_project_path: Some("/tmp/project".into()),
             reviewer_id: None,
             review_feedback: None,
+            review_completion_workflow: None,
+            external_change_url: None,
+            external_merge_reference: None,
+            external_merged_at: None,
             blocker_ids: vec![46],
             unresolved_blockers: vec![TicketBlocker {
                 id: 46,

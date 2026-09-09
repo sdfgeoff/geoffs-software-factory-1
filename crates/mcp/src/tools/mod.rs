@@ -55,6 +55,7 @@ mod tests {
                 "cancel_my_reminder",
                 "claim_ticket",
                 "claim_ticket_review",
+                "complete_external_merge",
                 "create_message_board_channel",
                 "create_ticket",
                 "get_ticket_activity",
@@ -74,7 +75,10 @@ mod tests {
                 "replace_my_project_subscriptions",
                 "request_ticket_changes",
                 "reserve_tickets",
+                "return_external_merge",
                 "schedule_self_reminder",
+                "set_external_change",
+                "set_project_completion_workflow",
                 "set_ticket_details",
                 "submit_ticket_for_review",
             ]

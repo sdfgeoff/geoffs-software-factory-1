@@ -10,6 +10,7 @@ const columns: { state: TicketState; label: string }[] = [
   { state: "todo", label: "To do" },
   { state: "in_progress", label: "In progress" },
   { state: "review", label: "Review" },
+  { state: "awaiting_external_merge", label: "Awaiting external merge" },
   { state: "done", label: "Done" },
   { state: "cancelled", label: "Cancelled" },
 ];

@@ -12,11 +12,14 @@ export interface Project {
   name: string;
   path: string;
   default_branch: string;
+  completion_workflow: ProjectCompletionWorkflow;
   archived_at: number | null;
   updated_at: number;
 }
 
-export type TicketState = "todo" | "in_progress" | "review" | "done" | "cancelled";
+export type ProjectCompletionWorkflow = "board_managed" | "external";
+
+export type TicketState = "todo" | "in_progress" | "review" | "awaiting_external_merge" | "done" | "cancelled";
 
 export interface TicketBlocker {
   id: number;
@@ -39,6 +42,10 @@ export interface Ticket {
   review_project_path: string | null;
   reviewer_id: number | null;
   review_feedback: string | null;
+  review_completion_workflow: ProjectCompletionWorkflow | null;
+  external_change_url: string | null;
+  external_merge_reference: string | null;
+  external_merged_at: number | null;
   blocker_ids: number[];
   unresolved_blockers: TicketBlocker[];
   revision: number;
@@ -78,6 +85,7 @@ export interface TicketActivity {
   id: number;
   ticket_id: number;
   action: string;
+  detail: string | null;
   actor_agent_id: number | null;
   previous_reserved_for_agent_id: number | null;
   reserved_for_agent_id: number | null;
@@ -288,6 +296,11 @@ export interface RegisterProjectRequest {
   name: string;
   path: string;
   default_branch: string;
+  completion_workflow?: ProjectCompletionWorkflow;
+}
+
+export interface SetProjectCompletionWorkflowRequest {
+  completion_workflow: ProjectCompletionWorkflow;
 }
 
 export interface CreateTicketRequest {
@@ -380,6 +393,22 @@ export interface ReviewRevisionRequest {
 
 export interface RequestChangesRequest {
   feedback: string;
+  expected_revision?: number | null;
+}
+
+export interface SetExternalChangeRequest {
+  external_change_url: string;
+  expected_revision?: number | null;
+}
+
+export interface ReturnExternalMergeRequest {
+  reason: string;
+  expected_revision?: number | null;
+}
+
+export interface CompleteExternalMergeRequest {
+  confirmation: string;
+  merge_reference?: string | null;
   expected_revision?: number | null;
 }
 

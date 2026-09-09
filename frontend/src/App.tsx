@@ -21,7 +21,12 @@ import type {
   TicketSummary,
 } from "./types";
 
-const activeTicketStates: TicketState[] = ["todo", "in_progress", "review"];
+const activeTicketStates: TicketState[] = [
+  "todo",
+  "in_progress",
+  "review",
+  "awaiting_external_merge",
+];
 
 function summarizeTicket(ticket: Ticket): TicketSummary {
   return {

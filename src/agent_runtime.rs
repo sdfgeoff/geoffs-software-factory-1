@@ -23,6 +23,7 @@ mod rpc;
 use rpc::RpcPeer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     Refresh,
     AgentCreated {
@@ -730,6 +731,7 @@ mod tests {
                 "Other",
                 other_repository.to_str().unwrap(),
                 &other_default_branch,
+                Default::default(),
             )
             .await
             .unwrap();

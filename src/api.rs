@@ -9,11 +9,13 @@ use axum::{
 use jiff::Timestamp;
 use multi_agent_board_protocol::{self as protocol, Patch};
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, ClaimTicketRequest, CreateChannelRequest, CreateTicketRequest,
-    CreateWakeEventRequest, MessagePageQuery, PostMessageRequest, RegisterProjectRequest,
-    ReserveTicketsRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
-    SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetProjectRequest,
-    TicketSummaryQuery, UpdateTicketRequest,
+    AGENT_ID_HEADER, ClaimTicketRequest, CompleteExternalMergeRequest, CreateChannelRequest,
+    CreateTicketRequest, CreateWakeEventRequest, MessagePageQuery, PostMessageRequest,
+    RegisterProjectRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
+    ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
+    SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetExternalChangeRequest,
+    SetProjectCompletionWorkflowRequest, SetProjectRequest, TicketSummaryQuery,
+    UpdateTicketRequest,
 };
 
 use crate::{
@@ -29,6 +31,10 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         .route("/project", get(get_project).put(set_project))
         .route("/projects", get(list_projects).post(register_project))
         .route(
+            "/projects/{id}/completion-workflow",
+            axum::routing::put(set_project_completion_workflow),
+        )
+        .route(
             "/projects/{id}/archive",
             axum::routing::post(archive_project),
         )
@@ -36,6 +42,18 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         .route("/ticket-reservations", axum::routing::post(reserve_tickets))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
         .route("/tickets/{id}/activity", get(ticket_activity))
+        .route(
+            "/tickets/{id}/external-change",
+            axum::routing::put(set_external_change),
+        )
+        .route(
+            "/tickets/{id}/return-external-merge",
+            axum::routing::post(return_external_merge),
+        )
+        .route(
+            "/tickets/{id}/complete-external-merge",
+            axum::routing::post(complete_external_merge),
+        )
         .route("/tickets/{id}/claim", axum::routing::post(claim_ticket))
         .route(
             "/agents/{id}/wake-events",
@@ -123,7 +141,9 @@ async fn set_project(
             .and_then(|name| name.to_str())
             .ok_or_else(|| AppError::bad_request("project name is not valid UTF-8"))?;
         let default_branch = current_branch(&canonical).await?;
-        let project = store.register_project(name, path, &default_branch).await?;
+        let project = store
+            .register_project(name, path, &default_branch, Default::default())
+            .await?;
         store.select_project(project.id).await?
     };
     Ok(Json(project.into()))
@@ -153,7 +173,12 @@ async fn register_project(
         .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
     Ok(Json(
         store
-            .register_project(&input.name, path, &input.default_branch)
+            .register_project(
+                &input.name,
+                path,
+                &input.default_branch,
+                input.completion_workflow.into(),
+            )
             .await?
             .into(),
     ))
@@ -164,6 +189,19 @@ async fn archive_project(
     Path(id): Path<i64>,
 ) -> Result<Json<protocol::Project>, AppError> {
     Ok(Json(store.archive_project(id).await?.into()))
+}
+
+async fn set_project_completion_workflow(
+    State(store): State<Store>,
+    Path(id): Path<i64>,
+    Json(input): Json<SetProjectCompletionWorkflowRequest>,
+) -> Result<Json<protocol::Project>, AppError> {
+    Ok(Json(
+        store
+            .set_project_completion_workflow(id, input.completion_workflow.into())
+            .await?
+            .into(),
+    ))
 }
 
 async fn canonical_git_root(path: &str) -> Result<PathBuf, AppError> {
@@ -312,6 +350,64 @@ async fn ticket_activity(
     ))
 }
 
+async fn set_external_change(
+    Extension(agents): Extension<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<SetExternalChangeRequest>,
+) -> Result<Json<protocol::Ticket>, AppError> {
+    Ok(Json(
+        agents
+            .set_external_change_url(
+                id,
+                &input.external_change_url,
+                agent_header(&headers)?,
+                input.expected_revision,
+            )
+            .await?
+            .into(),
+    ))
+}
+
+async fn return_external_merge(
+    Extension(agents): Extension<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<ReturnExternalMergeRequest>,
+) -> Result<Json<protocol::Ticket>, AppError> {
+    Ok(Json(
+        agents
+            .return_external_merge(
+                id,
+                &input.reason,
+                agent_header(&headers)?,
+                input.expected_revision,
+            )
+            .await?
+            .into(),
+    ))
+}
+
+async fn complete_external_merge(
+    Extension(agents): Extension<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<CompleteExternalMergeRequest>,
+) -> Result<Json<protocol::Ticket>, AppError> {
+    Ok(Json(
+        agents
+            .complete_external_merge(
+                id,
+                &input.confirmation,
+                input.merge_reference.as_deref(),
+                agent_header(&headers)?,
+                input.expected_revision,
+            )
+            .await?
+            .into(),
+    ))
+}
+
 async fn reserve_tickets(
     State(store): State<Store>,
     Extension(agents): Extension<AgentManager>,
@@ -364,13 +460,14 @@ async fn update_ticket(
             input.state,
             Some(
                 protocol::TicketState::Review
+                    | protocol::TicketState::AwaitingExternalMerge
                     | protocol::TicketState::Done
                     | protocol::TicketState::Cancelled
             )
         )
     {
         return Err(AppError::forbidden(
-            "agents cannot directly set review, done, or cancelled states",
+            "agents cannot directly set review, awaiting external merge, done, or cancelled states",
         ));
     }
     if caller.is_some() && !input.reserved_for_agent_id.is_missing() {
@@ -981,6 +1078,23 @@ mod tests {
             repository.canonicalize().unwrap().to_str().unwrap()
         );
         assert_eq!(project["default_branch"], branch);
+        assert_eq!(project["completion_workflow"], "board_managed");
+
+        let workflow = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/projects/{}/completion-workflow", project["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"completion_workflow":"external"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workflow.status(), StatusCode::OK);
+        let workflow: Value =
+            serde_json::from_slice(&to_bytes(workflow.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(workflow["completion_workflow"], "external");
 
         let duplicate = app
             .clone()

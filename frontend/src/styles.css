@@ -278,6 +278,10 @@ nav a.active {
   background: #f6e4bd;
   color: #765213;
 }
+.state-awaiting_external_merge {
+  background: #e4def5;
+  color: #51417e;
+}
 .state-done {
   background: #dce9d2;
   color: #385c27;

@@ -48,6 +48,7 @@ const stateLabels: Record<TicketState, string> = {
   todo: "To do",
   in_progress: "In progress",
   review: "Review",
+  awaiting_external_merge: "Awaiting external merge",
   done: "Done",
   cancelled: "Cancelled",
 };
@@ -281,6 +282,32 @@ export function TicketDetailPanel({
             <>
               <dt>Feedback</dt>
               <dd>{ticket.review_feedback}</dd>
+            </>
+          )}
+          {ticket.review_completion_workflow && (
+            <>
+              <dt>Completion workflow</dt>
+              <dd>
+                {ticket.review_completion_workflow === "external"
+                  ? "External merge"
+                  : "Board merge"}
+              </dd>
+            </>
+          )}
+          {ticket.external_change_url && (
+            <>
+              <dt>External change</dt>
+              <dd>
+                <a href={ticket.external_change_url} target="_blank" rel="noreferrer">
+                  {ticket.external_change_url}
+                </a>
+              </dd>
+            </>
+          )}
+          {ticket.external_merge_reference && (
+            <>
+              <dt>External merge reference</dt>
+              <dd>{ticket.external_merge_reference}</dd>
             </>
           )}
         </dl>

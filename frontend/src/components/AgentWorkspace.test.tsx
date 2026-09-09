@@ -65,6 +65,10 @@ const ticket: Ticket = {
   review_project_path: null,
   reviewer_id: null,
   review_feedback: null,
+  review_completion_workflow: null,
+  external_change_url: null,
+  external_merge_reference: null,
+  external_merged_at: null,
   blocker_ids: [],
   unresolved_blockers: [],
   revision: 1,
@@ -304,7 +308,7 @@ describe("AgentWorkspace", () => {
         agents={[agent]}
         channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
         tickets={[]}
-        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 }]}
+        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 }]}
         selectedAgentId={agent.id}
         view="settings"
         refresh={0}
@@ -372,8 +376,8 @@ describe("AgentWorkspace", () => {
         channels={[]}
         tickets={[]}
         projects={[
-          { id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 },
-          { id: 2, name: "API", path: "/api", default_branch: "main", archived_at: null, updated_at: 0 },
+          { id: 1, name: "Board", path: "/repo", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
+          { id: 2, name: "API", path: "/api", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
         ]}
         selectedAgentId={agent.id}
         view="settings"
@@ -492,7 +496,7 @@ describe("AgentWorkspace", () => {
         agents={[agent]}
         channels={[]}
         tickets={[]}
-        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 }]}
+        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 }]}
         selectedAgentId={agent.id}
         view="settings"
         refresh={0}
@@ -704,7 +708,7 @@ describe("AgentWorkspace", () => {
         agents={[agent]}
         channels={[]}
         tickets={[ticket]}
-        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", archived_at: null, updated_at: 0 }]}
+        projects={[{ id: 1, name: "Board", path: "/repo", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 }]}
         selectedAgentId={agent.id}
         view="chat"
         refresh={0}
