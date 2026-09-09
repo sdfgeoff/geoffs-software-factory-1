@@ -12,5 +12,8 @@ describe("responsive layouts", () => {
     expect(styles).toContain(".kanban .column:not(.mobile-active)");
     expect(styles).toContain(".context-sidebar > .context-option");
     expect(styles).toContain(".agent-create-form.mobile-open");
+    expect(styles).toContain(".kanban-with-external.kanban-with-cancelled");
+    expect(styles).toContain(".external-merge-actions");
+    expect(styles).toContain("grid-template-columns: 1fr");
   });
 });

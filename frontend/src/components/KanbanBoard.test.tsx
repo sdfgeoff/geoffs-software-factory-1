@@ -8,7 +8,10 @@ vi.mock("../api", () => ({
   api: {
     clearTicketReservation: vi.fn(),
     createTicket: vi.fn(),
+    completeExternalMerge: vi.fn(),
     reserveTickets: vi.fn(),
+    returnExternalMerge: vi.fn(),
+    setExternalChange: vi.fn(),
     updateTicket: vi.fn(),
   },
 }));
@@ -449,7 +452,7 @@ describe("KanbanBoard", () => {
 
     const status = screen.getByRole("combobox", { name: "Ticket status" });
     expect(container.querySelector(".column-todo.mobile-active")).toBeTruthy();
-    expect(container.querySelectorAll(".column")).toHaveLength(5);
+    expect(container.querySelectorAll(".column")).toHaveLength(4);
     fireEvent.change(status, { target: { value: "review" } });
     expect(container.querySelector(".column-review.mobile-active")).toBeTruthy();
     expect(container.querySelector(".column-todo.mobile-active")).toBeNull();
@@ -458,6 +461,156 @@ describe("KanbanBoard", () => {
     fireEvent.change(status, { target: { value: "cancelled" } });
     fireEvent.click(screen.getByLabelText("Show cancelled tickets"));
     expect((status as HTMLSelectElement).value).toBe("todo");
+  });
+
+  it("shows the external lane only when needed and labels the workflow", () => {
+    const { container, rerender } = render(
+      <KanbanBoard {...baseProps} tickets={[ticket]} />,
+    );
+
+    expect(screen.queryByRole("heading", { name: /Awaiting external merge/ })).toBeNull();
+    expect(container.querySelectorAll(".column")).toHaveLength(4);
+
+    const external = {
+      ...ticket,
+      id: 9,
+      title: "Publish externally",
+      state: "awaiting_external_merge" as const,
+      review_completion_workflow: "external" as const,
+    };
+    rerender(<KanbanBoard {...baseProps} tickets={[ticket, external]} />);
+
+    expect(screen.getByRole("heading", { name: /Awaiting external merge/ })).toBeTruthy();
+    expect(screen.getByText("Publish externally").closest("button")?.textContent).toContain(
+      "External merge",
+    );
+    expect(container.querySelector(".kanban-with-external")).toBeTruthy();
+  });
+
+  it("explains an external review and exposes safe reviewed values", async () => {
+    const clipboard = { writeText: vi.fn().mockResolvedValue(undefined) };
+    vi.stubGlobal("navigator", { ...navigator, clipboard });
+    const external = {
+      ...ticket,
+      state: "review" as const,
+      review_completion_workflow: "external" as const,
+      implementation_branch: "tickets/7-external",
+      review_commit: "1234567890abcdef",
+      review_target_branch: "main",
+      external_change_url: "javascript:alert(1)",
+    };
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[external]}
+        selectedTicketId={external.id}
+      />,
+    );
+
+    expect(screen.getByText(/Reviewer action: Approve for external merge/)).toBeTruthy();
+    expect(screen.getByText(/does not merge or change the project branch/)).toBeTruthy();
+    expect(screen.getByText("javascript:alert(1) (invalid URL)")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "javascript:alert(1)" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Copy branch" }));
+    await waitFor(() =>
+      expect(clipboard.writeText).toHaveBeenCalledWith("tickets/7-external"),
+    );
+    fireEvent.change(screen.getByLabelText("External change URL"), {
+      target: { value: "https://example.test/change/7" },
+    });
+    const link = screen.getByRole("link", { name: "Open external change" });
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("runs external completion actions and preserves failed input", async () => {
+    const external = {
+      ...ticket,
+      state: "awaiting_external_merge" as const,
+      review_completion_workflow: "external" as const,
+      implementation_branch: "tickets/7-external",
+      review_commit: "1234567890abcdef",
+      review_target_branch: "main",
+    };
+    let rejectCompletion!: (error: Error) => void;
+    vi.mocked(api.completeExternalMerge).mockReturnValue(
+      new Promise((_, reject) => {
+        rejectCompletion = reject;
+      }),
+    );
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[external]}
+        selectedTicketId={external.id}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Completion confirmation"), {
+      target: { value: "Merged and deployed" },
+    });
+    fireEvent.change(screen.getByLabelText("Final external reference (optional)"), {
+      target: { value: " release-42 " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Mark externally merged" }));
+
+    expect(api.completeExternalMerge).toHaveBeenCalledWith(
+      external,
+      "Merged and deployed",
+      "release-42",
+    );
+    expect((screen.getByLabelText("Completion confirmation") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Title") as HTMLInputElement).disabled).toBe(true);
+    rejectCompletion(new Error("Still open upstream"));
+    await screen.findByText("Still open upstream");
+    expect(screen.getByDisplayValue("Merged and deployed")).toBeTruthy();
+    expect(
+      (screen.getByLabelText("Final external reference (optional)") as HTMLInputElement).value,
+    ).toBe(" release-42 ");
+  });
+
+  it("saves an external URL and can return approved work", async () => {
+    const external = {
+      ...ticket,
+      state: "awaiting_external_merge" as const,
+      review_completion_workflow: "external" as const,
+      revision: 4,
+    };
+    vi.mocked(api.setExternalChange).mockResolvedValue({
+      ...external,
+      external_change_url: "https://example.test/change/7",
+      revision: 5,
+    });
+    vi.mocked(api.returnExternalMerge).mockResolvedValue({
+      ...external,
+      state: "in_progress",
+      revision: 6,
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[external]}
+        selectedTicketId={external.id}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("External change URL"), {
+      target: { value: "https://example.test/change/7" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save URL" }));
+    await waitFor(() => expect(api.setExternalChange).toHaveBeenCalledWith(external, "https://example.test/change/7"));
+    await screen.findByText("External change saved.");
+    fireEvent.change(screen.getByLabelText("Reason for returning to work"), {
+      target: { value: " Fix review issue " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Return to work" }));
+    await waitFor(() =>
+      expect(api.returnExternalMerge).toHaveBeenCalledWith(
+        { ...external, revision: 5 },
+        "Fix review issue",
+      ),
+    );
   });
 
   it("confirms before cancelling a ticket", () => {

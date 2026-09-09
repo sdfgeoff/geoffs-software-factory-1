@@ -82,6 +82,41 @@ it("preserves a path draft when an equivalent project is refreshed", () => {
   expect((screen.getByLabelText("Git root") as HTMLInputElement).value).toBe("/draft");
 });
 
+it("explains and confirms completion workflow changes", async () => {
+  const project: Project = {
+    id: 1,
+    name: "External app",
+    path: "/external",
+    default_branch: "main",
+    completion_workflow: "external",
+    archived_at: null,
+    updated_at: 0,
+  };
+  const confirm = vi.fn(() => false);
+  vi.stubGlobal("confirm", confirm);
+  render(
+    <ProjectPicker
+      project={project}
+      projects={[project]}
+      onChanged={vi.fn()}
+      onError={vi.fn()}
+    />,
+  );
+
+  expect(screen.getAllByText("External merge").length).toBeGreaterThan(1);
+  expect(screen.getByText(/External merge approves a reviewed commit/)).toBeTruthy();
+  fireEvent.change(
+    screen.getByRole("combobox", { name: "External app completion workflow" }),
+    { target: { value: "board_managed" } },
+  );
+
+  expect(confirm).toHaveBeenCalledWith(
+    expect.stringContaining("Reviews already submitted keep their existing workflow"),
+  );
+  expect(api.setProjectCompletionWorkflow).not.toHaveBeenCalled();
+  expect(await screen.findByText("External app workflow unchanged.")).toBeTruthy();
+});
+
 it("confirms archival and keeps the action local when the backend refuses", async () => {
   const project: Project = {
     id: 1,

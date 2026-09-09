@@ -27,6 +27,10 @@ export interface TicketDraft {
   reservation: string;
   blockerIds: number[];
   blockerQuery: string;
+  externalUrl: string;
+  returnReason: string;
+  mergeConfirmation: string;
+  mergeReference: string;
   baseRevision: number;
   dirty: boolean;
 }
@@ -39,6 +43,10 @@ export function ticketDraft(ticket: Ticket): TicketDraft {
     reservation: ticket.reserved_for_agent_id?.toString() ?? "",
     blockerIds: ticket.blocker_ids,
     blockerQuery: "",
+    externalUrl: ticket.external_change_url ?? "",
+    returnReason: "",
+    mergeConfirmation: "",
+    mergeReference: "",
     baseRevision: ticket.revision,
     dirty: false,
   };
@@ -52,6 +60,17 @@ const stateLabels: Record<TicketState, string> = {
   done: "Done",
   cancelled: "Cancelled",
 };
+
+function safeExternalUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:"
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export function TicketDetailPanel({
   ticket,
@@ -70,6 +89,8 @@ export function TicketDetailPanel({
   const [reservationStatus, setReservationStatus] = useState("");
   const [transitioning, setTransitioning] = useState(false);
   const [transitionStatus, setTransitionStatus] = useState("");
+  const [externalBusy, setExternalBusy] = useState(false);
+  const [externalStatus, setExternalStatus] = useState("");
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const reservationSelectRef = useRef<HTMLSelectElement>(null);
   const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
@@ -78,6 +99,9 @@ export function TicketDetailPanel({
   );
   const assignedTo = agents.find((agent) => agent.id === ticket.assignee_id);
   const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
+  const externalWorkflow = ticket.review_completion_workflow === "external";
+  const externalUrl = safeExternalUrl(draft.externalUrl.trim());
+  const ticketBusy = saving || externalBusy;
   const matchingBlockers = tickets.filter((candidate) => {
     if (candidate.id === ticket.id) return false;
     const query = draft.blockerQuery.trim().toLowerCase();
@@ -89,7 +113,7 @@ export function TicketDetailPanel({
   });
 
   useEffect(() => {
-    if (!savedDraft || (!draft.dirty && draft.baseRevision !== ticket.revision)) {
+    if (!savedDraft || (!draft.dirty && draft.baseRevision < ticket.revision)) {
       onDraftChange(ticketDraft(ticket));
     }
   }, [draft.baseRevision, draft.dirty, onDraftChange, savedDraft, ticket]);
@@ -100,7 +124,7 @@ export function TicketDetailPanel({
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (saving) return;
+    if (ticketBusy) return;
     setSaving(true);
     setSaveStatus("Saving…");
     try {
@@ -117,6 +141,107 @@ export function TicketDetailPanel({
       setSaveStatus(error instanceof Error ? error.message : "Could not save changes");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function setExternalChange(event: FormEvent) {
+    event.preventDefault();
+    if (ticketBusy) return;
+    if (!externalUrl) {
+      setExternalStatus("Enter a valid http or https URL.");
+      return;
+    }
+    setExternalBusy(true);
+    setExternalStatus("Saving external change…");
+    try {
+      const updated = await api.setExternalChange(
+        { ...ticket, revision: draft.baseRevision },
+        externalUrl,
+      );
+      onDraftChange({
+        ...draft,
+        externalUrl: updated.external_change_url ?? externalUrl,
+        baseRevision: updated.revision,
+      });
+      await onChanged(updated);
+      setExternalStatus("External change saved.");
+    } catch (error) {
+      setExternalStatus(
+        error instanceof Error ? error.message : "Could not save external change",
+      );
+    } finally {
+      setExternalBusy(false);
+    }
+  }
+
+  async function copyReviewValue(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setExternalStatus(`${label} copied.`);
+    } catch {
+      setExternalStatus(`Could not copy ${label.toLowerCase()}.`);
+    }
+  }
+
+  async function returnToWork(event: FormEvent) {
+    event.preventDefault();
+    if (ticketBusy || !draft.returnReason.trim()) return;
+    if (!window.confirm(`Return ticket #${ticket.id} to active work?`)) {
+      setExternalStatus("Ticket remains awaiting external merge.");
+      return;
+    }
+    setExternalBusy(true);
+    setExternalStatus("Returning ticket to work…");
+    try {
+      const updated = await api.returnExternalMerge(
+        { ...ticket, revision: draft.baseRevision },
+        draft.returnReason.trim(),
+      );
+      onDraftChange({
+        ...draft,
+        returnReason: "",
+        baseRevision: updated.revision,
+      });
+      await onChanged(updated);
+      setExternalStatus("Ticket returned to work.");
+    } catch (error) {
+      setExternalStatus(
+        error instanceof Error ? error.message : "Could not return ticket to work",
+      );
+    } finally {
+      setExternalBusy(false);
+    }
+  }
+
+  async function completeExternalMerge(event: FormEvent) {
+    event.preventDefault();
+    if (ticketBusy || !draft.mergeConfirmation.trim()) return;
+    if (!window.confirm(`Mark ticket #${ticket.id} as externally merged and done?`)) {
+      setExternalStatus("External completion cancelled.");
+      return;
+    }
+    setExternalBusy(true);
+    setExternalStatus("Recording external merge…");
+    try {
+      const updated = await api.completeExternalMerge(
+        { ...ticket, revision: draft.baseRevision },
+        draft.mergeConfirmation.trim(),
+        draft.mergeReference.trim(),
+      );
+      onDraftChange({
+        ...draft,
+        mergeConfirmation: "",
+        mergeReference: "",
+        baseRevision: updated.revision,
+      });
+      await onChanged(updated);
+      setExternalStatus("External merge recorded; ticket completed.");
+    } catch (error) {
+      setExternalStatus(
+        error instanceof Error ? error.message : "Could not record external merge",
+      );
+    } finally {
+      setExternalBusy(false);
     }
   }
 
@@ -264,15 +389,23 @@ export function TicketDetailPanel({
           {ticket.implementation_branch && (
             <>
               <dt>Implementation branch</dt>
-              <dd>{ticket.implementation_branch}</dd>
+              <dd className="copyable-value">
+                <code>{ticket.implementation_branch}</code>
+                {externalWorkflow && (
+                  <button type="button" className="ghost" onClick={() => void copyReviewValue(ticket.implementation_branch!, "Branch")}>Copy branch</button>
+                )}
+              </dd>
             </>
           )}
           {ticket.review_commit && (
             <>
               <dt>Review commit</dt>
-              <dd title={ticket.review_commit}>
-                {ticket.review_commit.slice(0, 12)} →{" "}
-                {ticket.review_target_branch}
+              <dd className="copyable-value" title={ticket.review_commit}>
+                <code>{ticket.review_commit}</code>
+                {externalWorkflow && (
+                  <button type="button" className="ghost" onClick={() => void copyReviewValue(ticket.review_commit!, "Commit")}>Copy commit</button>
+                )}
+                <span>Target: {ticket.review_target_branch}</span>
               </dd>
             </>
           )}
@@ -298,9 +431,13 @@ export function TicketDetailPanel({
             <>
               <dt>External change</dt>
               <dd>
-                <a href={ticket.external_change_url} target="_blank" rel="noreferrer">
-                  {ticket.external_change_url}
-                </a>
+                {safeExternalUrl(ticket.external_change_url) ? (
+                  <a href={safeExternalUrl(ticket.external_change_url)!} target="_blank" rel="noopener noreferrer">
+                    {ticket.external_change_url}
+                  </a>
+                ) : (
+                  <span>{ticket.external_change_url} (invalid URL)</span>
+                )}
               </dd>
             </>
           )}
@@ -313,6 +450,96 @@ export function TicketDetailPanel({
         </dl>
       )}
 
+      {externalWorkflow && ticket.state === "review" && (
+        <p className="external-workflow-note">
+          <strong>Reviewer action: Approve for external merge.</strong>{" "}
+          Approval records the reviewed commit but does not merge or change the
+          project branch.
+        </p>
+      )}
+
+      {externalWorkflow &&
+        (ticket.state === "review" || ticket.state === "awaiting_external_merge") && (
+          <form className="external-change-form" onSubmit={setExternalChange}>
+            <label>
+              External change URL
+              <input
+                type="url"
+                value={draft.externalUrl}
+                disabled={ticketBusy}
+                placeholder="https://…"
+                maxLength={2048}
+                onChange={(event) => updateDraft({ externalUrl: event.target.value }, false)}
+                required
+              />
+            </label>
+            <div className="field-row">
+              <button type="submit" disabled={ticketBusy || !externalUrl}>
+                {externalBusy ? "Saving…" : ticket.external_change_url ? "Replace URL" : "Save URL"}
+              </button>
+              {externalUrl && (
+                <a className="button-link secondary" href={externalUrl} target="_blank" rel="noopener noreferrer">
+                  Open external change
+                </a>
+              )}
+            </div>
+            {draft.externalUrl && !externalUrl && (
+              <p className="inline-error" role="status">Enter a valid http or https URL.</p>
+            )}
+          </form>
+        )}
+
+      {ticket.state === "awaiting_external_merge" && externalWorkflow && (
+        <section className="external-merge-actions" aria-labelledby={`external-merge-title-${ticket.id}`}>
+          <h3 id={`external-merge-title-${ticket.id}`}>External merge</h3>
+          <form onSubmit={returnToWork}>
+            <label>
+              Reason for returning to work
+              <textarea
+                value={draft.returnReason}
+                disabled={ticketBusy}
+                rows={3}
+                maxLength={10000}
+                onChange={(event) => updateDraft({ returnReason: event.target.value }, false)}
+                required
+              />
+            </label>
+            <button type="submit" className="secondary" disabled={ticketBusy || !draft.returnReason.trim()}>
+              Return to work
+            </button>
+          </form>
+          <form onSubmit={completeExternalMerge}>
+            <label>
+              Completion confirmation
+              <textarea
+                value={draft.mergeConfirmation}
+                disabled={ticketBusy}
+                rows={3}
+                maxLength={10000}
+                placeholder="Confirm where and how the change was merged"
+                onChange={(event) => updateDraft({ mergeConfirmation: event.target.value }, false)}
+                required
+              />
+            </label>
+            <label>
+              Final external reference (optional)
+              <input
+                value={draft.mergeReference}
+                disabled={ticketBusy}
+                maxLength={2048}
+                placeholder="Merge commit, release, or provider reference"
+                onChange={(event) => updateDraft({ mergeReference: event.target.value }, false)}
+              />
+            </label>
+            <button type="submit" disabled={ticketBusy || !draft.mergeConfirmation.trim()}>
+              Mark externally merged
+            </button>
+          </form>
+        </section>
+      )}
+
+      {externalStatus && <p role="status" aria-live="polite">{externalStatus}</p>}
+
       <form className="ticket-detail-form" onSubmit={save}>
         {updatedElsewhere && (
           <p className="inline-error" role="status">
@@ -324,7 +551,7 @@ export function TicketDetailPanel({
           Title
           <input
             value={draft.title}
-            disabled={saving}
+            disabled={ticketBusy}
             onChange={(event) => {
               updateDraft({ title: event.target.value });
             }}
@@ -336,7 +563,7 @@ export function TicketDetailPanel({
           Description
           <textarea
             value={draft.description}
-            disabled={saving}
+            disabled={ticketBusy}
             onChange={(event) => {
               updateDraft({ description: event.target.value });
             }}
@@ -347,7 +574,7 @@ export function TicketDetailPanel({
           Active assignee
           <select
             value={draft.assignee}
-            disabled={saving}
+            disabled={ticketBusy}
             onChange={(event) => {
               updateDraft({ assignee: event.target.value });
             }}
@@ -360,7 +587,7 @@ export function TicketDetailPanel({
             ))}
           </select>
         </label>
-        <fieldset className="blocker-selector" disabled={saving}>
+        <fieldset className="blocker-selector" disabled={ticketBusy}>
           <legend>Blockers</legend>
           <label>
             Search tickets
@@ -399,7 +626,7 @@ export function TicketDetailPanel({
             ))}
           </div>
         </fieldset>
-        <button type="submit" disabled={saving}>
+        <button type="submit" disabled={ticketBusy}>
           {saving ? "Saving…" : "Save changes"}
         </button>
         {saveStatus && <p role="status" aria-live="polite">{saveStatus}</p>}

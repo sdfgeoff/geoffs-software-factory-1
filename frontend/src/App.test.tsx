@@ -206,6 +206,37 @@ describe("App agent routes", () => {
     expect(window.location.hash).toBe("#board?project=2&ticket=7");
   });
 
+  it("restores the external completion panel from a direct ticket link", async () => {
+    const externalTicket: Ticket = {
+      ...ticket,
+      state: "awaiting_external_merge",
+      review_completion_workflow: "external",
+      implementation_branch: "tickets/7-external",
+      review_commit: "abcdef1234567890",
+      review_target_branch: "main",
+    };
+    window.history.replaceState(null, "", "#board?project=2&ticket=7");
+    vi.mocked(api.projects).mockResolvedValue([
+      { ...project, completion_workflow: "external" },
+    ]);
+    vi.mocked(api.ticket).mockResolvedValue(externalTicket);
+    vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
+      tickets:
+        state === "awaiting_external_merge"
+          ? [{ ...externalTicket, has_review_feedback: false }]
+          : [],
+      has_more: false,
+    }));
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "External merge" }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Completion confirmation")).toBeTruthy();
+    expect(window.location.hash).toBe("#board?project=2&ticket=7");
+  });
+
   it("retries transient ticket detail failures without marking the route missing", async () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);

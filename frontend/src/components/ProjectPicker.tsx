@@ -47,6 +47,13 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
     workflow: ProjectCompletionWorkflow,
   ) {
     if (projectBusy) return;
+    const workflowLabel = workflow === "external" ? "External merge" : "Board-managed merge";
+    if (!window.confirm(
+      `Change ${item.name} to ${workflowLabel}? New reviews will use this workflow. Reviews already submitted keep their existing workflow.`,
+    )) {
+      setArchiveStatus(`${item.name} workflow unchanged.`);
+      return;
+    }
     setChangingWorkflowId(item.id);
     setArchiveStatus(`Updating ${item.name} workflow…`);
     try {
@@ -100,7 +107,12 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
   }
   return (
     <details className="project-picker">
-      <summary ref={summaryRef}>{project?.name ?? "Choose project"}</summary>
+      <summary ref={summaryRef}>
+        {project?.name ?? "Choose project"}
+        {project?.completion_workflow === "external" && (
+          <span className="workflow-badge">External merge</span>
+        )}
+      </summary>
       <label htmlFor="active-project">
         Active project
         <select
@@ -161,10 +173,14 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
             }
             disabled={projectBusy}
           >
-            <option value="board_managed">Board merges approved reviews</option>
-            <option value="external">Merge externally after approval</option>
+            <option value="board_managed">Board-managed merge</option>
+            <option value="external">External merge</option>
           </select>
         </label>
+        <p className="field-help">
+          Board-managed merge updates the project branch after approval. External
+          merge approves a reviewed commit without changing the project branch.
+        </p>
         <button type="submit" disabled={projectBusy}>
           {registering ? "Registering…" : "Register project"}
         </button>
@@ -173,8 +189,11 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       <ul>
         {projects.map((item) => (
           <li key={item.id}>
-            <span title={`${item.name} — ${item.path}`}>
-              {item.name} — {item.path}
+            <span className="project-picker-name" title={`${item.name} — ${item.path}`}>
+              <span>{item.name} — {item.path}</span>
+              {item.completion_workflow === "external" && (
+                <span className="workflow-badge">External merge</span>
+              )}
             </span>
             {!item.archived_at && (
               <select
@@ -188,7 +207,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
                   )
                 }
               >
-                <option value="board_managed">Board merge</option>
+                <option value="board_managed">Board-managed merge</option>
                 <option value="external">External merge</option>
               </select>
             )}

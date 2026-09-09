@@ -80,9 +80,19 @@ export function KanbanBoard({
       (filterProjectId === "all" ||
         ticket.project_id === Number(filterProjectId)),
   );
-  const visibleColumns = showingCancelled
-    ? columns
-    : columns.filter((column) => column.state !== "cancelled");
+  const hasExternalMergeTickets = visibleTickets.some(
+    (ticket) => ticket.state === "awaiting_external_merge",
+  );
+  const visibleColumns = columns.filter(
+    (column) =>
+      (showingCancelled || column.state !== "cancelled") &&
+      (hasExternalMergeTickets || column.state !== "awaiting_external_merge"),
+  );
+  useEffect(() => {
+    if (!visibleColumns.some((column) => column.state === mobileState)) {
+      setMobileState("todo");
+    }
+  }, [mobileState, visibleColumns]);
   async function create(event: FormEvent) {
     event.preventDefault();
     if (creating) return;
@@ -175,7 +185,7 @@ export function KanbanBoard({
           ))}
         </select>
       </label>
-      <div className={`kanban${showingCancelled ? " kanban-with-cancelled" : ""}`}>
+      <div className={`kanban${hasExternalMergeTickets ? " kanban-with-external" : ""}${showingCancelled ? " kanban-with-cancelled" : ""}`}>
         {visibleColumns.map((column) => (
           <section
             className={`column column-${column.state}${mobileState === column.state ? " mobile-active" : ""}`}
@@ -258,6 +268,10 @@ function TicketCard({
     : reservedFor
       ? `Reserved for ${reservedFor.name}`
       : "Unassigned";
+  const externalWorkflow = ticket.state === "awaiting_external_merge" ||
+    ("review_completion_workflow" in ticket && ticket.review_completion_workflow
+      ? ticket.review_completion_workflow === "external"
+      : project?.completion_workflow === "external");
   return (
     <button
       type="button"
@@ -272,6 +286,9 @@ function TicketCard({
         </span>
       </span>
       <strong className="ticket-card-title">{ticket.title}</strong>
+      {externalWorkflow && (
+        <span className="workflow-badge">External merge</span>
+      )}
       <span className="ticket-card-meta">
         <span title={project?.path}>
           {project?.name ?? `Project #${ticket.project_id}`}

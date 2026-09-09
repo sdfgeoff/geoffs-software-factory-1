@@ -129,6 +129,21 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.project-picker-name {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.project-picker-name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.field-help {
+  margin: 0;
+  color: #6c6256;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
 .board-settings {
   max-width: 40rem;
   padding: 1.25rem;
@@ -204,6 +219,12 @@ nav a.active {
 }
 .kanban-with-cancelled {
   grid-template-columns: repeat(5, minmax(16rem, 1fr));
+}
+.kanban-with-external {
+  grid-template-columns: repeat(5, minmax(16rem, 1fr));
+}
+.kanban-with-external.kanban-with-cancelled {
+  grid-template-columns: repeat(6, minmax(16rem, 1fr));
 }
 .column {
   min-height: 30rem;
@@ -289,6 +310,25 @@ nav a.active {
 .state-cancelled {
   background: #e3e1dd;
   color: #6c6256;
+}
+.workflow-badge {
+  display: inline-block;
+  justify-self: start;
+  width: max-content;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid #8d7bbb;
+  border-radius: 999px;
+  background: #f0ecfa;
+  color: #51417e;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.project-picker > summary .workflow-badge {
+  margin-inline-start: 0.45rem;
 }
 .ticket-card-title {
   display: -webkit-box;
@@ -388,6 +428,67 @@ aside form,
 }
 .ticket-detail-panel .ticket-detail-form {
   padding-inline: 0;
+}
+.copyable-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.copyable-value code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.copyable-value button {
+  width: auto;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.72rem;
+}
+.external-workflow-note {
+  padding: 0.75rem;
+  border-left: 3px solid #705aa7;
+  background: #f0ecfa;
+  color: #46376e;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.ticket-detail-panel .external-change-form {
+  padding-inline: 0;
+}
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  border-radius: 0.45rem;
+  padding: 0.65rem 0.9rem;
+  background: #1f4b43;
+  color: white;
+  font-weight: 700;
+  text-decoration: none;
+}
+.button-link.secondary {
+  background: #e7e1d5;
+  color: #28332f;
+}
+.external-merge-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 0.9rem;
+  border: 1px solid #d8d1c5;
+  border-radius: 0.65rem;
+  background: #f8f5ef;
+}
+.external-merge-actions h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.external-merge-actions form {
+  align-content: start;
+  padding: 0;
+  border: 0;
 }
 .blocker-selector {
   display: grid;
@@ -743,6 +844,12 @@ aside button.selected {
   .kanban-with-cancelled {
     grid-template-columns: repeat(5, minmax(14rem, 1fr));
   }
+  .kanban-with-external {
+    grid-template-columns: repeat(5, minmax(14rem, 1fr));
+  }
+  .kanban-with-external.kanban-with-cancelled {
+    grid-template-columns: repeat(6, minmax(14rem, 1fr));
+  }
 }
 @media (max-width: 820px) {
   .app-shell {
@@ -784,7 +891,9 @@ aside button.selected {
     margin-bottom: 0.65rem;
   }
   .kanban,
-  .kanban-with-cancelled {
+  .kanban-with-cancelled,
+  .kanban-with-external,
+  .kanban-with-external.kanban-with-cancelled {
     display: block;
     overflow: visible;
   }
@@ -847,5 +956,8 @@ aside button.selected {
     inset: 0;
     width: 100%;
     border: 0;
+  }
+  .external-merge-actions {
+    grid-template-columns: 1fr;
   }
 }
