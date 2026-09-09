@@ -75,6 +75,7 @@ pub struct TicketSummary {
     pub reserved_for_agent_id: Option<i64>,
     pub assignee_id: Option<i64>,
     pub reviewer_id: Option<i64>,
+    pub review_completion_workflow: Option<ProjectCompletionWorkflow>,
     pub has_review_feedback: bool,
     #[sqlx(skip)]
     pub unresolved_blockers: Vec<TicketBlocker>,
@@ -598,6 +599,7 @@ impl From<TicketSummary> for wire::TicketSummary {
             reserved_for_agent_id: value.reserved_for_agent_id,
             assignee_id: value.assignee_id,
             reviewer_id: value.reviewer_id,
+            review_completion_workflow: value.review_completion_workflow.map(Into::into),
             has_review_feedback: value.has_review_feedback,
             unresolved_blockers: value
                 .unresolved_blockers

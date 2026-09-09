@@ -62,6 +62,7 @@ export interface TicketSummary {
   reserved_for_agent_id: number | null;
   assignee_id: number | null;
   reviewer_id: number | null;
+  review_completion_workflow: ProjectCompletionWorkflow | null;
   has_review_feedback: boolean;
   unresolved_blockers: TicketBlocker[];
   revision: number;

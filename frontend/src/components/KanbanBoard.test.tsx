@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Agent, Project, Ticket } from "../types";
+import type { Agent, Project, Ticket, TicketSummary } from "../types";
 import { KanbanBoard } from "./KanbanBoard";
 
 vi.mock("../api", () => ({
@@ -485,6 +485,52 @@ describe("KanbanBoard", () => {
       "External merge",
     );
     expect(container.querySelector(".kanban-with-external")).toBeTruthy();
+  });
+
+  it("uses submitted workflow snapshots for review summary badges", () => {
+    const summary = (
+      id: number,
+      title: string,
+      projectId: number,
+      workflow: "board_managed" | "external",
+    ): TicketSummary => ({
+      id,
+      project_id: projectId,
+      title,
+      state: "review",
+      created_by_agent_id: null,
+      reserved_for_agent_id: null,
+      assignee_id: null,
+      reviewer_id: null,
+      review_completion_workflow: workflow,
+      has_review_feedback: false,
+      unresolved_blockers: [],
+      revision: 1,
+      created_at: 0,
+      updated_at: 0,
+    });
+    const mismatchedProjects: Project[] = [
+      { ...projects[0], completion_workflow: "external" },
+      { ...projects[1], completion_workflow: "board_managed" },
+    ];
+    render(
+      <KanbanBoard
+        {...baseProps}
+        projects={mismatchedProjects}
+        tickets={[
+          summary(7, "Board snapshot", 1, "board_managed"),
+          summary(8, "External snapshot", 2, "external"),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByText("Board snapshot").closest("button")?.querySelector(".workflow-badge"),
+    ).toBeNull();
+    expect(
+      screen.getByText("External snapshot").closest("button")?.querySelector(".workflow-badge")
+        ?.textContent,
+    ).toBe("External merge");
   });
 
   it("explains an external review and exposes safe reviewed values", async () => {

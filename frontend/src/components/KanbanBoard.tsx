@@ -269,7 +269,7 @@ function TicketCard({
       ? `Reserved for ${reservedFor.name}`
       : "Unassigned";
   const externalWorkflow = ticket.state === "awaiting_external_merge" ||
-    ("review_completion_workflow" in ticket && ticket.review_completion_workflow
+    (ticket.review_completion_workflow
       ? ticket.review_completion_workflow === "external"
       : project?.completion_workflow === "external");
   return (

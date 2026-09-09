@@ -38,6 +38,7 @@ function summarizeTicket(ticket: Ticket): TicketSummary {
     reserved_for_agent_id: ticket.reserved_for_agent_id,
     assignee_id: ticket.assignee_id,
     reviewer_id: ticket.reviewer_id,
+    review_completion_workflow: ticket.review_completion_workflow,
     has_review_feedback: ticket.review_feedback !== null,
     unresolved_blockers: ticket.unresolved_blockers,
     revision: ticket.revision,

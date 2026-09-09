@@ -86,6 +86,7 @@ pub struct TicketSummary {
     pub reserved_for_agent_id: Option<i64>,
     pub assignee_id: Option<i64>,
     pub reviewer_id: Option<i64>,
+    pub review_completion_workflow: Option<ProjectCompletionWorkflow>,
     pub has_review_feedback: bool,
     pub unresolved_blockers: Vec<TicketBlocker>,
     pub revision: i64,
@@ -750,6 +751,7 @@ mod tests {
                 reserved_for_agent_id: None,
                 assignee_id: Some(2),
                 reviewer_id: Some(3),
+                review_completion_workflow: Some(ProjectCompletionWorkflow::External),
                 has_review_feedback: true,
                 unresolved_blockers: Vec::new(),
                 revision: 4,
@@ -760,6 +762,10 @@ mod tests {
         };
         let encoded = serde_json::to_value(&page).unwrap();
         assert_eq!(encoded["tickets"][0]["has_review_feedback"], true);
+        assert_eq!(
+            encoded["tickets"][0]["review_completion_workflow"],
+            "external"
+        );
         assert!(encoded["tickets"][0].get("description").is_none());
         assert_eq!(
             serde_json::from_value::<TicketSummaryPage>(encoded).unwrap(),
@@ -855,7 +861,10 @@ mod tests {
         ] {
             let encoded = serde_json::to_value(&event).unwrap();
             assert_eq!(encoded["kind"], kind);
-            assert_eq!(serde_json::from_value::<AgentEvent>(encoded).unwrap(), event);
+            assert_eq!(
+                serde_json::from_value::<AgentEvent>(encoded).unwrap(),
+                event
+            );
         }
     }
 }

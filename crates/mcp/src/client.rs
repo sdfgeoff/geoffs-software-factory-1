@@ -645,6 +645,7 @@ mod tests {
                 reserved_for_agent_id: None,
                 assignee_id: None,
                 reviewer_id: None,
+                review_completion_workflow: None,
                 has_review_feedback: false,
                 unresolved_blockers: Vec::new(),
                 revision: 1,
