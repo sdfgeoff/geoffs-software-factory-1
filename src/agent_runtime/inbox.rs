@@ -19,7 +19,7 @@ use super::{
     AgentEvent, AgentManager, AgentMessageDelta, RpcPeer, RunningAgent, validate_agent_name,
 };
 
-const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it, commit cohesive changes, and submit it for review when ready. If you have approve_review scope, claim reviews before reviewing them. Keep ticket state accurate. Do not modify another agent's worktree or the primary worktree.";
+const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it, commit cohesive changes, and submit it for review when ready. If you have approve_review scope, claim reviews before reviewing them. For external-workflow tickets, approval does not merge Git: attach the external change URL and confirm completion only after the external merge. Keep ticket state accurate. Do not modify another agent's worktree or the primary worktree.";
 
 impl AgentManager {
     pub async fn deliver_pending_events(&self) {

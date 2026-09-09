@@ -288,7 +288,7 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
     ))?;
     registry.register(ToolDefinition::<TicketRevisionArguments, Ticket>::new(
         "approve_ticket_review",
-        "Approve and merge a claimed review; requires approve_review scope",
+        "Approve a claimed review; board-managed projects merge Git, while external projects wait for a separately confirmed external merge; requires approve_review scope",
         |board, arguments| {
             Box::pin(async move {
                 board
@@ -304,7 +304,7 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
     ))?;
     registry.register(ToolDefinition::<SetExternalChangeArguments, Ticket>::new(
         "set_external_change",
-        "Set or replace the provider-neutral change URL for an external-workflow ticket",
+        "Set or replace the provider-neutral change URL for an external-workflow ticket you implement or review",
         |board, arguments| {
             Box::pin(async move {
                 board
@@ -321,7 +321,7 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
     ))?;
     registry.register(ToolDefinition::<ReturnExternalMergeArguments, Ticket>::new(
         "return_external_merge",
-        "Return an externally approved ticket to implementation with a reason",
+        "Return an externally approved ticket to implementation with a reason; requires its approving reviewer with approve_review scope",
         |board, arguments| {
             Box::pin(async move {
                 board
@@ -339,7 +339,7 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
     registry.register(
         ToolDefinition::<CompleteExternalMergeArguments, Ticket>::new(
             "complete_external_merge",
-            "Confirm that an externally approved change was merged and record its final reference",
+            "Confirm an external merge and record its provider-neutral final reference; the board does not poll or merge it, and the approving reviewer needs approve_review scope",
             |board, arguments| {
                 Box::pin(async move {
                     board

@@ -280,6 +280,14 @@ async fn mcp_agent_without_review_scope_cannot_finish_external_lifecycle() {
         .set_agent_scopes(reviewer.id, &["approve_review".into()])
         .await
         .unwrap();
+    let unrelated_reviewer = store
+        .create_agent("unrelated-reviewer", "/tmp/unrelated-reviewer")
+        .await
+        .unwrap();
+    store
+        .set_agent_scopes(unrelated_reviewer.id, &["approve_review".into()])
+        .await
+        .unwrap();
     let ticket = store
         .create_ticket(NewTicket {
             title: "External lifecycle".into(),
@@ -333,14 +341,47 @@ async fn mcp_agent_without_review_scope_cannot_finish_external_lifecycle() {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let base_url = format!("http://{address}");
 
+    let changed = mcp_tool(
+        &base_url,
+        worker.id,
+        1,
+        "set_external_change",
+        json!({
+            "ticket_id":ticket.id,
+            "external_change_url":"https://example.test/change/61"
+        }),
+    )
+    .await;
+    assert_eq!(
+        tool_content(&changed)["external_change_url"],
+        "https://example.test/change/61"
+    );
+    let ticket = store.ticket(ticket.id).await.unwrap().unwrap();
+
+    let unrelated_change = mcp_tool(
+        &base_url,
+        unrelated_reviewer.id,
+        2,
+        "set_external_change",
+        json!({
+            "ticket_id":ticket.id,
+            "external_change_url":"https://example.test/unrelated"
+        }),
+    )
+    .await;
+    assert_eq!(
+        unrelated_change.pointer("/result/isError"),
+        Some(&Value::Bool(true))
+    );
+
     for (id, tool, arguments) in [
         (
-            1,
+            3,
             "return_external_merge",
             json!({"ticket_id":ticket.id,"reason":"take it back"}),
         ),
         (
-            2,
+            4,
             "complete_external_merge",
             json!({"ticket_id":ticket.id,"confirmation":"merged"}),
         ),
@@ -354,6 +395,47 @@ async fn mcp_agent_without_review_scope_cannot_finish_external_lifecycle() {
         assert_eq!(unchanged.state, TicketState::AwaitingExternalMerge);
         assert_eq!(unchanged.revision, ticket.revision);
     }
+
+    for (id, tool, arguments) in [
+        (
+            5,
+            "return_external_merge",
+            json!({"ticket_id":ticket.id,"reason":"unrelated return"}),
+        ),
+        (
+            6,
+            "complete_external_merge",
+            json!({"ticket_id":ticket.id,"confirmation":"unrelated completion"}),
+        ),
+    ] {
+        let response = mcp_tool(&base_url, unrelated_reviewer.id, id, tool, arguments).await;
+        assert_eq!(
+            response.pointer("/result/isError"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            store.ticket(ticket.id).await.unwrap().unwrap().revision,
+            ticket.revision
+        );
+    }
+
+    let completed = mcp_tool(
+        &base_url,
+        reviewer.id,
+        7,
+        "complete_external_merge",
+        json!({
+            "ticket_id":ticket.id,
+            "confirmation":"provider confirmed",
+            "merge_reference":"provider-merge-61"
+        }),
+    )
+    .await;
+    assert_eq!(tool_content(&completed)["state"], "done");
+    assert_eq!(
+        tool_content(&completed)["external_merge_reference"],
+        "provider-merge-61"
+    );
 }
 
 #[tokio::test]

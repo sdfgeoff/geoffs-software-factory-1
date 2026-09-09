@@ -194,12 +194,48 @@ impl AgentManager {
                     "implementation branch changed after review submission",
                 ));
             }
-            let ticket = self
+            let reviewer = self
                 .store
-                .approve_external_review(ticket_id, reviewer_id, commit, expected_revision)
+                .agent(reviewer_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("reviewer not found"))?;
+            let source_branch = ticket.implementation_branch.as_deref().unwrap_or("unknown");
+            let external_url = ticket
+                .external_change_url
+                .as_deref()
+                .unwrap_or("not attached");
+            let body = format!(
+                "Ticket #{} “{}” was approved for external merge. The board did not merge Git.\n\n1. Source branch: `{source_branch}`\n2. Reviewed commit: `{commit}`\n3. Target branch: `{target_branch}`\n4. External change: {external_url}\n5. Approved by: {}",
+                ticket.id, ticket.title, reviewer.name
+            );
+            let key = format!("ticket-external-approved:{}:{commit}", ticket.id);
+            let notification =
+                merge_notification_channel
+                    .as_deref()
+                    .map(|channel| MergeNotification {
+                        channel,
+                        author: "Multi-agent Board",
+                        body: &body,
+                        deduplication_key: &key,
+                    });
+            let (ticket, message, wake_agent_ids) = self
+                .store
+                .approve_external_review_with_wakes(
+                    ticket_id,
+                    reviewer_id,
+                    commit,
+                    expected_revision,
+                    notification,
+                )
                 .await?;
             drop(operation);
-            self.emit(AgentEvent::TicketUpdated {
+            if let Some(message) = message.as_ref() {
+                self.emit_board_message(message);
+            }
+            for agent_id in wake_agent_ids {
+                self.deliver_pending(agent_id).await;
+            }
+            self.emit(AgentEvent::ExternalReviewApproved {
                 agent_id: reviewer_id,
                 data: ticket.clone(),
             });
@@ -337,7 +373,7 @@ impl AgentManager {
                 expected_revision,
             )
             .await?;
-        self.emit(AgentEvent::TicketUpdated {
+        self.emit(AgentEvent::ExternalChangeUpdated {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
         });
@@ -355,7 +391,7 @@ impl AgentManager {
             .store
             .return_external_merge(ticket_id, reason, actor_agent_id, expected_revision)
             .await?;
-        self.emit(AgentEvent::TicketUpdated {
+        self.emit(AgentEvent::ExternalMergeReturned {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
         });
@@ -370,17 +406,68 @@ impl AgentManager {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
-        let ticket = self
+        let operation = self.operations.lock().await;
+        let current = self
             .store
-            .complete_external_merge(
+            .ticket(ticket_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        let merge_notification_channel = self.settings().await?.merge_notification_channel;
+        let actor = if let Some(agent_id) = actor_agent_id {
+            self.store
+                .agent(agent_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("agent not found"))?
+                .name
+        } else {
+            "human".to_owned()
+        };
+        let source_branch = current
+            .implementation_branch
+            .as_deref()
+            .unwrap_or("unknown");
+        let reviewed_commit = current.review_commit.as_deref().unwrap_or("unknown");
+        let target_branch = current.review_target_branch.as_deref().unwrap_or("unknown");
+        let external_url = current
+            .external_change_url
+            .as_deref()
+            .unwrap_or("not attached");
+        let final_reference = merge_reference.unwrap_or("not supplied");
+        let body = format!(
+            "Ticket #{} “{}” was confirmed externally merged.\n\n1. Source branch: `{source_branch}`\n2. Reviewed commit: `{reviewed_commit}`\n3. Target branch: `{target_branch}`\n4. External change: {external_url}\n5. Final reference: `{final_reference}`\n6. Confirmed by: {actor}\n7. Confirmation: {confirmation}",
+            current.id, current.title
+        );
+        let key = format!(
+            "ticket-external-completed:{}:{}",
+            current.id, current.revision
+        );
+        let notification = merge_notification_channel
+            .as_deref()
+            .map(|channel| MergeNotification {
+                channel,
+                author: "Multi-agent Board",
+                body: &body,
+                deduplication_key: &key,
+            });
+        let (ticket, message, wake_agent_ids) = self
+            .store
+            .complete_external_merge_with_message(
                 ticket_id,
                 confirmation,
                 merge_reference,
                 actor_agent_id,
                 expected_revision,
+                notification,
             )
             .await?;
-        self.emit(AgentEvent::TicketUpdated {
+        drop(operation);
+        if let Some(message) = message.as_ref() {
+            self.emit_board_message(message);
+        }
+        for agent_id in wake_agent_ids {
+            self.deliver_pending(agent_id).await;
+        }
+        self.emit(AgentEvent::ExternalMergeCompleted {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
         });
@@ -1100,12 +1187,18 @@ mod tests {
             "codex".into(),
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
-        );
+        )
+        .with_merge_notification_channel(Some("merges".into()))
+        .unwrap();
         let worker = manager.create("worker").await.unwrap();
         let worker_worktree = agent_worktree(&store, worker.id).await;
         let reviewer = manager.create("reviewer").await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        store
+            .update_agent_runtime(worker.id, AgentState::Error, None, None, Some("test"))
             .await
             .unwrap();
         std::fs::write(Path::new(&worker_worktree).join("work.txt"), "ready").unwrap();
@@ -1135,10 +1228,20 @@ mod tests {
             .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
             .await
             .unwrap();
+        let ticket = manager
+            .set_external_change_url(
+                ticket.id,
+                "https://example.test/change/61",
+                Some(worker.id),
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
         let primary_head = git_text(repository.to_str().unwrap(), &["rev-parse", "HEAD"])
             .await
             .unwrap();
         std::fs::write(repository.join("user-owned.txt"), "leave me alone").unwrap();
+        let mut events = manager.subscribe();
 
         let ticket = manager
             .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
@@ -1155,6 +1258,99 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(repository.join("user-owned.txt")).unwrap(),
             "leave me alone"
+        );
+        let ready = store
+            .wake_events(worker.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind() == "ticket.external_merge_ready")
+            .collect::<Vec<_>>();
+        assert_eq!(ready.len(), 1);
+        assert!(
+            store
+                .wake_events(reviewer.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.kind() != "ticket.external_merge_ready"
+                    && !(event.kind() == "ticket.review_requested"
+                        && event.delivery_state == crate::domain::WakeEventState::Pending))
+        );
+        assert!(
+            manager
+                .approve_review(ticket.id, reviewer.id, Some(ticket.revision))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .wake_events(worker.id)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind() == "ticket.external_merge_ready")
+                .count(),
+            1
+        );
+        let approval_messages = store.messages("merges", None, None, None).await.unwrap().0;
+        assert_eq!(approval_messages.len(), 1);
+        assert!(
+            approval_messages[0]
+                .body
+                .contains("approved for external merge")
+        );
+        assert!(
+            approval_messages[0]
+                .body
+                .contains("The board did not merge Git")
+        );
+        assert!(
+            approval_messages[0]
+                .body
+                .contains("https://example.test/change/61")
+        );
+        let approval_events = (0..8)
+            .filter_map(|_| events.try_recv().ok())
+            .collect::<Vec<_>>();
+        assert!(
+            approval_events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::BoardMessage { .. }))
+        );
+        assert!(
+            approval_events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ExternalReviewApproved { .. }))
+        );
+
+        let done = manager
+            .complete_external_merge(
+                ticket.id,
+                "Provider reports merged",
+                Some("external-merge-commit"),
+                Some(reviewer.id),
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        assert_eq!(done.state, TicketState::Done);
+        let messages = store.messages("merges", None, None, None).await.unwrap().0;
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].body.contains("confirmed externally merged"));
+        assert!(messages[1].body.contains("external-merge-commit"));
+        let completion_events = (0..8)
+            .filter_map(|_| events.try_recv().ok())
+            .collect::<Vec<_>>();
+        assert!(
+            completion_events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::BoardMessage { .. }))
+        );
+        assert!(
+            completion_events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ExternalMergeCompleted { .. }))
         );
         std::fs::remove_dir_all(base).unwrap();
     }

@@ -67,6 +67,7 @@ enum TicketWakeReason {
     Assigned,
     Reserved,
     ReviewRequested,
+    ExternalMergeReady,
 }
 
 impl Store {
@@ -967,6 +968,20 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        Ok(self
+            .approve_external_review_with_wakes(id, reviewer_id, commit, expected_revision, None)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn approve_external_review_with_wakes(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+        notification: Option<MergeNotification<'_>>,
+    ) -> Result<(Ticket, Option<Message>, Vec<i64>), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
@@ -1003,9 +1018,43 @@ impl Store {
         .bind(reviewer_id)
         .execute(&mut *transaction)
         .await?;
+        sqlx::query(
+            "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
+             AND kind = 'ticket.review_requested' \
+             AND json_extract(payload, '$.ticket_id') = ?",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
+        let mut wake_agent_ids = insert_pending_ticket_wakes(
+            &mut transaction,
+            Some(&current),
+            &ticket,
+            TicketWakeReason::ExternalMergeReady,
+        )
+        .await?;
+        let message = if let Some(notification) = notification {
+            let (message, message_targets) = insert_message(
+                &mut transaction,
+                MessageWrite {
+                    channel: notification.channel,
+                    agent_id: None,
+                    author: notification.author,
+                    body: notification.body,
+                    deduplication_key: Some(notification.deduplication_key),
+                },
+            )
+            .await?;
+            wake_agent_ids.extend(message_targets);
+            Some(message)
+        } else {
+            None
+        };
+        wake_agent_ids.sort_unstable();
+        wake_agent_ids.dedup();
         transaction.commit().await?;
-        Ok(ticket)
+        Ok((ticket, message, wake_agent_ids))
     }
 
     pub async fn set_external_change_url(
@@ -1045,6 +1094,14 @@ impl Store {
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        if let Some(agent_id) = actor_agent_id
+            && current.assignee_id != Some(agent_id)
+            && current.reviewer_id != Some(agent_id)
+        {
+            return Err(AppError::forbidden(
+                "agent is not involved in this external change",
+            ));
+        }
         self.active_ticket_project(&current).await?;
         if current.review_completion_workflow != Some(ProjectCompletionWorkflow::External)
             || !matches!(
@@ -1091,8 +1148,6 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
-        self.require_external_lifecycle_authority(actor_agent_id)
-            .await?;
         let reason = reason.trim();
         if reason.is_empty() || reason.chars().count() > 10_000 {
             return Err(AppError::bad_request(
@@ -1103,6 +1158,8 @@ impl Store {
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.require_external_lifecycle_authority(actor_agent_id, &current)
+            .await?;
         self.active_ticket_project(&current).await?;
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
@@ -1142,8 +1199,28 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
-        self.require_external_lifecycle_authority(actor_agent_id)
-            .await?;
+        Ok(self
+            .complete_external_merge_with_message(
+                id,
+                confirmation,
+                merge_reference,
+                actor_agent_id,
+                expected_revision,
+                None,
+            )
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn complete_external_merge_with_message(
+        &self,
+        id: i64,
+        confirmation: &str,
+        merge_reference: Option<&str>,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+        notification: Option<MergeNotification<'_>>,
+    ) -> Result<(Ticket, Option<Message>, Vec<i64>), AppError> {
         let confirmation = confirmation.trim();
         if confirmation.is_empty() || confirmation.chars().count() > 10_000 {
             return Err(AppError::bad_request(
@@ -1162,6 +1239,8 @@ impl Store {
             .ticket(id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
+        self.require_external_lifecycle_authority(actor_agent_id, &current)
+            .await?;
         self.active_ticket_project(&current).await?;
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
@@ -1189,19 +1268,37 @@ impl Store {
         .execute(&mut *transaction)
         .await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        let (message, wake_agent_ids) = if let Some(notification) = notification {
+            let (message, wake_agent_ids) = insert_message(
+                &mut transaction,
+                MessageWrite {
+                    channel: notification.channel,
+                    agent_id: None,
+                    author: notification.author,
+                    body: notification.body,
+                    deduplication_key: Some(notification.deduplication_key),
+                },
+            )
+            .await?;
+            (Some(message), wake_agent_ids)
+        } else {
+            (None, Vec::new())
+        };
         transaction.commit().await?;
-        Ok(ticket)
+        Ok((ticket, message, wake_agent_ids))
     }
 
     async fn require_external_lifecycle_authority(
         &self,
         actor_agent_id: Option<i64>,
+        ticket: &Ticket,
     ) -> Result<(), AppError> {
         if let Some(agent_id) = actor_agent_id
-            && !self.has_agent_scope(agent_id, "approve_review").await?
+            && (!self.has_agent_scope(agent_id, "approve_review").await?
+                || ticket.reviewer_id != Some(agent_id))
         {
             return Err(AppError::forbidden(
-                "agent lacks approve_review scope for external lifecycle changes",
+                "agent is not the scoped reviewer for this external lifecycle",
             ));
         }
         Ok(())
@@ -1590,6 +1687,16 @@ async fn insert_pending_ticket_wakes(
             .fetch_all(&mut **transaction)
             .await?,
         ),
+        TicketWakeReason::ExternalMergeReady => (
+            format!(
+                "Ticket #{} '{}' was approved for external merge. The board did not merge Git. Follow the external change through completion.",
+                ticket.id, ticket.title
+            ),
+            sqlx::query_scalar("SELECT id FROM agents WHERE id = ?")
+                .bind(ticket.assignee_id)
+                .fetch_all(&mut **transaction)
+                .await?,
+        ),
     };
     let payload = TicketWakePayload {
         message,
@@ -1606,6 +1713,7 @@ async fn insert_pending_ticket_wakes(
         TicketWakeReason::Assigned => WakeEventData::TicketAssigned(payload),
         TicketWakeReason::Reserved => WakeEventData::TicketReserved(payload),
         TicketWakeReason::ReviewRequested => WakeEventData::TicketReviewRequested(payload),
+        TicketWakeReason::ExternalMergeReady => WakeEventData::TicketExternalMergeReady(payload),
     };
     let payload = serde_json::to_string(&event.payload()).map_err(|error| {
         AppError::internal(format!("failed to encode ticket wake event: {error}"))
@@ -1837,6 +1945,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled.state, TicketState::Cancelled);
+        reopened.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_merge_ready_wake_survives_restart_and_is_claimed_once() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mab-external-wake-{unique}.sqlite3"));
+        let store = Store::open(&path).await.unwrap();
+        let project = store
+            .set_project("/tmp/multi-agent-board-external-wake")
+            .await
+            .unwrap();
+        store
+            .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::External)
+            .await
+            .unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "External wake".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        while let Some(event) = store
+            .claim_pending_wake_event(worker.id, true)
+            .await
+            .unwrap()
+        {
+            store.complete_wake_event(event.id).await.unwrap();
+        }
+        let ticket = store
+            .submit_review(
+                ticket.id,
+                worker.id,
+                ReviewSubmission {
+                    implementation_branch: Some("tickets/external-wake"),
+                    commit: "reviewed-commit",
+                    target_branch: "main",
+                    project_id: project.id,
+                    project_path: &project.path,
+                },
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        store
+            .approve_external_review(
+                ticket.id,
+                reviewer.id,
+                "reviewed-commit",
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        store.close().await;
+
+        let reopened = Store::open(&path).await.unwrap();
+        let event = reopened
+            .claim_pending_wake_event(worker.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.kind(), "ticket.external_merge_ready");
+        assert!(matches!(
+            event.event,
+            WakeEventData::TicketExternalMergeReady(ref payload)
+                if payload.ticket_id == ticket.id
+        ));
+        reopened.complete_wake_event(event.id).await.unwrap();
+        assert!(
+            reopened
+                .claim_pending_wake_event(worker.id, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
         reopened.close().await;
         std::fs::remove_file(path).unwrap();
     }

@@ -395,6 +395,10 @@ export function App() {
           mergeAgent(event.data);
           break;
         case "ticket_updated":
+        case "external_review_approved":
+        case "external_change_updated":
+        case "external_merge_returned":
+        case "external_merge_completed":
           mergeTickets(event.data);
           break;
         case "settings_updated":

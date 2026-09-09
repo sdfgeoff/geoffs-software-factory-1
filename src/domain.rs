@@ -237,6 +237,8 @@ pub enum WakeEventData {
     TicketReviewClaimed(TicketWakePayload),
     #[serde(rename = "ticket.changes_requested")]
     TicketChangesRequested(TicketWakePayload),
+    #[serde(rename = "ticket.external_merge_ready")]
+    TicketExternalMergeReady(TicketWakePayload),
 }
 
 impl WakeEventData {
@@ -253,6 +255,7 @@ impl WakeEventData {
             Self::TicketReviewRequested(_) => "ticket.review_requested",
             Self::TicketReviewClaimed(_) => "ticket.review_claimed",
             Self::TicketChangesRequested(_) => "ticket.changes_requested",
+            Self::TicketExternalMergeReady(_) => "ticket.external_merge_ready",
         }
     }
 
@@ -280,7 +283,8 @@ impl WakeEventData {
             | Self::TicketReserved(payload)
             | Self::TicketReviewRequested(payload)
             | Self::TicketReviewClaimed(payload)
-            | Self::TicketChangesRequested(payload) => &payload.message,
+            | Self::TicketChangesRequested(payload)
+            | Self::TicketExternalMergeReady(payload) => &payload.message,
         }
     }
 
@@ -288,7 +292,8 @@ impl WakeEventData {
         match self {
             Self::TicketAssigned(payload)
             | Self::TicketReviewClaimed(payload)
-            | Self::TicketChangesRequested(payload) => Some(payload.ticket_id),
+            | Self::TicketChangesRequested(payload)
+            | Self::TicketExternalMergeReady(payload) => Some(payload.ticket_id),
             _ => None,
         }
     }
@@ -879,6 +884,9 @@ impl From<WakeEventData> for wire::WakeEventData {
             WakeEventData::TicketChangesRequested(payload) => {
                 Self::TicketChangesRequested(payload.into())
             }
+            WakeEventData::TicketExternalMergeReady(payload) => {
+                Self::TicketExternalMergeReady(payload.into())
+            }
         }
     }
 }
@@ -928,6 +936,9 @@ impl From<wire::WakeEventData> for WakeEventData {
             }
             wire::WakeEventData::TicketChangesRequested(payload) => {
                 Self::TicketChangesRequested(payload.into())
+            }
+            wire::WakeEventData::TicketExternalMergeReady(payload) => {
+                Self::TicketExternalMergeReady(payload.into())
             }
         }
     }
@@ -1033,6 +1044,13 @@ mod tests {
             WakeEventData::TicketReviewRequested(ticket.clone()),
             WakeEventData::TicketReviewClaimed(ticket.clone()),
             WakeEventData::TicketChangesRequested(ticket),
+            WakeEventData::TicketExternalMergeReady(TicketWakePayload {
+                message: "External follow-up".into(),
+                ticket_id: 1,
+                revision: Some(2),
+                changed_fields: vec!["state".into()],
+                ticket: TicketWakeTicket::project(1),
+            }),
         ];
 
         for event in events {

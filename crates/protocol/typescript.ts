@@ -213,7 +213,8 @@ export type WakeEventData =
   | { kind: "ticket.reserved"; payload: TicketWakePayload }
   | { kind: "ticket.review_requested"; payload: TicketWakePayload }
   | { kind: "ticket.review_claimed"; payload: TicketWakePayload }
-  | { kind: "ticket.changes_requested"; payload: TicketWakePayload };
+  | { kind: "ticket.changes_requested"; payload: TicketWakePayload }
+  | { kind: "ticket.external_merge_ready"; payload: TicketWakePayload };
 
 export interface NotificationWakePayload {
   message: string;
@@ -277,6 +278,10 @@ export type AgentEvent =
   | { kind: "agent_message_delta"; agent_id: number; data: AgentMessageDelta }
   | { kind: "message"; agent_id: number; data: AgentMessage }
   | { kind: "ticket_updated"; agent_id: number; data: Ticket }
+  | { kind: "external_review_approved"; agent_id: number; data: Ticket }
+  | { kind: "external_change_updated"; agent_id: number; data: Ticket }
+  | { kind: "external_merge_returned"; agent_id: number; data: Ticket }
+  | { kind: "external_merge_completed"; agent_id: number; data: Ticket }
   | { kind: "settings_updated"; agent_id: number; data: BoardSettings }
   | { kind: "board_message"; agent_id: number; data: Message }
   | { kind: "channel_subscriptions"; agent_id: number; data: string[] }

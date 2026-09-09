@@ -46,6 +46,22 @@ pub enum AgentEvent {
         agent_id: i64,
         data: Ticket,
     },
+    ExternalReviewApproved {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalChangeUpdated {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalMergeReturned {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalMergeCompleted {
+        agent_id: i64,
+        data: Ticket,
+    },
     SettingsUpdated {
         agent_id: i64,
         data: BoardSettings,
@@ -99,6 +115,22 @@ impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
                 data: data.try_into()?,
             },
             AgentEvent::TicketUpdated { agent_id, data } => Self::TicketUpdated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::ExternalReviewApproved { agent_id, data } => Self::ExternalReviewApproved {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::ExternalChangeUpdated { agent_id, data } => Self::ExternalChangeUpdated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::ExternalMergeReturned { agent_id, data } => Self::ExternalMergeReturned {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::ExternalMergeCompleted { agent_id, data } => Self::ExternalMergeCompleted {
                 agent_id,
                 data: data.into(),
             },

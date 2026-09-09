@@ -311,6 +311,8 @@ pub enum WakeEventData {
     TicketReviewClaimed(TicketWakePayload),
     #[serde(rename = "ticket.changes_requested")]
     TicketChangesRequested(TicketWakePayload),
+    #[serde(rename = "ticket.external_merge_ready")]
+    TicketExternalMergeReady(TicketWakePayload),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -420,6 +422,22 @@ pub enum AgentEvent {
         data: AgentMessage,
     },
     TicketUpdated {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalReviewApproved {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalChangeUpdated {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalMergeReturned {
+        agent_id: i64,
+        data: Ticket,
+    },
+    ExternalMergeCompleted {
         agent_id: i64,
         data: Ticket,
     },
@@ -801,5 +819,43 @@ mod tests {
             panic!("wrong wake variant");
         };
         assert_eq!(payload.ticket.project_id, None);
+    }
+
+    #[test]
+    fn external_lifecycle_events_have_distinct_typed_wire_kinds() {
+        for (event, kind) in [
+            (
+                AgentEvent::ExternalReviewApproved {
+                    agent_id: 2,
+                    data: ticket(),
+                },
+                "external_review_approved",
+            ),
+            (
+                AgentEvent::ExternalChangeUpdated {
+                    agent_id: 2,
+                    data: ticket(),
+                },
+                "external_change_updated",
+            ),
+            (
+                AgentEvent::ExternalMergeReturned {
+                    agent_id: 2,
+                    data: ticket(),
+                },
+                "external_merge_returned",
+            ),
+            (
+                AgentEvent::ExternalMergeCompleted {
+                    agent_id: 2,
+                    data: ticket(),
+                },
+                "external_merge_completed",
+            ),
+        ] {
+            let encoded = serde_json::to_value(&event).unwrap();
+            assert_eq!(encoded["kind"], kind);
+            assert_eq!(serde_json::from_value::<AgentEvent>(encoded).unwrap(), event);
+        }
     }
 }
