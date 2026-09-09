@@ -1091,6 +1091,8 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        self.require_external_lifecycle_authority(actor_agent_id)
+            .await?;
         let reason = reason.trim();
         if reason.is_empty() || reason.chars().count() > 10_000 {
             return Err(AppError::bad_request(
@@ -1140,6 +1142,8 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        self.require_external_lifecycle_authority(actor_agent_id)
+            .await?;
         let confirmation = confirmation.trim();
         if confirmation.is_empty() || confirmation.chars().count() > 10_000 {
             return Err(AppError::bad_request(
@@ -1187,6 +1191,20 @@ impl Store {
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
         Ok(ticket)
+    }
+
+    async fn require_external_lifecycle_authority(
+        &self,
+        actor_agent_id: Option<i64>,
+    ) -> Result<(), AppError> {
+        if let Some(agent_id) = actor_agent_id
+            && !self.has_agent_scope(agent_id, "approve_review").await?
+        {
+            return Err(AppError::forbidden(
+                "agent lacks approve_review scope for external lifecycle changes",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn complete_review(
@@ -2639,7 +2657,7 @@ mod tests {
             .return_external_merge(
                 ticket.id,
                 "External checks failed",
-                None,
+                Some(reviewer.id),
                 Some(ticket.revision),
             )
             .await
@@ -2688,7 +2706,7 @@ mod tests {
                 approved.id,
                 "Merged after external checks",
                 Some("squash-commit-not-equal-to-reviewed-commit"),
-                None,
+                Some(reviewer.id),
                 Some(approved.revision),
             )
             .await

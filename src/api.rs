@@ -2245,4 +2245,62 @@ mod tests {
             .unwrap();
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
+
+    #[tokio::test]
+    async fn ordinary_agent_cannot_return_or_complete_external_merge() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .execute_test_sql(
+                "INSERT INTO tickets (id, project_id, title, state, review_completion_workflow) \
+                 VALUES (60, 1, 'External change', 'awaiting_external_merge', 'external')",
+            )
+            .await
+            .unwrap();
+        let app = test_router(store.clone());
+
+        for (path, body) in [
+            (
+                "/tickets/60/return-external-merge",
+                r#"{"reason":"take it back","expected_revision":1}"#,
+            ),
+            (
+                "/tickets/60/complete-external-merge",
+                r#"{"confirmation":"merged","expected_revision":1}"#,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(AGENT_ID_HEADER, agent.id)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let unchanged = store.ticket(60).await.unwrap().unwrap();
+            assert_eq!(unchanged.state, TicketState::AwaitingExternalMerge);
+            assert_eq!(unchanged.revision, 1);
+        }
+
+        let human = app
+            .oneshot(
+                Request::post("/tickets/60/complete-external-merge")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"confirmation":"human confirmed","expected_revision":1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(human.status(), StatusCode::OK);
+        assert_eq!(
+            store.ticket(60).await.unwrap().unwrap().state,
+            TicketState::Done
+        );
+    }
 }

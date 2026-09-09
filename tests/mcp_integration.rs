@@ -1,4 +1,8 @@
-use multi_agent_board::{agent_runtime::AgentManager, domain::AgentState, store::Store};
+use multi_agent_board::{
+    agent_runtime::AgentManager,
+    domain::{AgentState, ProjectCompletionWorkflow, TicketState},
+    store::{NewTicket, ReviewSubmission, Store},
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -257,6 +261,99 @@ async fn mcp_calls_the_server_without_database_access() {
     )
     .await;
     assert_eq!(tool_content(&activity), json!([]));
+}
+
+#[tokio::test]
+async fn mcp_agent_without_review_scope_cannot_finish_external_lifecycle() {
+    let store = Store::memory().await.unwrap();
+    let project = store.project().await.unwrap().unwrap();
+    store
+        .set_project_completion_workflow(project.id, ProjectCompletionWorkflow::External)
+        .await
+        .unwrap();
+    let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+    let reviewer = store
+        .create_agent("reviewer", "/tmp/reviewer")
+        .await
+        .unwrap();
+    store
+        .set_agent_scopes(reviewer.id, &["approve_review".into()])
+        .await
+        .unwrap();
+    let ticket = store
+        .create_ticket(NewTicket {
+            title: "External lifecycle".into(),
+            description: String::new(),
+            blocker_ids: Vec::new(),
+            created_by_agent_id: None,
+        })
+        .await
+        .unwrap();
+    let ticket = store
+        .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+        .await
+        .unwrap();
+    let ticket = store
+        .submit_review(
+            ticket.id,
+            worker.id,
+            ReviewSubmission {
+                implementation_branch: Some("tickets/external"),
+                commit: "reviewed-commit",
+                target_branch: "main",
+                project_id: project.id,
+                project_path: &project.path,
+            },
+            Some(ticket.revision),
+        )
+        .await
+        .unwrap();
+    let ticket = store
+        .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+        .await
+        .unwrap();
+    let ticket = store
+        .approve_external_review(
+            ticket.id,
+            reviewer.id,
+            "reviewed-commit",
+            Some(ticket.revision),
+        )
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store.clone(), agents);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+
+    for (id, tool, arguments) in [
+        (
+            1,
+            "return_external_merge",
+            json!({"ticket_id":ticket.id,"reason":"take it back"}),
+        ),
+        (
+            2,
+            "complete_external_merge",
+            json!({"ticket_id":ticket.id,"confirmation":"merged"}),
+        ),
+    ] {
+        let response = mcp_tool(&base_url, worker.id, id, tool, arguments).await;
+        assert_eq!(
+            response.pointer("/result/isError"),
+            Some(&Value::Bool(true))
+        );
+        let unchanged = store.ticket(ticket.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.state, TicketState::AwaitingExternalMerge);
+        assert_eq!(unchanged.revision, ticket.revision);
+    }
 }
 
 #[tokio::test]
