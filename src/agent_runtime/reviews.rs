@@ -61,7 +61,8 @@ impl AgentManager {
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
-        });
+        })
+        .await;
         for agent_id in wake_agent_ids {
             self.deliver_pending(agent_id).await;
         }
@@ -81,7 +82,8 @@ impl AgentManager {
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
-        });
+        })
+        .await;
         Ok(ticket)
     }
 
@@ -116,7 +118,8 @@ impl AgentManager {
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
-        });
+        })
+        .await;
         if let Some(worker_id) = ticket.assignee_id {
             let branch_instruction = ticket
                 .implementation_branch
@@ -230,7 +233,7 @@ impl AgentManager {
                 .await?;
             drop(operation);
             if let Some(message) = message.as_ref() {
-                self.emit_board_message(message);
+                self.emit_board_message(message).await;
             }
             for agent_id in wake_agent_ids {
                 self.deliver_pending(agent_id).await;
@@ -238,7 +241,8 @@ impl AgentManager {
             self.emit(AgentEvent::ExternalReviewApproved {
                 agent_id: reviewer_id,
                 data: ticket.clone(),
-            });
+            })
+            .await;
             return Ok(ticket);
         }
 
@@ -353,7 +357,8 @@ impl AgentManager {
         self.emit(AgentEvent::TicketUpdated {
             agent_id: reviewer_id,
             data: ticket.clone(),
-        });
+        })
+        .await;
         Ok(ticket)
     }
 
@@ -376,7 +381,8 @@ impl AgentManager {
         self.emit(AgentEvent::ExternalChangeUpdated {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
-        });
+        })
+        .await;
         Ok(ticket)
     }
 
@@ -394,7 +400,8 @@ impl AgentManager {
         self.emit(AgentEvent::ExternalMergeReturned {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
-        });
+        })
+        .await;
         Ok(ticket)
     }
 
@@ -462,7 +469,7 @@ impl AgentManager {
             .await?;
         drop(operation);
         if let Some(message) = message.as_ref() {
-            self.emit_board_message(message);
+            self.emit_board_message(message).await;
         }
         for agent_id in wake_agent_ids {
             self.deliver_pending(agent_id).await;
@@ -470,7 +477,8 @@ impl AgentManager {
         self.emit(AgentEvent::ExternalMergeCompleted {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
-        });
+        })
+        .await;
         Ok(ticket)
     }
 }
@@ -733,7 +741,7 @@ mod tests {
             .await
             .unwrap();
         while !matches!(
-            events.recv().await.unwrap(),
+            events.recv().await.unwrap().event,
             AgentEvent::TicketUpdated { .. }
         ) {}
         assert_eq!(ticket.state, TicketState::Done);
@@ -1316,12 +1324,12 @@ mod tests {
         assert!(
             approval_events
                 .iter()
-                .any(|event| matches!(event, AgentEvent::BoardMessage { .. }))
+                .any(|event| matches!(&event.event, AgentEvent::BoardMessage { .. }))
         );
         assert!(
             approval_events
                 .iter()
-                .any(|event| matches!(event, AgentEvent::ExternalReviewApproved { .. }))
+                .any(|event| matches!(&event.event, AgentEvent::ExternalReviewApproved { .. }))
         );
 
         let done = manager
@@ -1345,12 +1353,12 @@ mod tests {
         assert!(
             completion_events
                 .iter()
-                .any(|event| matches!(event, AgentEvent::BoardMessage { .. }))
+                .any(|event| matches!(&event.event, AgentEvent::BoardMessage { .. }))
         );
         assert!(
             completion_events
                 .iter()
-                .any(|event| matches!(event, AgentEvent::ExternalMergeCompleted { .. }))
+                .any(|event| matches!(&event.event, AgentEvent::ExternalMergeCompleted { .. }))
         );
         std::fs::remove_dir_all(base).unwrap();
     }

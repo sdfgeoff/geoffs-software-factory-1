@@ -274,6 +274,7 @@ export interface TicketWakeTicket {
 
 export type AgentEvent =
   | { kind: "refresh" }
+  | { kind: "snapshot_reset"; data: SnapshotReset }
   | { kind: "agent_created"; agent_id: number; data: Agent }
   | { kind: "agent_updated"; agent_id: number; data: Agent }
   | { kind: "agent_message_delta"; agent_id: number; data: AgentMessageDelta }
@@ -289,6 +290,12 @@ export type AgentEvent =
   | { kind: "project_subscriptions"; agent_id: number; data: number[] }
   | { kind: "approval_declined"; agent_id: number }
   | { kind: "codex_event"; agent_id: number; data: unknown };
+
+export interface SnapshotReset {
+  scopes: SnapshotScope[];
+}
+
+export type SnapshotScope = "board" | "messages";
 
 export interface AgentMessageDelta {
   delta: string;

@@ -6,12 +6,16 @@ use sqlx::{
 };
 
 mod agents;
+mod events;
 mod messages;
 mod reminders;
 mod settings;
 mod tickets;
 mod wakes;
 
+#[cfg(test)]
+pub(crate) use events::BOARD_EVENT_RETENTION;
+pub(crate) use events::{BoardEventReplay, StoredBoardEvent};
 pub(crate) use messages::validate_channel;
 pub(crate) use reminders::MAX_REMINDER_DELAY_SECONDS;
 pub(crate) use settings::MERGE_NOTIFICATION_CHANNEL_DESCRIPTION;

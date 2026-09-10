@@ -644,7 +644,7 @@ describe("App agent routes", () => {
     expect(api.agentMessages).toHaveBeenCalledTimes(1);
   });
 
-  it("catches up the visible conversation once after reconnect and preserves its draft", async () => {
+  it("applies a scoped message reset once and preserves its draft", async () => {
     window.history.replaceState(null, "", "#messages/general");
     vi.mocked(api.channels).mockResolvedValue([
       { name: "general", description: "", most_recent_message_at: 0 },
@@ -688,8 +688,14 @@ describe("App agent routes", () => {
       target: { value: "Unsent reply" },
     });
 
-    act(() => latestEventSource.onopen?.());
-    act(() => latestEventSource.onopen?.());
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          kind: "snapshot_reset",
+          data: { scopes: ["messages"] },
+        }),
+      } as MessageEvent);
+    });
 
     expect(await screen.findByText("While disconnected")).toBeTruthy();
     expect(api.messages).toHaveBeenNthCalledWith(2, "general", {
@@ -697,6 +703,7 @@ describe("App agent routes", () => {
       limit: 100,
     });
     expect(screen.getAllByText("Before disconnect")).toHaveLength(1);
+    expect(api.agents).toHaveBeenCalledTimes(1);
     expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
       "Unsent reply",
     );
@@ -729,21 +736,20 @@ describe("App agent routes", () => {
     expect(api.agentProjectSubscriptions).toHaveBeenCalledTimes(1);
   });
 
-  it("repairs once after reconnect without reloading for the initial open", async () => {
+  it("relies on durable replay instead of reloading on reconnect", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Agent settings" });
 
     act(() => latestEventSource.onopen?.());
-    await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
-    expect(api.agents).toHaveBeenCalledTimes(1);
-
     act(() => latestEventSource.onopen?.());
-    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
-    expect(api.project).toHaveBeenCalledTimes(2);
-    expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(8);
-    expect(api.channels).toHaveBeenCalledTimes(2);
-    expect(api.settings).toHaveBeenCalledTimes(2);
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
+
+    expect(api.agents).toHaveBeenCalledTimes(1);
+    expect(api.project).toHaveBeenCalledTimes(1);
+    expect(api.projects).toHaveBeenCalledTimes(1);
+    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.channels).toHaveBeenCalledTimes(1);
+    expect(api.settings).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes agent details for the project_subscriptions event", async () => {

@@ -356,14 +356,6 @@ export function App() {
   useEffect(() => {
     void reload();
     const source = new EventSource("/api/events");
-    let opened = false;
-    source.onopen = () => {
-      if (opened) {
-        scheduleReload();
-        setMessageCatchUp((value) => value + 1);
-      }
-      opened = true;
-    };
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as AgentEvent;
       switch (event.kind) {
@@ -430,6 +422,12 @@ export function App() {
         case "refresh":
           scheduleReload();
           setMessageCatchUp((value) => value + 1);
+          break;
+        case "snapshot_reset":
+          if (event.data.scopes.includes("board")) scheduleReload();
+          if (event.data.scopes.includes("messages")) {
+            setMessageCatchUp((value) => value + 1);
+          }
           break;
         case "codex_event":
         case "approval_declined":

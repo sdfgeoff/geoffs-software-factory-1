@@ -124,7 +124,8 @@ impl AgentManager {
         self.emit(AgentEvent::AgentUpdated {
             agent_id: agent.id,
             data: agent.clone(),
-        });
+        })
+        .await;
         Ok(agent)
     }
 
@@ -150,7 +151,8 @@ impl AgentManager {
             self.emit(AgentEvent::Message {
                 agent_id,
                 data: user_message,
-            });
+            })
+            .await;
         }
         self.deliver_pending(agent_id).await;
         self.store
@@ -273,7 +275,8 @@ impl AgentManager {
                 self.emit(AgentEvent::Message {
                     agent_id,
                     data: message,
-                });
+                })
+                .await;
             }
             if self.store.complete_wake_event(event.id).await.is_err() {
                 return;
@@ -309,7 +312,8 @@ impl AgentManager {
         self.emit(AgentEvent::AgentUpdated {
             agent_id,
             data: agent.clone(),
-        });
+        })
+        .await;
         Ok(agent)
     }
 
@@ -322,7 +326,8 @@ impl AgentManager {
         self.emit(AgentEvent::AgentUpdated {
             agent_id,
             data: agent.clone(),
-        });
+        })
+        .await;
         drop(operation);
         let manager = self.clone();
         tokio::spawn(async move { manager.deliver_pending(agent_id).await });
@@ -441,7 +446,7 @@ impl AgentManager {
                 .store
                 .update_agent_runtime(agent_id, AgentState::AwaitingApproval, None, None, None)
                 .await;
-            self.emit(AgentEvent::ApprovalDeclined { agent_id });
+            self.emit(AgentEvent::ApprovalDeclined { agent_id }).await;
             let _ = rpc
                 .respond(event["id"].clone(), json!({"decision": "decline"}))
                 .await;
@@ -455,7 +460,8 @@ impl AgentManager {
                         data: AgentMessageDelta {
                             delta: delta.to_owned(),
                         },
-                    });
+                    })
+                    .await;
                 }
             }
             "item/completed"
@@ -468,7 +474,8 @@ impl AgentManager {
                     self.emit(AgentEvent::Message {
                         agent_id,
                         data: message,
-                    });
+                    })
+                    .await;
                 }
             }
             "turn/completed" => {
@@ -495,7 +502,8 @@ impl AgentManager {
                     self.emit(AgentEvent::AgentUpdated {
                         agent_id,
                         data: agent,
-                    });
+                    })
+                    .await;
                     if state == AgentState::Idle {
                         let manager = self.clone();
                         tokio::spawn(async move { manager.deliver_pending(agent_id).await });
@@ -509,10 +517,13 @@ impl AgentManager {
                     .unwrap_or("Codex error");
                 self.fail_agent(agent_id, message).await;
             }
-            _ => self.emit(AgentEvent::CodexEvent {
-                agent_id,
-                data: event,
-            }),
+            _ => {
+                self.emit(AgentEvent::CodexEvent {
+                    agent_id,
+                    data: event,
+                })
+                .await
+            }
         }
     }
 
@@ -525,7 +536,8 @@ impl AgentManager {
             self.emit(AgentEvent::AgentUpdated {
                 agent_id,
                 data: agent,
-            });
+            })
+            .await;
         }
     }
 

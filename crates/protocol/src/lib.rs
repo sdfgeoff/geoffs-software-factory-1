@@ -406,6 +406,9 @@ pub struct TicketWakeTicket {
 #[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     Refresh,
+    SnapshotReset {
+        data: SnapshotReset,
+    },
     AgentCreated {
         agent_id: i64,
         data: Agent,
@@ -465,6 +468,18 @@ pub enum AgentEvent {
         agent_id: i64,
         data: serde_json::Value,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SnapshotReset {
+    pub scopes: Vec<SnapshotScope>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotScope {
+    Board,
+    Messages,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -13,7 +13,10 @@ use tokio::{
 use crate::{
     domain::{Agent, AgentProjectWorktree, BoardSettings, Message, ProjectTransition, Ticket},
     error::AppError,
-    store::{MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, validate_channel},
+    store::{
+        BoardEventReplay, MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, StoredBoardEvent,
+        validate_channel,
+    },
 };
 
 mod inbox;
@@ -92,6 +95,17 @@ pub struct AgentMessageDelta {
     pub delta: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct PublishedAgentEvent {
+    pub id: Option<i64>,
+    pub event: AgentEvent,
+}
+
+pub(crate) enum AgentEventReplay {
+    Events(Vec<StoredBoardEvent>),
+    Reset { latest_id: i64 },
+}
+
 impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
     type Error = String;
 
@@ -164,7 +178,8 @@ pub struct AgentManager {
     processes: Arc<Mutex<HashMap<i64, Arc<RunningAgent>>>>,
     // ponytail: a global operation lock is enough for a local MVP; use per-agent locks if contention appears.
     operations: Arc<Mutex<()>>,
-    events: broadcast::Sender<AgentEvent>,
+    events: broadcast::Sender<PublishedAgentEvent>,
+    event_publish: Arc<Mutex<()>>,
 }
 
 struct RunningAgent {
@@ -189,6 +204,7 @@ impl AgentManager {
             processes: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(())),
             events,
+            event_publish: Arc::new(Mutex::new(())),
         }
     }
 
@@ -234,19 +250,32 @@ impl AgentManager {
         self.emit(AgentEvent::SettingsUpdated {
             agent_id: 0,
             data: settings.clone(),
-        });
+        })
+        .await;
         Ok(settings)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<PublishedAgentEvent> {
         self.events.subscribe()
     }
 
-    pub(crate) fn emit_board_message(&self, message: &Message) {
+    pub(crate) async fn replay_events(
+        &self,
+        after_id: Option<i64>,
+    ) -> Result<AgentEventReplay, AppError> {
+        let _publish = self.event_publish.lock().await;
+        Ok(match self.store.replay_board_events(after_id).await? {
+            BoardEventReplay::Events(events) => AgentEventReplay::Events(events),
+            BoardEventReplay::Reset { latest_id } => AgentEventReplay::Reset { latest_id },
+        })
+    }
+
+    pub(crate) async fn emit_board_message(&self, message: &Message) {
         self.emit(AgentEvent::BoardMessage {
             agent_id: message.agent_id.unwrap_or_default(),
             data: message.clone(),
-        });
+        })
+        .await;
     }
 
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {
@@ -310,7 +339,8 @@ impl AgentManager {
         self.emit(AgentEvent::AgentUpdated {
             agent_id,
             data: updated,
-        });
+        })
+        .await;
         Ok(Some(ProjectTransition {
             agent_id,
             ticket_id: ticket.id,
@@ -354,7 +384,8 @@ impl AgentManager {
         self.emit(AgentEvent::ProjectSubscriptions {
             agent_id,
             data: project_ids.clone(),
-        });
+        })
+        .await;
         Ok(project_ids)
     }
 
@@ -370,7 +401,8 @@ impl AgentManager {
         self.emit(AgentEvent::ProjectSubscriptions {
             agent_id,
             data: project_ids.clone(),
-        });
+        })
+        .await;
         Ok(project_ids)
     }
 
@@ -386,7 +418,8 @@ impl AgentManager {
         self.emit(AgentEvent::ProjectSubscriptions {
             agent_id,
             data: project_ids.clone(),
-        });
+        })
+        .await;
         Ok(project_ids)
     }
 
@@ -402,7 +435,8 @@ impl AgentManager {
         self.emit(AgentEvent::ChannelSubscriptions {
             agent_id,
             data: channels.clone(),
-        });
+        })
+        .await;
         Ok(channels)
     }
 
@@ -418,7 +452,8 @@ impl AgentManager {
         self.emit(AgentEvent::ChannelSubscriptions {
             agent_id,
             data: channels.clone(),
-        });
+        })
+        .await;
         Ok(channels)
     }
 
@@ -434,7 +469,8 @@ impl AgentManager {
         self.emit(AgentEvent::ChannelSubscriptions {
             agent_id,
             data: channels.clone(),
-        });
+        })
+        .await;
         Ok(channels)
     }
 
@@ -458,7 +494,8 @@ impl AgentManager {
         self.emit(AgentEvent::AgentUpdated {
             agent_id,
             data: agent.clone(),
-        });
+        })
+        .await;
         Ok(agent)
     }
 
@@ -514,7 +551,8 @@ impl AgentManager {
         self.emit(AgentEvent::AgentCreated {
             agent_id: agent.id,
             data: agent.clone(),
-        });
+        })
+        .await;
         Ok(agent)
     }
 
@@ -592,8 +630,32 @@ impl AgentManager {
         self.worktree_for_project(agent_id, project_id).await
     }
 
-    fn emit(&self, event: AgentEvent) {
-        let _ = self.events.send(event);
+    async fn emit(&self, event: AgentEvent) {
+        let _publish = self.event_publish.lock().await;
+        let (id, event) = if event.is_replayable() {
+            match multi_agent_board_protocol::AgentEvent::try_from(event.clone()) {
+                Ok(protocol_event) => match self.store.append_board_event(&protocol_event).await {
+                    Ok(id) => (Some(id), event),
+                    Err(_) => (None, AgentEvent::Refresh),
+                },
+                Err(_) => (None, AgentEvent::Refresh),
+            }
+        } else {
+            (None, event)
+        };
+        let _ = self.events.send(PublishedAgentEvent { id, event });
+    }
+}
+
+impl AgentEvent {
+    fn is_replayable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Refresh
+                | Self::AgentMessageDelta { .. }
+                | Self::ApprovalDeclined { .. }
+                | Self::CodexEvent { .. }
+        )
     }
 }
 

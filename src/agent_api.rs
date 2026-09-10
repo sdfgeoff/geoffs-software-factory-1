@@ -13,7 +13,10 @@ use multi_agent_board_protocol::{
 };
 use std::{convert::Infallible, time::Duration};
 
-use crate::{agent_runtime::AgentManager, error::AppError};
+use crate::{
+    agent_runtime::{AgentEventReplay, AgentManager},
+    error::AppError,
+};
 
 pub fn router(manager: AgentManager) -> Router {
     Router::new()
@@ -272,33 +275,94 @@ fn caller_agent(headers: &HeaderMap) -> Result<i64, AppError> {
 
 async fn events(
     State(manager): State<AgentManager>,
-) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    let cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| *id >= 0);
     let mut receiver = manager.subscribe();
+    let initial = manager.replay_events(cursor).await?;
     let stream = async_stream::stream! {
+        let mut last_sent_id = cursor.unwrap_or_default();
+        match initial {
+            AgentEventReplay::Events(events) => {
+                for event in events {
+                    last_sent_id = event.id;
+                    yield Ok(sse_event(Some(event.id), event.event));
+                }
+            }
+            AgentEventReplay::Reset { latest_id } => {
+                last_sent_id = latest_id;
+                yield Ok(sse_event(Some(latest_id), snapshot_reset()));
+            }
+        }
         loop {
             match receiver.recv().await {
-                Ok(event) => {
-                    let event = protocol::AgentEvent::try_from(event)
+                Ok(published) => {
+                    if published.id.is_some_and(|id| id <= last_sent_id) {
+                        continue;
+                    }
+                    let event = protocol::AgentEvent::try_from(published.event)
                         .unwrap_or(protocol::AgentEvent::Refresh);
-                    yield Ok(Event::default().json_data(event).unwrap());
+                    if let Some(id) = published.id {
+                        last_sent_id = id;
+                    }
+                    yield Ok(sse_event(published.id, event));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    yield Ok(Event::default().json_data(protocol::AgentEvent::Refresh).unwrap());
+                    match manager.replay_events(Some(last_sent_id)).await {
+                        Ok(AgentEventReplay::Events(events)) => {
+                            for event in events {
+                                last_sent_id = event.id;
+                                yield Ok(sse_event(Some(event.id), event.event));
+                            }
+                        }
+                        Ok(AgentEventReplay::Reset { latest_id }) => {
+                            last_sent_id = latest_id;
+                            yield Ok(sse_event(Some(latest_id), snapshot_reset()));
+                        }
+                        Err(_) => yield Ok(sse_event(None, snapshot_reset())),
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     };
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(2))
             .text("keep-alive"),
-    )
+    ))
+}
+
+fn snapshot_reset() -> protocol::AgentEvent {
+    protocol::AgentEvent::SnapshotReset {
+        data: protocol::SnapshotReset {
+            scopes: vec![
+                protocol::SnapshotScope::Board,
+                protocol::SnapshotScope::Messages,
+            ],
+        },
+    }
+}
+
+fn sse_event(id: Option<i64>, event: protocol::AgentEvent) -> Event {
+    let event = Event::default().json_data(event).unwrap();
+    match id {
+        Some(id) => event.id(id.to_string()),
+        None => event,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{future::poll_fn, pin::Pin};
+    use std::{
+        future::poll_fn,
+        pin::Pin,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use axum::{
         body::{Body, to_bytes},
@@ -309,7 +373,23 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{domain::AgentState, store::Store};
+    use crate::{
+        domain::AgentState,
+        store::{BOARD_EVENT_RETENTION, Store},
+    };
+
+    async fn next_event(response: axum::response::Response) -> String {
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        let chunk = tokio::time::timeout(
+            Duration::from_secs(2),
+            poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+        )
+        .await
+        .expect("event should arrive")
+        .expect("stream should remain open")
+        .expect("event body should be readable");
+        String::from_utf8(chunk.to_vec()).unwrap()
+    }
 
     #[tokio::test]
     async fn event_stream_uses_transport_keep_alives_without_refresh_payloads() {
@@ -338,6 +418,149 @@ mod tests {
         .expect("keep-alive body should be readable");
 
         assert_eq!(chunk.as_ref(), b": keep-alive\n\n");
+    }
+
+    #[tokio::test]
+    async fn event_stream_replays_missed_events_in_order_with_sse_ids() {
+        let store = Store::memory().await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        manager.set_settings(Some("first")).await.unwrap();
+        manager.set_settings(Some("second")).await.unwrap();
+
+        let response = router(manager)
+            .oneshot(
+                Request::get("/events")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        for (id, channel) in [(1, "first"), (2, "second")] {
+            let event = poll_fn(|context| Pin::new(&mut body).poll_next(context))
+                .await
+                .unwrap()
+                .unwrap();
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            assert!(event.contains(&format!("\nid: {id}\n")));
+            assert!(event.contains("\"kind\":\"settings_updated\""));
+            assert!(event.contains(&format!(
+                "\"merge_notification_channel\":\"{channel}\""
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_replays_after_a_server_restart() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("board-events-{unique}.sqlite3"));
+        let store = Store::open(&path).await.unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        manager.set_settings(Some("durable")).await.unwrap();
+        drop(manager);
+        store.close().await;
+
+        let store = Store::open(&path).await.unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let response = router(manager)
+            .oneshot(
+                Request::get("/events")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let event = next_event(response).await;
+        assert!(event.contains("\nid: 1\n"));
+        assert!(event.contains("\"merge_notification_channel\":\"durable\""));
+        store.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lagged_event_stream_catches_up_from_the_durable_log() {
+        let store = Store::memory().await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let response = router(manager.clone())
+            .oneshot(
+                Request::get("/events")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for index in 0..600 {
+            manager
+                .set_settings(Some(&format!("channel-{index}")))
+                .await
+                .unwrap();
+        }
+
+        let event = next_event(response).await;
+        assert!(event.contains("\nid: 1\n"));
+        assert!(event.contains("\"merge_notification_channel\":\"channel-0\""));
+    }
+
+    #[tokio::test]
+    async fn stale_cursor_receives_one_typed_scoped_reset() {
+        let store = Store::memory().await.unwrap();
+        let protocol_event = protocol::AgentEvent::SettingsUpdated {
+            agent_id: 0,
+            data: protocol::BoardSettings {
+                merge_notification_channel: None,
+            },
+        };
+        for _ in 0..=BOARD_EVENT_RETENTION {
+            store.append_board_event(&protocol_event).await.unwrap();
+        }
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let response = router(manager)
+            .oneshot(
+                Request::get("/events")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let event = next_event(response).await;
+        assert!(event.contains(&format!("\nid: {}\n", BOARD_EVENT_RETENTION + 1)));
+        assert!(
+            event.contains(r#""kind":"snapshot_reset","data":{"scopes":["board","messages"]}"#)
+        );
     }
 
     #[tokio::test]

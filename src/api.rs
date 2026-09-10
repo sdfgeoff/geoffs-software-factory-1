@@ -832,7 +832,7 @@ async fn post_message(
     let (message, wake_agent_ids) = store
         .post_message_with_wakes(&name, agent_id, &author, &input.body)
         .await?;
-    agents.emit_board_message(&message);
+    agents.emit_board_message(&message).await;
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
@@ -1908,7 +1908,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let event = events.recv().await.unwrap();
-        let crate::agent_runtime::AgentEvent::BoardMessage { agent_id, data } = event else {
+        assert_eq!(event.id, Some(1));
+        let crate::agent_runtime::AgentEvent::BoardMessage { agent_id, data } = event.event else {
             panic!("expected board message event");
         };
         assert_eq!(agent_id, 0);
