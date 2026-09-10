@@ -409,6 +409,8 @@ pub enum AgentEvent {
     SnapshotReset {
         data: SnapshotReset,
     },
+    ProjectsChanged,
+    ChannelsChanged,
     AgentCreated {
         agent_id: i64,
         data: Agent,

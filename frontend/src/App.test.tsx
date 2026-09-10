@@ -483,6 +483,41 @@ describe("App agent routes", () => {
     expect(api.settings).toHaveBeenCalledTimes(3);
   });
 
+  it("refreshes only project and channel snapshots for their durable events", async () => {
+    const channel = {
+      name: "releases",
+      description: "Release updates",
+      most_recent_message_at: null,
+    };
+    vi.mocked(api.project)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(project);
+    vi.mocked(api.projects)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([project]);
+    vi.mocked(api.channels)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([channel]);
+    render(<App />);
+    await screen.findByRole("heading", { name: "Agent settings" });
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ kind: "projects_changed" }),
+      } as MessageEvent);
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ kind: "channels_changed" }),
+      } as MessageEvent);
+    });
+
+    await waitFor(() => expect(api.projects).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.channels).toHaveBeenCalledTimes(2));
+    expect(api.project).toHaveBeenCalledTimes(2);
+    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.agents).toHaveBeenCalledTimes(1);
+    expect(api.settings).toHaveBeenCalledTimes(1);
+  });
+
   it("coalesces visible-agent deltas and ignores unrelated agents", async () => {
     window.history.replaceState(null, "", "#agents/1");
     render(<App />);

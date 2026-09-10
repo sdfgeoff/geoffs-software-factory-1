@@ -101,10 +101,7 @@ mod tests {
             store.replay_board_events(Some(0)).await.unwrap(),
             BoardEventReplay::Reset { latest_id } if latest_id == BOARD_EVENT_RETENTION + 1
         ));
-        let BoardEventReplay::Events(events) = store
-            .replay_board_events(Some(1))
-            .await
-            .unwrap()
+        let BoardEventReplay::Events(events) = store.replay_board_events(Some(1)).await.unwrap()
         else {
             panic!("retained cursor should replay");
         };

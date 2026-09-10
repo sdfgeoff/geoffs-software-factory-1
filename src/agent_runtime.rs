@@ -29,6 +29,8 @@ use rpc::RpcPeer;
 #[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     Refresh,
+    ProjectsChanged,
+    ChannelsChanged,
     AgentCreated {
         agent_id: i64,
         data: Agent,
@@ -112,6 +114,8 @@ impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
     fn try_from(value: AgentEvent) -> Result<Self, Self::Error> {
         Ok(match value {
             AgentEvent::Refresh => Self::Refresh,
+            AgentEvent::ProjectsChanged => Self::ProjectsChanged,
+            AgentEvent::ChannelsChanged => Self::ChannelsChanged,
             AgentEvent::AgentCreated { agent_id, data } => Self::AgentCreated {
                 agent_id,
                 data: data.into(),
@@ -276,6 +280,14 @@ impl AgentManager {
             data: message.clone(),
         })
         .await;
+    }
+
+    pub(crate) async fn emit_projects_changed(&self) {
+        self.emit(AgentEvent::ProjectsChanged).await;
+    }
+
+    pub(crate) async fn emit_channels_changed(&self) {
+        self.emit(AgentEvent::ChannelsChanged).await;
     }
 
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {

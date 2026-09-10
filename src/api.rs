@@ -127,6 +127,7 @@ async fn get_project(
 
 async fn set_project(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Json(input): Json<SetProjectRequest>,
 ) -> Result<Json<protocol::Project>, AppError> {
     let canonical = canonical_git_root(&input.path).await?;
@@ -146,6 +147,7 @@ async fn set_project(
             .await?;
         store.select_project(project.id).await?
     };
+    agents.emit_projects_changed().await;
     Ok(Json(project.into()))
 }
 
@@ -164,6 +166,7 @@ async fn list_projects(
 
 async fn register_project(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Json(input): Json<RegisterProjectRequest>,
 ) -> Result<Json<protocol::Project>, AppError> {
     let canonical = canonical_git_root(&input.path).await?;
@@ -171,37 +174,39 @@ async fn register_project(
     let path = canonical
         .to_str()
         .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
-    Ok(Json(
-        store
-            .register_project(
-                &input.name,
-                path,
-                &input.default_branch,
-                input.completion_workflow.into(),
-            )
-            .await?
-            .into(),
-    ))
+    let project = store
+        .register_project(
+            &input.name,
+            path,
+            &input.default_branch,
+            input.completion_workflow.into(),
+        )
+        .await?;
+    agents.emit_projects_changed().await;
+    Ok(Json(project.into()))
 }
 
 async fn archive_project(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Path(id): Path<i64>,
 ) -> Result<Json<protocol::Project>, AppError> {
-    Ok(Json(store.archive_project(id).await?.into()))
+    let project = store.archive_project(id).await?;
+    agents.emit_projects_changed().await;
+    Ok(Json(project.into()))
 }
 
 async fn set_project_completion_workflow(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     Path(id): Path<i64>,
     Json(input): Json<SetProjectCompletionWorkflowRequest>,
 ) -> Result<Json<protocol::Project>, AppError> {
-    Ok(Json(
-        store
-            .set_project_completion_workflow(id, input.completion_workflow.into())
-            .await?
-            .into(),
-    ))
+    let project = store
+        .set_project_completion_workflow(id, input.completion_workflow.into())
+        .await?;
+    agents.emit_projects_changed().await;
+    Ok(Json(project.into()))
 }
 
 async fn canonical_git_root(path: &str) -> Result<PathBuf, AppError> {
@@ -782,6 +787,7 @@ async fn get_channel(
 
 async fn create_channel(
     State(store): State<Store>,
+    Extension(agents): Extension<AgentManager>,
     headers: HeaderMap,
     Json(input): Json<CreateChannelRequest>,
 ) -> Result<Json<protocol::Channel>, AppError> {
@@ -790,12 +796,11 @@ async fn create_channel(
     {
         return Err(AppError::forbidden("agent identity is invalid"));
     }
-    Ok(Json(
-        store
-            .create_channel(&input.name, &input.description)
-            .await?
-            .into(),
-    ))
+    let channel = store
+        .create_channel(&input.name, &input.description)
+        .await?;
+    agents.emit_channels_changed().await;
+    Ok(Json(channel.into()))
 }
 
 async fn read_messages(
@@ -841,10 +846,13 @@ async fn post_message(
 
 #[cfg(test)]
 mod tests {
+    use std::{future::poll_fn, pin::Pin, time::Duration};
+
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use futures_core::Stream;
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -1182,6 +1190,111 @@ mod tests {
             .unwrap();
         assert_eq!(archived.status(), StatusCode::OK);
 
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_and_channel_mutations_replay_after_reconnect() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("mab-event-api-{unique}"));
+        let repository = base.join("repo");
+        let branch = initialize_repository(&repository);
+        let store = Store::memory().await.unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(store, manager.clone()).merge(crate::agent_api::router(manager));
+
+        let channel = app
+            .clone()
+            .oneshot(
+                Request::post("/channels")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"name":"releases","description":"Release updates"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(channel.status(), StatusCode::OK);
+
+        let project_body = serde_json::json!({
+            "name": "Replay project",
+            "path": repository,
+            "default_branch": branch,
+        });
+        let project = app
+            .clone()
+            .oneshot(
+                Request::post("/projects")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(project_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(project.status(), StatusCode::OK);
+        let project: Value =
+            serde_json::from_slice(&to_bytes(project.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        for request in [
+            Request::put("/project")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "path": project["path"] }).to_string(),
+                ))
+                .unwrap(),
+            Request::put(format!("/projects/{}/completion-workflow", project["id"]))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"completion_workflow":"external"}"#))
+                .unwrap(),
+            Request::post(format!("/projects/{}/archive", project["id"]))
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+
+        let response = app
+            .oneshot(
+                Request::get("/events")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        for (id, kind) in [
+            (1, "channels_changed"),
+            (2, "projects_changed"),
+            (3, "projects_changed"),
+            (4, "projects_changed"),
+            (5, "projects_changed"),
+        ] {
+            let chunk = tokio::time::timeout(
+                Duration::from_secs(2),
+                poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+            )
+            .await
+            .expect("replayed event should arrive")
+            .unwrap()
+            .unwrap();
+            let event = String::from_utf8(chunk.to_vec()).unwrap();
+            assert!(event.contains(&format!("\"kind\":\"{kind}\"")));
+            assert!(event.contains(&format!("\nid: {id}\n")));
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
 

@@ -275,6 +275,8 @@ export interface TicketWakeTicket {
 export type AgentEvent =
   | { kind: "refresh" }
   | { kind: "snapshot_reset"; data: SnapshotReset }
+  | { kind: "projects_changed" }
+  | { kind: "channels_changed" }
   | { kind: "agent_created"; agent_id: number; data: Agent }
   | { kind: "agent_updated"; agent_id: number; data: Agent }
   | { kind: "agent_message_delta"; agent_id: number; data: AgentMessageDelta }

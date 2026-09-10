@@ -450,9 +450,7 @@ mod tests {
             let event = String::from_utf8(event.to_vec()).unwrap();
             assert!(event.contains(&format!("\nid: {id}\n")));
             assert!(event.contains("\"kind\":\"settings_updated\""));
-            assert!(event.contains(&format!(
-                "\"merge_notification_channel\":\"{channel}\""
-            )));
+            assert!(event.contains(&format!("\"merge_notification_channel\":\"{channel}\"")));
         }
     }
 

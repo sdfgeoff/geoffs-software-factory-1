@@ -301,6 +301,14 @@ export function App() {
     }
   }, []);
 
+  const reloadChannels = useCallback(async () => {
+    try {
+      setChannels(await api.channels());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
   const mergeTickets = useCallback((updates: Ticket | Ticket[]) => {
     const next = Array.isArray(updates) ? updates : [updates];
     setTickets((current) => mergeByRevision(current, next.map(summarizeTicket)));
@@ -429,6 +437,12 @@ export function App() {
             setMessageCatchUp((value) => value + 1);
           }
           break;
+        case "projects_changed":
+          void reloadProjects();
+          break;
+        case "channels_changed":
+          void reloadChannels();
+          break;
         case "codex_event":
         case "approval_declined":
           break;
@@ -444,7 +458,7 @@ export function App() {
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
       if (deltaTimer.current !== null) window.clearTimeout(deltaTimer.current);
     };
-  }, [mergeAgent, mergeTickets, reload, scheduleReload]);
+  }, [mergeAgent, mergeTickets, reload, reloadChannels, reloadProjects, scheduleReload]);
 
   useEffect(() => {
     pendingDelta.current = null;
