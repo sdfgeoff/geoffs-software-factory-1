@@ -408,7 +408,7 @@ async fn reserve_tickets(
             .agent_id
             .ok_or_else(|| AppError::bad_request("agent_id is required"))?,
     };
-    let (tickets, wake_agent_ids) = store
+    let (tickets, wake_agent_ids, activities) = store
         .reserve_tickets_with_wakes(
             &input.ticket_ids,
             agent_id,
@@ -416,6 +416,9 @@ async fn reserve_tickets(
             input.administrative_override,
         )
         .await?;
+    agents
+        .emit_ticket_activities(caller.unwrap_or(0), activities)
+        .await;
     for ticket in &tickets {
         agents
             .emit_ticket_updated(caller.unwrap_or(0), ticket)
@@ -465,7 +468,7 @@ async fn update_ticket(
         Patch::Null => Some(None),
         Patch::Value(value) => Some(Some(value)),
     };
-    let (ticket, wake_agent_ids) = store
+    let (ticket, wake_agent_ids, activities) = store
         .update_ticket_with_wakes(
             id,
             TicketChanges {
@@ -483,6 +486,9 @@ async fn update_ticket(
             },
         )
         .await?;
+    agents
+        .emit_ticket_activities(caller.unwrap_or(0), activities)
+        .await;
     agents
         .emit_ticket_updated(caller.unwrap_or(0), &ticket)
         .await;
@@ -836,7 +842,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::domain::TicketState;
+    use crate::{agent_runtime::AgentEvent, domain::TicketState};
 
     fn initialize_repository(path: &std::path::Path) -> String {
         std::fs::create_dir_all(path).unwrap();
@@ -2016,6 +2022,105 @@ mod tests {
                 .unwrap();
         assert_eq!(activity["entries"][0]["action"], "reservation_cleared");
         assert_eq!(activity["entries"][0]["previous_reserved_for_agent_id"], 1);
+    }
+
+    #[tokio::test]
+    async fn reservation_and_cancellation_activity_is_published_exactly() {
+        let store = Store::memory().await.unwrap();
+        let first = store.create_agent("first", "/tmp/first").await.unwrap();
+        let second = store.create_agent("second", "/tmp/second").await.unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Publish activity".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .reserve_tickets(&[ticket.id], first.id, None, false)
+            .await
+            .unwrap()
+            .remove(0);
+        let agents = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let mut events = agents.subscribe();
+        let app = router(store.clone(), agents);
+
+        let overridden = app
+            .clone()
+            .oneshot(
+                Request::post("/ticket-reservations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"ticket_ids":[{}],"agent_id":{},"administrative_override":true}}"#,
+                        ticket.id, second.id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(overridden.status(), StatusCode::OK);
+        let override_event = events.recv().await.unwrap();
+        let AgentEvent::TicketActivityCreated { data, .. } = override_event.event else {
+            panic!("expected reservation activity before ticket update");
+        };
+        assert_eq!(data.action, "reservation_override");
+        assert_eq!(data.previous_reserved_for_agent_id, Some(first.id));
+        assert_eq!(data.reserved_for_agent_id, Some(second.id));
+        assert!(override_event.id.is_some());
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            AgentEvent::TicketUpdated { .. }
+        ));
+
+        let cancelled = app
+            .oneshot(
+                Request::patch(format!("/tickets/{}", ticket.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"state":"cancelled","reserved_for_agent_id":null,"expected_revision":{}}}"#,
+                        ticket.revision + 1
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cleared_event = events.recv().await.unwrap();
+        let cancelled_event = events.recv().await.unwrap();
+        let actions = [&cleared_event, &cancelled_event].map(|event| match &event.event {
+            AgentEvent::TicketActivityCreated { data, .. } => data.action.as_str(),
+            _ => panic!("expected ticket activity event"),
+        });
+        assert_eq!(actions, ["reservation_cleared", "cancelled"]);
+        assert_ne!(cleared_event.id, cancelled_event.id);
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            AgentEvent::TicketUpdated { .. }
+        ));
+
+        let replay = store.replay_board_events(override_event.id).await.unwrap();
+        let crate::store::BoardEventReplay::Events(replayed) = replay else {
+            panic!("expected replayable activity events");
+        };
+        assert_eq!(
+            replayed
+                .iter()
+                .filter_map(|event| match &event.event {
+                    protocol::AgentEvent::TicketActivityCreated { data, .. } => {
+                        Some(data.action.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["reservation_cleared", "cancelled"]
+        );
     }
 
     #[tokio::test]

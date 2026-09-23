@@ -295,18 +295,21 @@ impl AgentManager {
         Ok(activity)
     }
 
-    pub(crate) async fn emit_latest_ticket_activity(&self, ticket_id: i64, agent_id: i64) {
-        if let Ok((entries, _)) = self
-            .store
-            .ticket_activity_page(ticket_id, None, Some(1))
-            .await
-            && let Some(activity) = entries.into_iter().next()
-        {
-            self.emit(AgentEvent::TicketActivityCreated {
-                agent_id,
-                data: activity,
-            })
-            .await;
+    pub(crate) async fn emit_ticket_activity(&self, agent_id: i64, activity: TicketActivity) {
+        self.emit(AgentEvent::TicketActivityCreated {
+            agent_id,
+            data: activity,
+        })
+        .await;
+    }
+
+    pub(crate) async fn emit_ticket_activities(
+        &self,
+        agent_id: i64,
+        activities: Vec<TicketActivity>,
+    ) {
+        for activity in activities {
+            self.emit_ticket_activity(agent_id, activity).await;
         }
     }
 

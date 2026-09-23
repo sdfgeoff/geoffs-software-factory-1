@@ -43,7 +43,7 @@ impl AgentManager {
             ));
         }
         let target_branch = git_text(&project.path, &["symbolic-ref", "--short", "HEAD"]).await?;
-        let (ticket, wake_agent_ids) = self
+        let (ticket, wake_agent_ids, activity) = self
             .store
             .submit_review_with_wakes(
                 ticket_id,
@@ -58,7 +58,7 @@ impl AgentManager {
                 expected_revision,
             )
             .await?;
-        self.emit_latest_ticket_activity(ticket.id, agent_id).await;
+        self.emit_ticket_activity(agent_id, activity).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
@@ -76,11 +76,11 @@ impl AgentManager {
         agent_id: i64,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
-        let ticket = self
+        let (ticket, activity) = self
             .store
-            .claim_review(ticket_id, agent_id, expected_revision)
+            .claim_review_with_activity(ticket_id, agent_id, expected_revision)
             .await?;
-        self.emit_latest_ticket_activity(ticket.id, agent_id).await;
+        self.emit_ticket_activity(agent_id, activity).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
@@ -113,11 +113,11 @@ impl AgentManager {
         feedback: &str,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
-        let ticket = self
+        let (ticket, activity) = self
             .store
-            .request_changes(ticket_id, agent_id, feedback, expected_revision)
+            .request_changes_with_activity(ticket_id, agent_id, feedback, expected_revision)
             .await?;
-        self.emit_latest_ticket_activity(ticket.id, agent_id).await;
+        self.emit_ticket_activity(agent_id, activity).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
@@ -224,7 +224,7 @@ impl AgentManager {
                         body: &body,
                         deduplication_key: &key,
                     });
-            let (ticket, message, wake_agent_ids) = self
+            let (ticket, message, wake_agent_ids, activity) = self
                 .store
                 .approve_external_review_with_wakes(
                     ticket_id,
@@ -234,8 +234,7 @@ impl AgentManager {
                     notification,
                 )
                 .await?;
-            self.emit_latest_ticket_activity(ticket.id, reviewer_id)
-                .await;
+            self.emit_ticket_activity(reviewer_id, activity).await;
             drop(operation);
             if let Some(message) = message.as_ref() {
                 self.emit_board_message(message).await;
@@ -323,7 +322,8 @@ impl AgentManager {
             .agent(reviewer_id)
             .await?
             .ok_or_else(|| AppError::not_found("reviewer not found"))?;
-        let (ticket, wake_agent_ids) = if let Some(channel) = merge_notification_channel.as_deref()
+        let (ticket, wake_agent_ids, activity) = if let Some(channel) =
+            merge_notification_channel.as_deref()
         {
             let source_branch = ticket.implementation_branch.as_deref().unwrap_or("unknown");
             let body = format!(
@@ -331,7 +331,7 @@ impl AgentManager {
                 ticket.id, ticket.title, reviewer.name
             );
             let key = format!("ticket-merge:{}:{commit}", ticket.id);
-            let (ticket, _message, wake_agent_ids) = self
+            let (ticket, _message, wake_agent_ids, activity) = self
                 .store
                 .complete_review_and_post_message(
                     ticket_id,
@@ -346,17 +346,15 @@ impl AgentManager {
                     },
                 )
                 .await?;
-            (ticket, wake_agent_ids)
+            (ticket, wake_agent_ids, activity)
         } else {
-            (
-                self.store
-                    .complete_review(ticket_id, reviewer_id, commit, expected_revision)
-                    .await?,
-                Vec::new(),
-            )
+            let (ticket, activity) = self
+                .store
+                .complete_review_with_activity(ticket_id, reviewer_id, commit, expected_revision)
+                .await?;
+            (ticket, Vec::new(), activity)
         };
-        self.emit_latest_ticket_activity(ticket.id, reviewer_id)
-            .await;
+        self.emit_ticket_activity(reviewer_id, activity).await;
         drop(operation);
         for agent_id in wake_agent_ids {
             self.deliver_pending(agent_id).await;
@@ -376,16 +374,16 @@ impl AgentManager {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
-        let ticket = self
+        let (ticket, activity) = self
             .store
-            .set_external_change_url(
+            .set_external_change_url_with_activity(
                 ticket_id,
                 external_change_url,
                 actor_agent_id,
                 expected_revision,
             )
             .await?;
-        self.emit_latest_ticket_activity(ticket.id, actor_agent_id.unwrap_or_default())
+        self.emit_ticket_activity(actor_agent_id.unwrap_or_default(), activity)
             .await;
         self.emit(AgentEvent::ExternalChangeUpdated {
             agent_id: actor_agent_id.unwrap_or_default(),
@@ -402,11 +400,16 @@ impl AgentManager {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
-        let ticket = self
+        let (ticket, activity) = self
             .store
-            .return_external_merge(ticket_id, reason, actor_agent_id, expected_revision)
+            .return_external_merge_with_activity(
+                ticket_id,
+                reason,
+                actor_agent_id,
+                expected_revision,
+            )
             .await?;
-        self.emit_latest_ticket_activity(ticket.id, actor_agent_id.unwrap_or_default())
+        self.emit_ticket_activity(actor_agent_id.unwrap_or_default(), activity)
             .await;
         self.emit(AgentEvent::ExternalMergeReturned {
             agent_id: actor_agent_id.unwrap_or_default(),
@@ -467,7 +470,7 @@ impl AgentManager {
                 body: &body,
                 deduplication_key: &key,
             });
-        let (ticket, message, wake_agent_ids) = self
+        let (ticket, message, wake_agent_ids, activity) = self
             .store
             .complete_external_merge_with_message(
                 ticket_id,
@@ -478,7 +481,7 @@ impl AgentManager {
                 notification,
             )
             .await?;
-        self.emit_latest_ticket_activity(ticket.id, actor_agent_id.unwrap_or_default())
+        self.emit_ticket_activity(actor_agent_id.unwrap_or_default(), activity)
             .await;
         drop(operation);
         if let Some(message) = message.as_ref() {
@@ -560,6 +563,87 @@ mod tests {
     };
 
     use super::{git_output, git_text};
+
+    #[tokio::test]
+    async fn review_event_uses_the_activity_inserted_by_its_mutation() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let reviewer = store
+            .create_agent("reviewer", "/tmp/reviewer")
+            .await
+            .unwrap();
+        store
+            .set_agent_scopes(reviewer.id, &["approve_review".into()])
+            .await
+            .unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Exact activity".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = store
+            .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let project = store
+            .project_by_id(ticket.project_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let ticket = store
+            .submit_review(
+                ticket.id,
+                worker.id,
+                ReviewSubmission {
+                    implementation_branch: Some("tickets/exact-activity"),
+                    commit: "review-commit",
+                    target_branch: "main",
+                    project_id: project.id,
+                    project_path: &project.path,
+                },
+                Some(ticket.revision),
+            )
+            .await
+            .unwrap();
+        store
+            .execute_test_sql(
+                "CREATE TRIGGER append_activity_after_review_claim \
+                 AFTER INSERT ON ticket_activity WHEN NEW.action = 'review_claimed' \
+                 BEGIN INSERT INTO ticket_activity (ticket_id, action, detail) \
+                 VALUES (NEW.ticket_id, 'comment', 'concurrent activity'); END",
+            )
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let mut events = manager.subscribe();
+
+        manager
+            .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+            .await
+            .unwrap();
+
+        let event = events.recv().await.unwrap();
+        let AgentEvent::TicketActivityCreated { data, .. } = event.event else {
+            panic!("expected review activity event");
+        };
+        assert_eq!(data.action, "review_claimed");
+        assert_eq!(data.actor_agent_id, Some(reviewer.id));
+        let (latest, _) = store
+            .ticket_activity_page(ticket.id, None, Some(1))
+            .await
+            .unwrap();
+        assert_eq!(latest[0].action, "comment");
+        assert_ne!(data.id, latest[0].id);
+    }
 
     #[tokio::test]
     async fn board_merges_valid_reviews_after_the_target_advances() {

@@ -409,7 +409,7 @@ impl Store {
         &self,
         id: i64,
         changes: TicketChanges,
-    ) -> Result<(Ticket, Vec<i64>), AppError> {
+    ) -> Result<(Ticket, Vec<i64>, Vec<TicketActivity>), AppError> {
         let current = self
             .ticket(id)
             .await?
@@ -497,16 +497,21 @@ impl Store {
         }
         replace_ticket_dependencies(&mut transaction, id, &blocker_ids).await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
+        let mut activities = Vec::new();
         if current.reserved_for_agent_id.is_some() && ticket.reserved_for_agent_id.is_none() {
-            sqlx::query(
+            let activity = sqlx::query_as(
                 "INSERT INTO ticket_activity \
                  (ticket_id, action, previous_reserved_for_agent_id, reserved_for_agent_id) \
-                 VALUES (?, 'reservation_cleared', ?, NULL)",
+                 VALUES (?, 'reservation_cleared', ?, NULL) \
+                 RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+                 previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+                 review_commit, review_target_branch, created_at",
             )
             .bind(ticket.id)
             .bind(current.reserved_for_agent_id)
-            .execute(&mut *transaction)
+            .fetch_one(&mut *transaction)
             .await?;
+            activities.push(activity);
             sqlx::query(
                 "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
                  AND kind = 'ticket.reserved' \
@@ -517,10 +522,16 @@ impl Store {
             .await?;
         }
         if current.state != TicketState::Cancelled && ticket.state == TicketState::Cancelled {
-            sqlx::query("INSERT INTO ticket_activity (ticket_id, action) VALUES (?, 'cancelled')")
-                .bind(ticket.id)
-                .execute(&mut *transaction)
-                .await?;
+            let activity = sqlx::query_as(
+                "INSERT INTO ticket_activity (ticket_id, action) VALUES (?, 'cancelled') \
+                 RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+                 previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+                 review_commit, review_target_branch, created_at",
+            )
+            .bind(ticket.id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            activities.push(activity);
             sqlx::query(
                 "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
                  AND kind LIKE 'ticket.%' \
@@ -551,7 +562,7 @@ impl Store {
             Vec::new()
         };
         transaction.commit().await?;
-        Ok((ticket, wake_agent_ids))
+        Ok((ticket, wake_agent_ids, activities))
     }
 
     pub async fn reserve_tickets(
@@ -578,7 +589,7 @@ impl Store {
         agent_id: i64,
         actor_agent_id: Option<i64>,
         administrative_override: bool,
-    ) -> Result<(Vec<Ticket>, Vec<i64>), AppError> {
+    ) -> Result<(Vec<Ticket>, Vec<i64>, Vec<TicketActivity>), AppError> {
         if ticket_ids.is_empty() {
             return Err(AppError::bad_request("at least one ticket ID is required"));
         }
@@ -632,6 +643,7 @@ impl Store {
 
         let mut reserved = Vec::with_capacity(tickets.len());
         let mut wake_agent_ids = HashSet::new();
+        let mut activities = Vec::new();
         for ticket in tickets {
             let changed = ticket.reserved_for_agent_id != Some(agent_id);
             if changed {
@@ -655,17 +667,21 @@ impl Store {
                     )));
                 }
                 if administrative_override {
-                    sqlx::query(
+                    let activity = sqlx::query_as(
                         "INSERT INTO ticket_activity \
                          (ticket_id, action, actor_agent_id, previous_reserved_for_agent_id, reserved_for_agent_id) \
-                         VALUES (?, 'reservation_override', ?, ?, ?)",
+                         VALUES (?, 'reservation_override', ?, ?, ?) \
+                         RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+                         previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+                         review_commit, review_target_branch, created_at",
                     )
                     .bind(ticket.id)
                     .bind(actor_agent_id)
                     .bind(ticket.reserved_for_agent_id)
                     .bind(agent_id)
-                    .execute(&mut *transaction)
+                    .fetch_one(&mut *transaction)
                     .await?;
+                    activities.push(activity);
                 }
             }
             let updated = ticket_in_transaction(&mut transaction, ticket.id).await?;
@@ -685,7 +701,7 @@ impl Store {
         transaction.commit().await?;
         let mut wake_agent_ids = wake_agent_ids.into_iter().collect::<Vec<_>>();
         wake_agent_ids.sort_unstable();
-        Ok((reserved, wake_agent_ids))
+        Ok((reserved, wake_agent_ids, activities))
     }
 
     pub async fn ticket_activity(&self, ticket_id: i64) -> Result<Vec<TicketActivity>, AppError> {
@@ -749,19 +765,19 @@ impl Store {
                 "comment must contain between 1 and 10000 characters",
             ));
         }
-        let ticket = self
-            .ticket(ticket_id)
+        let mut transaction = self.pool.begin().await?;
+        let ticket = ticket_in_transaction_optional(&mut transaction, ticket_id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
         let author = if let Some(agent_id) = actor_agent_id {
-            self.agent(agent_id)
+            sqlx::query_scalar("SELECT name FROM agents WHERE id = ?")
+                .bind(agent_id)
+                .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or_else(|| AppError::not_found("agent not found"))?
-                .name
         } else {
             "human".to_owned()
         };
-        let mut transaction = self.pool.begin().await?;
         let activity: TicketActivity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, author, actor_agent_id) \
              VALUES (?, 'comment', ?, ?, ?) RETURNING id, ticket_id, action, detail, author, \
@@ -913,7 +929,7 @@ impl Store {
         agent_id: i64,
         submission: ReviewSubmission<'_>,
         expected_revision: Option<i64>,
-    ) -> Result<(Ticket, Vec<i64>), AppError> {
+    ) -> Result<(Ticket, Vec<i64>, TicketActivity), AppError> {
         let current = self
             .ticket(id)
             .await?
@@ -952,16 +968,19 @@ impl Store {
             )
         })?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'review_submitted', ?, ?, ?, ?)",
+             VALUES (?, 'review_submitted', ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(agent_id)
         .bind(&ticket.implementation_branch)
         .bind(&ticket.review_commit)
         .bind(&ticket.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         let wake_agent_ids = insert_pending_ticket_wakes(
             &mut transaction,
@@ -971,7 +990,7 @@ impl Store {
         )
         .await?;
         transaction.commit().await?;
-        Ok((ticket, wake_agent_ids))
+        Ok((ticket, wake_agent_ids, activity))
     }
 
     pub async fn claim_review(
@@ -980,6 +999,18 @@ impl Store {
         reviewer_id: i64,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        Ok(self
+            .claim_review_with_activity(id, reviewer_id, expected_revision)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn claim_review_with_activity(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        expected_revision: Option<i64>,
+    ) -> Result<(Ticket, TicketActivity), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
@@ -1009,19 +1040,22 @@ impl Store {
             AppError::conflict("review is unavailable, belongs to this agent, or has changed")
         })?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'review_claimed', ?, ?, ?, ?)",
+             VALUES (?, 'review_claimed', ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(reviewer_id)
         .bind(&ticket.implementation_branch)
         .bind(&ticket.review_commit)
         .bind(&ticket.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(ticket)
+        Ok((ticket, activity))
     }
 
     pub async fn request_changes(
@@ -1031,6 +1065,19 @@ impl Store {
         feedback: &str,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        Ok(self
+            .request_changes_with_activity(id, reviewer_id, feedback, expected_revision)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn request_changes_with_activity(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        feedback: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<(Ticket, TicketActivity), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
@@ -1064,9 +1111,12 @@ impl Store {
             AppError::conflict("review is not assigned to this agent or has changed")
         })?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'changes_requested', ?, ?, ?, ?, ?)",
+             VALUES (?, 'changes_requested', ?, ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(feedback.trim())
@@ -1074,10 +1124,10 @@ impl Store {
         .bind(&ticket.implementation_branch)
         .bind(&ticket.review_commit)
         .bind(&ticket.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(ticket)
+        Ok((ticket, activity))
     }
 
     pub async fn approve_external_review(
@@ -1100,7 +1150,7 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
         notification: Option<MergeNotification<'_>>,
-    ) -> Result<(Ticket, Option<Message>, Vec<i64>), AppError> {
+    ) -> Result<(Ticket, Option<Message>, Vec<i64>, TicketActivity), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
@@ -1129,16 +1179,19 @@ impl Store {
         .ok_or_else(|| {
             AppError::conflict("external review is not assigned to this agent or has changed")
         })?;
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'external_review_approved', ?, ?, ?, ?)",
+             VALUES (?, 'external_review_approved', ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(reviewer_id)
         .bind(&ticket.implementation_branch)
         .bind(&ticket.review_commit)
         .bind(&ticket.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         sqlx::query(
             "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
@@ -1176,7 +1229,7 @@ impl Store {
         wake_agent_ids.sort_unstable();
         wake_agent_ids.dedup();
         transaction.commit().await?;
-        Ok((ticket, message, wake_agent_ids))
+        Ok((ticket, message, wake_agent_ids, activity))
     }
 
     pub async fn set_external_change_url(
@@ -1186,6 +1239,24 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        Ok(self
+            .set_external_change_url_with_activity(
+                id,
+                external_change_url,
+                actor_agent_id,
+                expected_revision,
+            )
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn set_external_change_url_with_activity(
+        &self,
+        id: i64,
+        external_change_url: &str,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<(Ticket, TicketActivity), AppError> {
         let url = external_change_url.trim();
         if url.is_empty() || url.chars().count() > 2_048 {
             return Err(AppError::bad_request(
@@ -1211,7 +1282,7 @@ impl Store {
         value: &str,
         action: &str,
         actor_agent_id: Option<i64>,
-    ) -> Result<Ticket, AppError> {
+    ) -> Result<(Ticket, TicketActivity), AppError> {
         let current = self
             .ticket(id)
             .await?
@@ -1249,9 +1320,12 @@ impl Store {
         if result.rows_affected() == 0 {
             return Err(AppError::conflict("ticket was changed by another user"));
         }
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(action)
@@ -1260,11 +1334,11 @@ impl Store {
         .bind(&current.implementation_branch)
         .bind(&current.review_commit)
         .bind(&current.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
-        Ok(ticket)
+        Ok((ticket, activity))
     }
 
     pub async fn return_external_merge(
@@ -1274,6 +1348,19 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
+        Ok(self
+            .return_external_merge_with_activity(id, reason, actor_agent_id, expected_revision)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn return_external_merge_with_activity(
+        &self,
+        id: i64,
+        reason: &str,
+        actor_agent_id: Option<i64>,
+        expected_revision: Option<i64>,
+    ) -> Result<(Ticket, TicketActivity), AppError> {
         let reason = reason.trim();
         if reason.is_empty() || reason.chars().count() > 10_000 {
             return Err(AppError::bad_request(
@@ -1303,9 +1390,12 @@ impl Store {
                 "ticket is not awaiting an external merge or has changed",
             ));
         }
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'external_merge_returned', ?, ?, ?, ?, ?)",
+             VALUES (?, 'external_merge_returned', ?, ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(reason)
@@ -1313,11 +1403,11 @@ impl Store {
         .bind(&current.implementation_branch)
         .bind(&current.review_commit)
         .bind(&current.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
-        Ok(ticket)
+        Ok((ticket, activity))
     }
 
     pub async fn complete_external_merge(
@@ -1349,7 +1439,7 @@ impl Store {
         actor_agent_id: Option<i64>,
         expected_revision: Option<i64>,
         notification: Option<MergeNotification<'_>>,
-    ) -> Result<(Ticket, Option<Message>, Vec<i64>), AppError> {
+    ) -> Result<(Ticket, Option<Message>, Vec<i64>, TicketActivity), AppError> {
         let confirmation = confirmation.trim();
         if confirmation.is_empty() || confirmation.chars().count() > 10_000 {
             return Err(AppError::bad_request(
@@ -1387,9 +1477,12 @@ impl Store {
                 "ticket is not awaiting an external merge or has changed",
             ));
         }
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'external_merge_completed', ?, ?, ?, ?, ?)",
+             VALUES (?, 'external_merge_completed', ?, ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(confirmation)
@@ -1397,7 +1490,7 @@ impl Store {
         .bind(&current.implementation_branch)
         .bind(&current.review_commit)
         .bind(&current.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         let ticket = ticket_in_transaction(&mut transaction, id).await?;
         let (message, wake_agent_ids) = if let Some(notification) = notification {
@@ -1417,7 +1510,7 @@ impl Store {
             (None, Vec::new())
         };
         transaction.commit().await?;
-        Ok((ticket, message, wake_agent_ids))
+        Ok((ticket, message, wake_agent_ids, activity))
     }
 
     async fn require_external_lifecycle_authority(
@@ -1449,6 +1542,19 @@ impl Store {
             .0)
     }
 
+    pub(crate) async fn complete_review_with_activity(
+        &self,
+        id: i64,
+        reviewer_id: i64,
+        commit: &str,
+        expected_revision: Option<i64>,
+    ) -> Result<(Ticket, TicketActivity), AppError> {
+        let (ticket, _message, activity) = self
+            .complete_review_with_message(id, reviewer_id, commit, expected_revision, None)
+            .await?;
+        Ok((ticket, activity))
+    }
+
     pub(crate) async fn complete_review_and_post_message(
         &self,
         id: i64,
@@ -1456,8 +1562,8 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
         notification: MergeNotification<'_>,
-    ) -> Result<(Ticket, Message, Vec<i64>), AppError> {
-        let (ticket, message) = self
+    ) -> Result<(Ticket, Message, Vec<i64>, TicketActivity), AppError> {
+        let (ticket, message, activity) = self
             .complete_review_with_message(
                 id,
                 reviewer_id,
@@ -1473,7 +1579,7 @@ impl Store {
             )
             .await?;
         let (message, wake_agent_ids) = message.expect("notification was requested");
-        Ok((ticket, message, wake_agent_ids))
+        Ok((ticket, message, wake_agent_ids, activity))
     }
 
     async fn complete_review_with_message(
@@ -1483,7 +1589,7 @@ impl Store {
         commit: &str,
         expected_revision: Option<i64>,
         message: Option<MessageWrite<'_>>,
-    ) -> Result<(Ticket, Option<(Message, Vec<i64>)>), AppError> {
+    ) -> Result<(Ticket, Option<(Message, Vec<i64>)>, TicketActivity), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
@@ -1513,23 +1619,26 @@ impl Store {
             AppError::conflict("review is not assigned to this agent or has changed")
         })?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
-        sqlx::query(
+        let activity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
-             VALUES (?, 'review_approved', ?, ?, ?, ?)",
+             VALUES (?, 'review_approved', ?, ?, ?, ?) \
+             RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
+             previous_reserved_for_agent_id, reserved_for_agent_id, implementation_branch, \
+             review_commit, review_target_branch, created_at",
         )
         .bind(id)
         .bind(reviewer_id)
         .bind(&ticket.implementation_branch)
         .bind(&ticket.review_commit)
         .bind(&ticket.review_target_branch)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         let message = match message {
             Some(message) => Some(insert_message(&mut transaction, message).await?),
             None => None,
         };
         transaction.commit().await?;
-        Ok((ticket, message))
+        Ok((ticket, message, activity))
     }
 }
 
@@ -1537,16 +1646,28 @@ async fn ticket_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     id: i64,
 ) -> Result<Ticket, AppError> {
-    let mut ticket = sqlx::query_as(
+    ticket_in_transaction_optional(transaction, id)
+        .await?
+        .ok_or_else(|| sqlx::Error::RowNotFound.into())
+}
+
+async fn ticket_in_transaction_optional(
+    transaction: &mut Transaction<'_, Sqlite>,
+    id: i64,
+) -> Result<Option<Ticket>, AppError> {
+    let ticket = sqlx::query_as(
         "SELECT id, project_id, title, description, state, created_by_agent_id, reserved_for_agent_id, assignee_id, implementation_branch, review_commit, \
          review_target_branch, review_project_id, review_project_path, reviewer_id, review_feedback, review_completion_workflow, external_change_url, external_merge_reference, external_merged_at, revision, created_at, updated_at \
          FROM tickets WHERE id = ?",
     )
     .bind(id)
-    .fetch_one(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await?;
+    let Some(mut ticket) = ticket else {
+        return Ok(None);
+    };
     load_ticket_dependencies(transaction, &mut ticket).await?;
-    Ok(ticket)
+    Ok(Some(ticket))
 }
 
 async fn load_ticket_dependencies(
@@ -2557,7 +2678,7 @@ mod tests {
             vec!["ticket.available", "ticket.changes_requested"]
         );
 
-        let (cancelled, wake_targets) = store
+        let (cancelled, wake_targets, activities) = store
             .update_ticket_with_wakes(
                 blocker.id,
                 TicketChanges {
@@ -2572,6 +2693,8 @@ mod tests {
         assert_eq!(cancelled.state, TicketState::Cancelled);
         assert_eq!(cancelled.assignee_id, Some(worker.id));
         assert!(wake_targets.is_empty());
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].action, "cancelled");
         assert!(store.wake_events(worker.id).await.unwrap().is_empty());
         assert_eq!(
             store.ticket_activity(blocker.id).await.unwrap()[0].action,
@@ -2782,7 +2905,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (tickets, wake_targets) = store
+        let (tickets, wake_targets, activities) = store
             .reserve_tickets_with_wakes(
                 &[first.id, second.id],
                 reserved.id,
@@ -2792,6 +2915,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wake_targets, vec![reserved.id]);
+        assert!(activities.is_empty());
         assert_eq!(
             store
                 .wake_events(reserved.id)
@@ -2964,7 +3088,7 @@ mod tests {
             "ticket.assigned"
         );
 
-        let (ticket, review_targets) = store
+        let (ticket, review_targets, activity) = store
             .submit_review_with_wakes(
                 ticket.id,
                 implementer.id,
@@ -2979,6 +3103,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(activity.action, "review_submitted");
         assert_eq!(review_targets, vec![review_only.id, both.id]);
         assert_eq!(store.wake_events(work_only.id).await.unwrap().len(), 1);
         let reviewer_events = store.wake_events(review_only.id).await.unwrap();
