@@ -13,6 +13,8 @@ vi.mock("../api", () => ({
     returnExternalMerge: vi.fn(),
     setExternalChange: vi.fn(),
     updateTicket: vi.fn(),
+    ticketActivity: vi.fn(async () => ({ entries: [], has_more: false })),
+    addTicketComment: vi.fn(),
   },
 }));
 
@@ -696,6 +698,88 @@ describe("KanbanBoard", () => {
     expect(api.updateTicket).not.toHaveBeenCalled();
     expect(screen.getByText("Cancellation abandoned; ticket unchanged.")).toBeTruthy();
     expect(document.activeElement).toBe(cancel);
+  });
+
+  it("paginates activity without losing a comment draft", async () => {
+    const activity = (id: number, detail: string) => ({
+      id,
+      ticket_id: ticket.id,
+      action: "comment",
+      detail,
+      author: "human",
+      actor_agent_id: null,
+      previous_reserved_for_agent_id: null,
+      reserved_for_agent_id: null,
+      implementation_branch: null,
+      review_commit: null,
+      review_target_branch: null,
+      created_at: id,
+    });
+    vi.mocked(api.ticketActivity)
+      .mockResolvedValueOnce({ entries: [activity(2, "**Newest**")], has_more: true })
+      .mockResolvedValueOnce({ entries: [activity(1, "Older")], has_more: false });
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+      />,
+    );
+
+    expect(await screen.findByText("Newest")).toBeTruthy();
+    const draft = screen.getByLabelText("Add comment");
+    fireEvent.change(draft, { target: { value: "Still writing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+
+    expect(await screen.findByText("Older")).toBeTruthy();
+    expect((draft as HTMLTextAreaElement).value).toBe("Still writing");
+  });
+
+  it("appends replayed activity without clearing the comment draft", async () => {
+    vi.mocked(api.ticketActivity).mockResolvedValue({
+      entries: [],
+      has_more: false,
+    });
+    const { rerender } = render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+      />,
+    );
+    await screen.findByText("No activity yet.");
+    fireEvent.change(screen.getByLabelText("Add comment"), {
+      target: { value: "Unsent draft" },
+    });
+
+    rerender(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+        liveTicketActivity={{
+          12: {
+            id: 12,
+            ticket_id: ticket.id,
+            action: "changes_requested",
+            detail: "Keep this history",
+            author: null,
+            actor_agent_id: null,
+            previous_reserved_for_agent_id: null,
+            reserved_for_agent_id: null,
+            implementation_branch: "tickets/history",
+            review_commit: "abc123",
+            review_target_branch: "main",
+            created_at: 12,
+          },
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("Keep this history")).toBeTruthy();
+    expect((screen.getByLabelText("Add comment") as HTMLTextAreaElement).value).toBe(
+      "Unsent draft",
+    );
   });
 
   it("hides cancelled tickets unless requested or directly selected", () => {

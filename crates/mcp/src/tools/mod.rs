@@ -50,6 +50,7 @@ mod tests {
             [
                 "add_my_channel_subscriptions",
                 "add_my_project_subscriptions",
+                "add_ticket_comment",
                 "approve_ticket_review",
                 "archive_project",
                 "cancel_my_reminder",

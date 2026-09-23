@@ -87,10 +87,28 @@ export interface TicketActivity {
   ticket_id: number;
   action: string;
   detail: string | null;
+  author: string | null;
   actor_agent_id: number | null;
   previous_reserved_for_agent_id: number | null;
   reserved_for_agent_id: number | null;
+  implementation_branch: string | null;
+  review_commit: string | null;
+  review_target_branch: string | null;
   created_at: number;
+}
+
+export interface TicketActivityPage {
+  entries: TicketActivity[];
+  has_more: boolean;
+}
+
+export interface TicketActivityQuery {
+  before_id?: number | null;
+  limit?: number | null;
+}
+
+export interface PostTicketCommentRequest {
+  body: string;
 }
 
 export interface ProjectTransition {
@@ -282,6 +300,7 @@ export type AgentEvent =
   | { kind: "agent_message_delta"; agent_id: number; data: AgentMessageDelta }
   | { kind: "message"; agent_id: number; data: AgentMessage }
   | { kind: "ticket_updated"; agent_id: number; data: Ticket }
+  | { kind: "ticket_activity_created"; agent_id: number; data: TicketActivity }
   | { kind: "external_review_approved"; agent_id: number; data: Ticket }
   | { kind: "external_change_updated"; agent_id: number; data: Ticket }
   | { kind: "external_merge_returned"; agent_id: number; data: Ticket }

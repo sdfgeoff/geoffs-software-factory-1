@@ -11,10 +11,11 @@ use multi_agent_board_protocol::{self as protocol, Patch};
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, ClaimTicketRequest, CompleteExternalMergeRequest, CreateChannelRequest,
     CreateTicketRequest, CreateWakeEventRequest, MessagePageQuery, PostMessageRequest,
-    RegisterProjectRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
-    ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
+    PostTicketCommentRequest, RegisterProjectRequest, ReserveTicketsRequest,
+    ReturnExternalMergeRequest, ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
     SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetExternalChangeRequest,
-    SetProjectCompletionWorkflowRequest, TicketSummaryQuery, UpdateTicketRequest,
+    SetProjectCompletionWorkflowRequest, TicketActivityQuery, TicketSummaryQuery,
+    UpdateTicketRequest,
 };
 
 use crate::{
@@ -39,7 +40,10 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
         .route("/tickets", get(list_tickets).post(create_ticket))
         .route("/ticket-reservations", axum::routing::post(reserve_tickets))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
-        .route("/tickets/{id}/activity", get(ticket_activity))
+        .route(
+            "/tickets/{id}/activity",
+            get(ticket_activity).post(post_ticket_comment),
+        )
         .route(
             "/tickets/{id}/external-change",
             axum::routing::put(set_external_change),
@@ -292,14 +296,28 @@ async fn get_ticket(
 async fn ticket_activity(
     State(store): State<Store>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<protocol::TicketActivity>>, AppError> {
+    Query(query): Query<TicketActivityQuery>,
+) -> Result<Json<protocol::TicketActivityPage>, AppError> {
+    let (entries, has_more) = store
+        .ticket_activity_page(id, query.before_id, query.limit)
+        .await?;
+    Ok(Json(protocol::TicketActivityPage {
+        entries: entries.into_iter().map(Into::into).collect(),
+        has_more,
+    }))
+}
+
+async fn post_ticket_comment(
+    Extension(agents): Extension<AgentManager>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<PostTicketCommentRequest>,
+) -> Result<Json<protocol::TicketActivity>, AppError> {
     Ok(Json(
-        store
-            .ticket_activity(id)
+        agents
+            .add_ticket_comment(id, agent_header(&headers)?, &input.body)
             .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+            .into(),
     ))
 }
 
@@ -1780,9 +1798,9 @@ mod tests {
         let activity: Value =
             serde_json::from_slice(&to_bytes(activity.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(activity[0]["action"], "reservation_override");
-        assert_eq!(activity[0]["previous_reserved_for_agent_id"], 1);
-        assert_eq!(activity[0]["reserved_for_agent_id"], 2);
+        assert_eq!(activity["entries"][0]["action"], "reservation_override");
+        assert_eq!(activity["entries"][0]["previous_reserved_for_agent_id"], 1);
+        assert_eq!(activity["entries"][0]["reserved_for_agent_id"], 2);
 
         let competing_claim = app
             .clone()
@@ -1884,8 +1902,8 @@ mod tests {
         let activity: Value =
             serde_json::from_slice(&to_bytes(activity.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(activity[0]["action"], "reservation_cleared");
-        assert_eq!(activity[0]["previous_reserved_for_agent_id"], 1);
+        assert_eq!(activity["entries"][0]["action"], "reservation_cleared");
+        assert_eq!(activity["entries"][0]["previous_reserved_for_agent_id"], 1);
     }
 
     #[tokio::test]
@@ -2295,7 +2313,7 @@ mod tests {
         let activity: Value =
             serde_json::from_slice(&to_bytes(activity.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(activity[0]["action"], "cancelled");
+        assert_eq!(activity["entries"][0]["action"], "cancelled");
 
         let forbidden = app
             .clone()

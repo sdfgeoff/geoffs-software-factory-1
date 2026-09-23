@@ -6,7 +6,15 @@ import {
   type MouseEvent,
 } from "react";
 import { api } from "../api";
-import type { Agent, Project, Ticket, TicketState, TicketSummary } from "../types";
+import type {
+  Agent,
+  Project,
+  Ticket,
+  TicketActivity,
+  TicketState,
+  TicketSummary,
+} from "../types";
+import { MessageContent } from "./MessageContent";
 
 interface Props {
   ticket: Ticket;
@@ -18,6 +26,10 @@ interface Props {
   draft?: TicketDraft;
   onDraftChange: (draft: TicketDraft) => void;
   onError: (error: unknown) => void;
+  liveActivity?: TicketActivity[];
+  commentDraft?: string;
+  onCommentDraftChange?: (draft: string) => void;
+  activityRefresh?: number;
 }
 
 export interface TicketDraft {
@@ -81,6 +93,11 @@ export function TicketDetailPanel({
   onChanged,
   draft: savedDraft,
   onDraftChange,
+  onError,
+  liveActivity = [],
+  commentDraft = "",
+  onCommentDraftChange = () => {},
+  activityRefresh = 0,
 }: Props) {
   const draft = savedDraft ?? ticketDraft(ticket);
   const [saving, setSaving] = useState(false);
@@ -91,6 +108,14 @@ export function TicketDetailPanel({
   const [transitionStatus, setTransitionStatus] = useState("");
   const [externalBusy, setExternalBusy] = useState(false);
   const [externalStatus, setExternalStatus] = useState("");
+  const [activity, setActivity] = useState<TicketActivity[]>([]);
+  const [activityHasMore, setActivityHasMore] = useState(false);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [commentStatus, setCommentStatus] = useState("");
+  const [commenting, setCommenting] = useState(false);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const activityTicketRef = useRef(ticket.id);
+  activityTicketRef.current = ticket.id;
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const reservationSelectRef = useRef<HTMLSelectElement>(null);
   const creator = agents.find((agent) => agent.id === ticket.created_by_agent_id);
@@ -117,6 +142,100 @@ export function TicketDetailPanel({
       onDraftChange(ticketDraft(ticket));
     }
   }, [draft.baseRevision, draft.dirty, onDraftChange, savedDraft, ticket]);
+
+  useEffect(() => {
+    let current = true;
+    setActivity([]);
+    setActivityHasMore(false);
+    setActivityLoading(true);
+    void api
+      .ticketActivity(ticket.id)
+      .then((page) => {
+        if (!current) return;
+        setActivity((entries) => {
+          const byId = new Map(
+            [
+              ...page.entries,
+              ...entries.filter((entry) => entry.ticket_id === ticket.id),
+            ].map((entry) => [entry.id, entry]),
+          );
+          return [...byId.values()].sort((left, right) => left.id - right.id);
+        });
+        setActivityHasMore(page.has_more);
+      })
+      .catch(onError)
+      .finally(() => {
+        if (current) setActivityLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [activityRefresh, onError, ticket.id]);
+
+  useEffect(() => {
+    if (!liveActivity.length) return;
+    setActivity((current) => {
+      const byId = new Map(current.map((entry) => [entry.id, entry]));
+      liveActivity.forEach((entry) => byId.set(entry.id, entry));
+      return [...byId.values()].sort((left, right) => left.id - right.id);
+    });
+  }, [liveActivity]);
+
+  async function loadOlderActivity() {
+    const ticketId = ticket.id;
+    const beforeId = activity[0]?.id;
+    if (!beforeId || activityLoading) return;
+    const element = timelineRef.current;
+    const previousHeight = element?.scrollHeight ?? 0;
+    const previousTop = element?.scrollTop ?? 0;
+    setActivityLoading(true);
+    try {
+      const page = await api.ticketActivity(ticketId, beforeId);
+      if (activityTicketRef.current !== ticketId) return;
+      setActivity((current) => {
+        const byId = new Map(
+          [...page.entries, ...current].map((entry) => [entry.id, entry]),
+        );
+        return [...byId.values()].sort((left, right) => left.id - right.id);
+      });
+      setActivityHasMore(page.has_more);
+      requestAnimationFrame(() => {
+        if (element && activityTicketRef.current === ticketId) {
+          element.scrollTop = previousTop + element.scrollHeight - previousHeight;
+        }
+      });
+    } catch (error) {
+      onError(error);
+    } finally {
+      setActivityLoading(false);
+    }
+  }
+
+  async function addComment(event: FormEvent) {
+    event.preventDefault();
+    const body = commentDraft.trim();
+    if (!body || commenting) return;
+    const ticketId = ticket.id;
+    setCommenting(true);
+    setCommentStatus("Posting comment…");
+    try {
+      const entry = await api.addTicketComment(ticketId, body);
+      if (activityTicketRef.current !== ticketId) return;
+      setActivity((current) =>
+        current.some((item) => item.id === entry.id)
+          ? current
+          : [...current, entry],
+      );
+      onCommentDraftChange("");
+      setCommentStatus("Comment posted.");
+    } catch (error) {
+      setCommentStatus(
+        error instanceof Error ? error.message : "Could not post comment",
+      );
+    } finally {
+      setCommenting(false);
+    }
+  }
 
   const updatedElsewhere = draft.dirty && ticket.revision !== draft.baseRevision;
   const updateDraft = (changes: Partial<TicketDraft>, dirty = true) =>
@@ -539,6 +658,71 @@ export function TicketDetailPanel({
       )}
 
       {externalStatus && <p role="status" aria-live="polite">{externalStatus}</p>}
+
+      <section className="ticket-timeline" aria-labelledby={`ticket-activity-${ticket.id}`}>
+        <h3 id={`ticket-activity-${ticket.id}`}>Activity / Discussion</h3>
+        {activityHasMore && (
+          <button
+            type="button"
+            className="ghost"
+            disabled={activityLoading}
+            onClick={() => void loadOlderActivity()}
+          >
+            {activityLoading ? "Loading…" : "Load older activity"}
+          </button>
+        )}
+        <div className="ticket-timeline-entries" ref={timelineRef}>
+          {activity.map((entry) => {
+            const actor =
+              entry.author ??
+              agents.find((agent) => agent.id === entry.actor_agent_id)?.name ??
+              "User/system";
+            return (
+              <article
+                className={entry.action === "comment" ? "timeline-comment" : "timeline-event"}
+                key={entry.id}
+              >
+                <header>
+                  <strong>{actor}</strong>
+                  <span>{new Date(entry.created_at * 1000).toLocaleString()}</span>
+                  <span>{entry.action.replaceAll("_", " ")}</span>
+                </header>
+                {entry.detail &&
+                  (entry.action === "comment" ? (
+                    <MessageContent source={entry.detail} />
+                  ) : (
+                    <p>{entry.detail}</p>
+                  ))}
+                {entry.review_commit && (
+                  <p>
+                    <code>{entry.review_commit}</code>
+                    {entry.review_target_branch && ` → ${entry.review_target_branch}`}
+                  </p>
+                )}
+              </article>
+            );
+          })}
+          {!activityLoading && activity.length === 0 && (
+            <p className="empty">No activity yet.</p>
+          )}
+        </div>
+        <form className="ticket-comment-form" onSubmit={addComment}>
+          <label>
+            Add comment
+            <textarea
+              value={commentDraft}
+              disabled={commenting}
+              maxLength={10000}
+              rows={4}
+              onChange={(event) => onCommentDraftChange(event.target.value)}
+            />
+          </label>
+          <button type="submit" disabled={commenting || !commentDraft.trim()}>
+            {commenting ? "Posting…" : "Post comment"}
+          </button>
+          {commentStatus && <p role="status">{commentStatus}</p>}
+        </form>
+      </section>
 
       <form className="ticket-detail-form" onSubmit={save}>
         {updatedElsewhere && (

@@ -1,6 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { Agent, Project, Ticket, TicketState, TicketSummary } from "../types";
+import type {
+  Agent,
+  Project,
+  Ticket,
+  TicketActivity,
+  TicketState,
+  TicketSummary,
+} from "../types";
 import {
   TicketDetailPanel,
   type TicketDraft,
@@ -27,6 +34,8 @@ interface Props {
   historyHasMore?: Partial<Record<"done" | "cancelled", boolean>>;
   onLoadHistory?: (state: "done" | "cancelled") => void;
   onError: (error: unknown) => void;
+  liveTicketActivity?: Record<number, TicketActivity>;
+  activityRefresh?: number;
 }
 
 export function KanbanBoard({
@@ -40,6 +49,8 @@ export function KanbanBoard({
   onSelectTicket,
   onChanged,
   onError,
+  liveTicketActivity = {},
+  activityRefresh = 0,
   historyHasMore = {},
   onLoadHistory,
 }: Props) {
@@ -55,6 +66,7 @@ export function KanbanBoard({
   const [mobileState, setMobileState] = useState<TicketState>("todo");
   const [localTicketId, setLocalTicketId] = useState<number | null>(null);
   const [ticketDrafts, setTicketDrafts] = useState<Record<number, TicketDraft>>({});
+  const [commentDrafts, setCommentDrafts] = useState<Record<number, string>>({});
   const selectedTicketId =
     routedTicketId === undefined ? localTicketId : routedTicketId;
   const selectTicket = onSelectTicket ?? setLocalTicketId;
@@ -248,6 +260,17 @@ export function KanbanBoard({
             }))
           }
           onError={onError}
+          liveActivity={Object.values(liveTicketActivity).filter(
+            (entry) => entry.ticket_id === selectedTicket.id,
+          )}
+          commentDraft={commentDrafts[selectedTicket.id] ?? ""}
+          onCommentDraftChange={(commentDraft) =>
+            setCommentDrafts((current) => ({
+              ...current,
+              [selectedTicket.id]: commentDraft,
+            }))
+          }
+          activityRefresh={activityRefresh}
         />
       )}
     </section>

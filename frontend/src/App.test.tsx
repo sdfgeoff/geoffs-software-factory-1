@@ -24,6 +24,8 @@ vi.mock("./api", () => ({
     settings: vi.fn(),
     tickets: vi.fn(),
     ticket: vi.fn(),
+    ticketActivity: vi.fn(async () => ({ entries: [], has_more: false })),
+    addTicketComment: vi.fn(),
     messages: vi.fn(),
   },
 }));

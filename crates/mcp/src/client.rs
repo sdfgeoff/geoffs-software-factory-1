@@ -5,13 +5,14 @@ use multi_agent_board_protocol::{
     AGENT_ID_HEADER, Agent, AgentMessagePage, AgentProjectWorktree, BoardSettings, Channel,
     CompleteExternalMergeRequest, CreateAgentRequest, CreateChannelRequest, CreateTicketRequest,
     CreateWakeEventRequest, ErrorResponse, Message, MessagePage, MessagePageQuery,
-    PostMessageRequest, Project, RegisterProjectRequest, Reminder, RenameAgentRequest,
-    RequestChangesRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
+    PostMessageRequest, PostTicketCommentRequest, Project, RegisterProjectRequest, Reminder,
+    RenameAgentRequest, RequestChangesRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
     ReviewRevisionRequest, ScheduleSelfReminderRequest, SendAgentMessageRequest,
     SetAgentChannelSubscriptionsRequest, SetAgentProjectSubscriptionsRequest,
     SetAgentScopesRequest, SetAgentWakeSettingsRequest, SetBoardSettingsRequest,
     SetExternalChangeRequest, SetProjectCompletionWorkflowRequest, Ticket, TicketActivity,
-    TicketClaimResponse, TicketSummary, TicketSummaryPage, UpdateTicketRequest, WakeEvent,
+    TicketActivityPage, TicketClaimResponse, TicketSummary, TicketSummaryPage, UpdateTicketRequest,
+    WakeEvent,
 };
 
 #[derive(Debug)]
@@ -161,8 +162,39 @@ impl BoardClient {
         self.get(&format!("/tickets/{ticket_id}")).await
     }
 
-    pub async fn ticket_activity(&self, ticket_id: i64) -> Result<Vec<TicketActivity>, McpError> {
-        self.get(&format!("/tickets/{ticket_id}/activity")).await
+    pub async fn ticket_activity(
+        &self,
+        ticket_id: i64,
+        before_id: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<TicketActivityPage, McpError> {
+        let mut query = Vec::new();
+        if let Some(before_id) = before_id {
+            query.push(format!("before_id={before_id}"));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/tickets/{ticket_id}/activity{suffix}"))
+            .await
+    }
+
+    pub async fn add_ticket_comment(
+        &self,
+        ticket_id: i64,
+        body: String,
+    ) -> Result<TicketActivity, McpError> {
+        self.request(
+            Method::POST,
+            &format!("/tickets/{ticket_id}/activity"),
+            Some(&PostTicketCommentRequest { body }),
+        )
+        .await
     }
 
     pub async fn set_external_change(

@@ -11,7 +11,10 @@ use tokio::{
 };
 
 use crate::{
-    domain::{Agent, AgentProjectWorktree, BoardSettings, Message, ProjectTransition, Ticket},
+    domain::{
+        Agent, AgentProjectWorktree, BoardSettings, Message, ProjectTransition, Ticket,
+        TicketActivity,
+    },
     error::AppError,
     store::{
         BoardEventReplay, MERGE_NOTIFICATION_CHANNEL_DESCRIPTION, Store, StoredBoardEvent,
@@ -50,6 +53,10 @@ pub enum AgentEvent {
     TicketUpdated {
         agent_id: i64,
         data: Ticket,
+    },
+    TicketActivityCreated {
+        agent_id: i64,
+        data: TicketActivity,
     },
     ExternalReviewApproved {
         agent_id: i64,
@@ -133,6 +140,10 @@ impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
                 data: data.try_into()?,
             },
             AgentEvent::TicketUpdated { agent_id, data } => Self::TicketUpdated {
+                agent_id,
+                data: data.into(),
+            },
+            AgentEvent::TicketActivityCreated { agent_id, data } => Self::TicketActivityCreated {
                 agent_id,
                 data: data.into(),
             },
@@ -261,6 +272,42 @@ impl AgentManager {
 
     pub fn subscribe(&self) -> broadcast::Receiver<PublishedAgentEvent> {
         self.events.subscribe()
+    }
+
+    pub async fn add_ticket_comment(
+        &self,
+        ticket_id: i64,
+        actor_agent_id: Option<i64>,
+        body: &str,
+    ) -> Result<TicketActivity, AppError> {
+        let (activity, recipients) = self
+            .store
+            .add_ticket_comment(ticket_id, actor_agent_id, body)
+            .await?;
+        self.emit(AgentEvent::TicketActivityCreated {
+            agent_id: actor_agent_id.unwrap_or_default(),
+            data: activity.clone(),
+        })
+        .await;
+        for agent_id in recipients {
+            self.deliver_pending(agent_id).await;
+        }
+        Ok(activity)
+    }
+
+    pub(crate) async fn emit_latest_ticket_activity(&self, ticket_id: i64, agent_id: i64) {
+        if let Ok((entries, _)) = self
+            .store
+            .ticket_activity_page(ticket_id, None, Some(1))
+            .await
+            && let Some(activity) = entries.into_iter().next()
+        {
+            self.emit(AgentEvent::TicketActivityCreated {
+                agent_id,
+                data: activity,
+            })
+            .await;
+        }
     }
 
     pub(crate) async fn replay_events(

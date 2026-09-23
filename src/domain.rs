@@ -90,9 +90,13 @@ pub struct TicketActivity {
     pub ticket_id: i64,
     pub action: String,
     pub detail: Option<String>,
+    pub author: Option<String>,
     pub actor_agent_id: Option<i64>,
     pub previous_reserved_for_agent_id: Option<i64>,
     pub reserved_for_agent_id: Option<i64>,
+    pub implementation_branch: Option<String>,
+    pub review_commit: Option<String>,
+    pub review_target_branch: Option<String>,
     pub created_at: i64,
 }
 
@@ -620,9 +624,13 @@ impl From<TicketActivity> for wire::TicketActivity {
             ticket_id: value.ticket_id,
             action: value.action,
             detail: value.detail,
+            author: value.author,
             actor_agent_id: value.actor_agent_id,
             previous_reserved_for_agent_id: value.previous_reserved_for_agent_id,
             reserved_for_agent_id: value.reserved_for_agent_id,
+            implementation_branch: value.implementation_branch,
+            review_commit: value.review_commit,
+            review_target_branch: value.review_target_branch,
             created_at: value.created_at,
         }
     }

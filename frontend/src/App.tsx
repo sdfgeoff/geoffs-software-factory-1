@@ -17,6 +17,7 @@ import type {
   Channel,
   Project,
   Ticket,
+  TicketActivity,
   TicketState,
   TicketSummary,
 } from "./types";
@@ -150,6 +151,9 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tickets, setTickets] = useState<TicketSummary[]>([]);
   const [ticketDetails, setTicketDetails] = useState<Record<number, Ticket>>({});
+  const [liveTicketActivity, setLiveTicketActivity] = useState<
+    Record<number, TicketActivity>
+  >({});
   const [missingTicketIds, setMissingTicketIds] = useState<Set<number>>(() => new Set());
   const [ticketDetailRepair, setTicketDetailRepair] = useState(0);
   const [historyHasMore, setHistoryHasMore] = useState({ done: true, cancelled: true });
@@ -394,6 +398,12 @@ export function App() {
         case "external_merge_completed":
           mergeTickets(event.data);
           break;
+        case "ticket_activity_created":
+          setLiveTicketActivity((current) => ({
+            ...current,
+            [event.data.id]: event.data,
+          }));
+          break;
         case "settings_updated":
           setSettings(event.data);
           break;
@@ -635,6 +645,8 @@ export function App() {
           }
           onChanged={mergeTickets}
           onError={report}
+          liveTicketActivity={liveTicketActivity}
+          activityRefresh={ticketDetailRepair}
         />
         </div>
       )}

@@ -114,10 +114,32 @@ pub struct TicketActivity {
     pub ticket_id: i64,
     pub action: String,
     pub detail: Option<String>,
+    pub author: Option<String>,
     pub actor_agent_id: Option<i64>,
     pub previous_reserved_for_agent_id: Option<i64>,
     pub reserved_for_agent_id: Option<i64>,
+    pub implementation_branch: Option<String>,
+    pub review_commit: Option<String>,
+    pub review_target_branch: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TicketActivityPage {
+    pub entries: Vec<TicketActivity>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TicketActivityQuery {
+    pub before_id: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PostTicketCommentRequest {
+    pub body: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -430,6 +452,10 @@ pub enum AgentEvent {
     TicketUpdated {
         agent_id: i64,
         data: Ticket,
+    },
+    TicketActivityCreated {
+        agent_id: i64,
+        data: TicketActivity,
     },
     ExternalReviewApproved {
         agent_id: i64,

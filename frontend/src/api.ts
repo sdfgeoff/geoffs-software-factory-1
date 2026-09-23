@@ -9,6 +9,8 @@ import type {
   MessagePageQuery,
   Project,
   Ticket,
+  TicketActivity,
+  TicketActivityPage,
   TicketSummaryPage,
   TicketSummaryQuery,
   ProjectCompletionWorkflow,
@@ -104,6 +106,16 @@ export const api = {
   tickets: (query: TicketSummaryQuery = {}) =>
     request<TicketSummaryPage>(`/tickets${ticketPageQuery(query)}`),
   ticket: (id: number) => request<Ticket>(`/tickets/${id}`),
+  ticketActivity: (id: number, beforeId?: number, limit = 50) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (beforeId != null) query.set("before_id", String(beforeId));
+    return request<TicketActivityPage>(`/tickets/${id}/activity?${query}`);
+  },
+  addTicketComment: (id: number, body: string) =>
+    request<TicketActivity>(`/tickets/${id}/activity`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    }),
   createTicket: (title: string, projectId: number) =>
     request<Ticket>("/tickets", {
       method: "POST",

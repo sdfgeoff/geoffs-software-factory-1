@@ -58,6 +58,7 @@ impl AgentManager {
                 expected_revision,
             )
             .await?;
+        self.emit_latest_ticket_activity(ticket.id, agent_id).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
@@ -79,6 +80,7 @@ impl AgentManager {
             .store
             .claim_review(ticket_id, agent_id, expected_revision)
             .await?;
+        self.emit_latest_ticket_activity(ticket.id, agent_id).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
@@ -115,6 +117,7 @@ impl AgentManager {
             .store
             .request_changes(ticket_id, agent_id, feedback, expected_revision)
             .await?;
+        self.emit_latest_ticket_activity(ticket.id, agent_id).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
             data: ticket.clone(),
@@ -231,6 +234,8 @@ impl AgentManager {
                     notification,
                 )
                 .await?;
+            self.emit_latest_ticket_activity(ticket.id, reviewer_id)
+                .await;
             drop(operation);
             if let Some(message) = message.as_ref() {
                 self.emit_board_message(message).await;
@@ -350,6 +355,8 @@ impl AgentManager {
                 Vec::new(),
             )
         };
+        self.emit_latest_ticket_activity(ticket.id, reviewer_id)
+            .await;
         drop(operation);
         for agent_id in wake_agent_ids {
             self.deliver_pending(agent_id).await;
@@ -378,6 +385,8 @@ impl AgentManager {
                 expected_revision,
             )
             .await?;
+        self.emit_latest_ticket_activity(ticket.id, actor_agent_id.unwrap_or_default())
+            .await;
         self.emit(AgentEvent::ExternalChangeUpdated {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
@@ -397,6 +406,8 @@ impl AgentManager {
             .store
             .return_external_merge(ticket_id, reason, actor_agent_id, expected_revision)
             .await?;
+        self.emit_latest_ticket_activity(ticket.id, actor_agent_id.unwrap_or_default())
+            .await;
         self.emit(AgentEvent::ExternalMergeReturned {
             agent_id: actor_agent_id.unwrap_or_default(),
             data: ticket.clone(),
@@ -467,6 +478,8 @@ impl AgentManager {
                 notification,
             )
             .await?;
+        self.emit_latest_ticket_activity(ticket.id, actor_agent_id.unwrap_or_default())
+            .await;
         drop(operation);
         if let Some(message) = message.as_ref() {
             self.emit_board_message(message).await;

@@ -421,6 +421,47 @@ aside form,
 .ticket-detail-panel .ticket-detail-form {
   padding-inline: 0;
 }
+.ticket-timeline {
+  margin-top: 1rem;
+  border-top: 1px solid #eee8de;
+  padding-top: 0.9rem;
+}
+.ticket-timeline h3 {
+  margin: 0 0 0.7rem;
+}
+.ticket-timeline > button {
+  width: auto;
+  margin-bottom: 0.6rem;
+}
+.ticket-timeline-entries {
+  display: grid;
+  gap: 0.6rem;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+.ticket-timeline article {
+  border-left: 3px solid #aaa195;
+  padding: 0.65rem 0.75rem;
+  background: #f5f1e9;
+}
+.ticket-timeline article.timeline-comment {
+  border-left-color: #397a68;
+  background: #edf6f2;
+}
+.ticket-timeline article header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.7rem;
+  color: #6f675d;
+  font-size: 0.72rem;
+}
+.ticket-timeline article p {
+  margin: 0.45rem 0 0;
+}
+.ticket-detail-panel .ticket-comment-form {
+  margin-top: 0.75rem;
+  padding-inline: 0;
+}
 .copyable-value {
   display: flex;
   align-items: center;

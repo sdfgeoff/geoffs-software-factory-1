@@ -109,4 +109,34 @@ mod tests {
         assert_eq!(events.first().unwrap().id, 2);
         assert_eq!(events.last().unwrap().id, BOARD_EVENT_RETENTION + 1);
     }
+
+    #[tokio::test]
+    async fn ticket_activity_events_replay_with_their_stable_entry_id() {
+        let store = Store::memory().await.unwrap();
+        let event = AgentEvent::TicketActivityCreated {
+            agent_id: 1,
+            data: multi_agent_board_protocol::TicketActivity {
+                id: 9,
+                ticket_id: 4,
+                action: "comment".into(),
+                detail: Some("hello".into()),
+                author: Some("worker".into()),
+                actor_agent_id: Some(1),
+                previous_reserved_for_agent_id: None,
+                reserved_for_agent_id: None,
+                implementation_branch: None,
+                review_commit: None,
+                review_target_branch: None,
+                created_at: 1,
+            },
+        };
+        store.append_board_event(&event).await.unwrap();
+
+        let BoardEventReplay::Events(events) = store.replay_board_events(Some(0)).await.unwrap()
+        else {
+            panic!("activity event should replay");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, event);
+    }
 }

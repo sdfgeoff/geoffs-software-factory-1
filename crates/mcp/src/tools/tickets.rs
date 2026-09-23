@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use multi_agent_board_protocol::{
     ClaimTicketRequest, CompleteExternalMergeRequest, CreateTicketRequest, Patch,
     RequestChangesRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
-    ReviewRevisionRequest, SetExternalChangeRequest, Ticket, TicketActivity, TicketClaimResponse,
-    TicketState, TicketSummary, UpdateTicketRequest,
+    ReviewRevisionRequest, SetExternalChangeRequest, Ticket, TicketActivity, TicketActivityPage,
+    TicketClaimResponse, TicketState, TicketSummary, UpdateTicketRequest,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
@@ -30,6 +30,22 @@ struct CreateTicketArguments {
 #[serde(deny_unknown_fields)]
 struct TicketIdArguments {
     ticket_id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TicketActivityArguments {
+    ticket_id: i64,
+    before_id: Option<i64>,
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AddTicketCommentArguments {
+    ticket_id: i64,
+    body: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -170,11 +186,28 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
         |board, arguments| Box::pin(async move { board.ticket(arguments.ticket_id).await }),
     ))?;
     registry.register(
-        ToolDefinition::<TicketIdArguments, Vec<TicketActivity>>::new(
+        ToolDefinition::<TicketActivityArguments, TicketActivityPage>::new(
             "get_ticket_activity",
-            "List a ticket's activity log",
+            "Read a cursor-paginated ticket activity and discussion timeline",
             |board, arguments| {
-                Box::pin(async move { board.ticket_activity(arguments.ticket_id).await })
+                Box::pin(async move {
+                    board
+                        .ticket_activity(arguments.ticket_id, arguments.before_id, arguments.limit)
+                        .await
+                })
+            },
+        ),
+    )?;
+    registry.register(
+        ToolDefinition::<AddTicketCommentArguments, TicketActivity>::new(
+            "add_ticket_comment",
+            "Append a Markdown comment to a ticket without changing ticket state or revision",
+            |board, arguments| {
+                Box::pin(async move {
+                    board
+                        .add_ticket_comment(arguments.ticket_id, arguments.body)
+                        .await
+                })
             },
         ),
     )?;

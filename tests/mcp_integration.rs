@@ -266,15 +266,27 @@ async fn mcp_calls_the_server_without_database_access() {
         Some(&Value::Bool(true))
     );
 
-    let activity = mcp_tool(
+    let comment = mcp_tool(
         &base_url,
         1,
         7,
+        "add_ticket_comment",
+        json!({"ticket_id":3,"body":"MCP discussion"}),
+    )
+    .await;
+    assert_eq!(tool_content(&comment)["action"], "comment");
+    let activity = mcp_tool(
+        &base_url,
+        1,
+        8,
         "get_ticket_activity",
         json!({"ticket_id":3}),
     )
     .await;
-    assert_eq!(tool_content(&activity), json!([]));
+    assert_eq!(
+        tool_content(&activity)["entries"][0]["detail"],
+        "MCP discussion"
+    );
 }
 
 #[tokio::test]
