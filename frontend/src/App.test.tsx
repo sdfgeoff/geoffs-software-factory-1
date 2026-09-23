@@ -323,6 +323,46 @@ describe("App agent routes", () => {
     expect(screen.queryByDisplayValue(ticket.title)).toBeNull();
   });
 
+  it("shows remotely created tickets and moves them between columns without reloading", async () => {
+    window.history.replaceState(null, "", "#board?project=2");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    render(<App />);
+    await screen.findByLabelText("Filter projects");
+
+    const created = { ...ticket, state: "todo" as const, revision: 1 };
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ agent_id: 0, kind: "ticket_updated", data: created }),
+      } as MessageEvent);
+    });
+    expect(await screen.findByText(created.title)).toBeTruthy();
+    expect(document.querySelector(".column-todo")?.textContent).toContain(created.title);
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 1,
+          kind: "ticket_updated",
+          data: { ...created, state: "in_progress", revision: 2 },
+        }),
+      } as MessageEvent);
+    });
+    expect(document.querySelector(".column-todo")?.textContent).not.toContain(created.title);
+    expect(document.querySelector(".column-in_progress")?.textContent).toContain(created.title);
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 0,
+          kind: "ticket_updated",
+          data: { ...created, id: 8, project_id: 1, title: "Other project" },
+        }),
+      } as MessageEvent);
+    });
+    expect(screen.queryByText("Other project")).toBeNull();
+    expect(api.tickets).toHaveBeenCalledTimes(4);
+  });
+
   it("loads terminal history on demand and details only when opened", async () => {
     window.history.replaceState(null, "", "#board");
     const completed = { ...ticket, id: 80, title: "Historical work", state: "done" as const };

@@ -337,6 +337,14 @@ impl AgentManager {
         self.emit(AgentEvent::ChannelsChanged).await;
     }
 
+    pub(crate) async fn emit_ticket_updated(&self, agent_id: i64, ticket: &Ticket) {
+        self.emit(AgentEvent::TicketUpdated {
+            agent_id,
+            data: ticket.clone(),
+        })
+        .await;
+    }
+
     pub async fn list(&self) -> Result<Vec<Agent>, AppError> {
         Ok(self.store.agents().await?)
     }

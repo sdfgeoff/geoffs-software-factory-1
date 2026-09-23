@@ -265,17 +265,21 @@ async fn create_ticket(
     headers: HeaderMap,
     Json(input): Json<CreateTicketRequest>,
 ) -> Result<Json<protocol::Ticket>, AppError> {
+    let caller = agent_header(&headers)?;
     let (ticket, wake_agent_ids) = store
         .create_ticket_for_project_with_wakes(
             NewTicket {
                 title: input.title,
                 description: input.description,
                 blocker_ids: input.blocker_ids,
-                created_by_agent_id: agent_header(&headers)?,
+                created_by_agent_id: caller,
             },
             input.project_id,
         )
         .await?;
+    agents
+        .emit_ticket_updated(caller.unwrap_or(0), &ticket)
+        .await;
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
@@ -412,6 +416,11 @@ async fn reserve_tickets(
             input.administrative_override,
         )
         .await?;
+    for ticket in &tickets {
+        agents
+            .emit_ticket_updated(caller.unwrap_or(0), ticket)
+            .await;
+    }
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
@@ -474,6 +483,9 @@ async fn update_ticket(
             },
         )
         .await?;
+    agents
+        .emit_ticket_updated(caller.unwrap_or(0), &ticket)
+        .await;
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
@@ -508,6 +520,7 @@ async fn claim_ticket(
     } else {
         None
     };
+    agents.emit_ticket_updated(agent_id, &ticket).await;
     for agent_id in wake_agent_ids {
         agents.deliver_pending(agent_id).await;
     }
@@ -1255,6 +1268,105 @@ mod tests {
             assert!(event.contains(&format!("\nid: {id}\n")));
         }
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ticket_creation_and_movement_replay_after_reconnect() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(store, manager.clone()).merge(crate::agent_api::router(manager));
+
+        let create = |title: &str| {
+            Request::post("/tickets")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "project_id": 1, "title": title }).to_string(),
+                ))
+                .unwrap()
+        };
+        let created = app.clone().oneshot(create("Live ticket")).await.unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        let moved = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/tickets/{}", created["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"state":"in_progress","expected_revision":1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved.status(), StatusCode::OK);
+
+        let claimable = app
+            .clone()
+            .oneshot(create("Claimable ticket"))
+            .await
+            .unwrap();
+        let claimable: Value =
+            serde_json::from_slice(&to_bytes(claimable.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let claimed = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/tickets/{}/claim", claimable["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "agent_id": worker.id,
+                            "expected_revision": 1,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::get("/events")
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        for (id, title, state, revision) in [
+            (1, "Live ticket", "todo", 1),
+            (2, "Live ticket", "in_progress", 2),
+            (3, "Claimable ticket", "todo", 1),
+            (4, "Claimable ticket", "in_progress", 2),
+        ] {
+            let chunk = tokio::time::timeout(
+                Duration::from_secs(2),
+                poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+            )
+            .await
+            .expect("replayed ticket event should arrive")
+            .unwrap()
+            .unwrap();
+            let event = String::from_utf8(chunk.to_vec()).unwrap();
+            assert!(event.contains("\"kind\":\"ticket_updated\""));
+            assert!(event.contains(&format!("\nid: {id}\n")));
+            assert!(event.contains(&format!("\"title\":\"{title}\"")));
+            assert!(event.contains(&format!("\"state\":\"{state}\"")));
+            assert!(event.contains(&format!("\"revision\":{revision}")));
+        }
     }
 
     #[tokio::test]
