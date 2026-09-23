@@ -773,7 +773,7 @@ mod tests {
                     blocker_ids: Vec::new(),
                     created_by_agent_id: None,
                 },
-                Some(project.id),
+                project.id,
             )
             .await
             .unwrap();

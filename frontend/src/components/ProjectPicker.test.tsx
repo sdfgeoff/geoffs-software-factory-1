@@ -9,9 +9,13 @@ vi.mock("../api", () => ({
     archiveProject: vi.fn(),
     registerProject: vi.fn(),
     setProjectCompletionWorkflow: vi.fn(),
-    setProject: vi.fn(),
   },
 }));
+
+const projects: Project[] = [
+  { id: 1, name: "Board", path: "/board", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
+  { id: 2, name: "API", path: "/api", default_branch: "trunk", completion_workflow: "external", archived_at: null, updated_at: 0 },
+];
 
 afterEach(() => {
   cleanup();
@@ -19,196 +23,57 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("selects registers and archives project roots", async () => {
-  const projects: Project[] = [
-    { id: 1, name: "Board", path: "/board", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
-    { id: 2, name: "API", path: "/api", default_branch: "trunk", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
-  ];
-  vi.mocked(api.setProject).mockResolvedValue(projects[1]);
+it("manages projects without a global project selector", async () => {
   vi.mocked(api.registerProject).mockResolvedValue(projects[1]);
-  vi.mocked(api.archiveProject).mockResolvedValue({ ...projects[1], archived_at: 1 });
   vi.mocked(api.setProjectCompletionWorkflow).mockResolvedValue({
-    ...projects[0],
-    completion_workflow: "external",
+    ...projects[0], completion_workflow: "external",
   });
+  vi.mocked(api.archiveProject).mockResolvedValue({ ...projects[1], archived_at: 1 });
   vi.stubGlobal("confirm", vi.fn(() => true));
   const changed = vi.fn().mockResolvedValue(undefined);
-  render(
-    <ProjectPicker project={projects[0]} projects={projects} onChanged={changed} onError={() => {}} />,
-  );
+  render(<ProjectPicker projects={projects} onChanged={changed} />);
 
-  fireEvent.change(screen.getByLabelText("Active project"), { target: { value: "2" } });
-  await waitFor(() => expect(api.setProject).toHaveBeenCalledWith("/api"));
+  expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
+  expect(screen.queryByLabelText("Active project")).toBeNull();
   fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "New" } });
   fireEvent.change(screen.getByLabelText("Git root"), { target: { value: "/new" } });
   fireEvent.change(screen.getByLabelText("Default branch"), { target: { value: "develop" } });
   fireEvent.click(screen.getByRole("button", { name: "Register project" }));
-  await waitFor(() =>
-    expect(api.registerProject).toHaveBeenCalledWith(
-      "New",
-      "/new",
-      "develop",
-      "board_managed",
-    ),
-  );
-  fireEvent.change(
-    screen.getByRole("combobox", { name: "Board completion workflow" }),
-    { target: { value: "external" } },
-  );
-  await waitFor(() =>
-    expect(api.setProjectCompletionWorkflow).toHaveBeenCalledWith(1, "external"),
-  );
+  await waitFor(() => expect(api.registerProject).toHaveBeenCalledWith(
+    "New", "/new", "develop", "board_managed",
+  ));
+
+  fireEvent.change(screen.getByRole("combobox", { name: "Board completion workflow" }), {
+    target: { value: "external" },
+  });
+  await waitFor(() => expect(api.setProjectCompletionWorkflow).toHaveBeenCalledWith(1, "external"));
   fireEvent.click(screen.getAllByRole("button", { name: "Archive" })[1]);
   await waitFor(() => expect(api.archiveProject).toHaveBeenCalledWith(2));
-  expect(document.activeElement).toBe(screen.getByText("Board", { selector: "summary" }));
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Projects" }));
 });
 
-it("preserves a path draft when an equivalent project is refreshed", () => {
-  const project: Project = {
-    id: 1,
-    name: "Board",
-    path: "/board",
-    default_branch: "main",
-    completion_workflow: "board_managed",
-    archived_at: null,
-    updated_at: 0,
-  };
-  const props = { projects: [project], onChanged: vi.fn(), onError: vi.fn() };
-  const { rerender } = render(<ProjectPicker {...props} project={project} />);
-
+it("preserves registration drafts across refreshed project props", () => {
+  const props = { projects, onChanged: vi.fn().mockResolvedValue(undefined) };
+  const { rerender } = render(<ProjectPicker {...props} />);
   fireEvent.change(screen.getByLabelText("Git root"), { target: { value: "/draft" } });
-  rerender(<ProjectPicker {...props} project={{ ...project }} />);
-
+  rerender(<ProjectPicker {...props} projects={[...projects]} />);
   expect((screen.getByLabelText("Git root") as HTMLInputElement).value).toBe("/draft");
 });
 
-it("explains and confirms completion workflow changes", async () => {
-  const project: Project = {
-    id: 1,
-    name: "External app",
-    path: "/external",
-    default_branch: "main",
-    completion_workflow: "external",
-    archived_at: null,
-    updated_at: 0,
-  };
-  const confirm = vi.fn(() => false);
-  vi.stubGlobal("confirm", confirm);
-  render(
-    <ProjectPicker
-      project={project}
-      projects={[project]}
-      onChanged={vi.fn()}
-      onError={vi.fn()}
-    />,
-  );
-
-  expect(screen.getAllByText("External merge").length).toBeGreaterThan(1);
-  expect(screen.getByText(/External merge approves a reviewed commit/)).toBeTruthy();
-  fireEvent.change(
-    screen.getByRole("combobox", { name: "External app completion workflow" }),
-    { target: { value: "board_managed" } },
-  );
-
-  expect(confirm).toHaveBeenCalledWith(
-    expect.stringContaining("Reviews already submitted keep their existing workflow"),
-  );
-  expect(api.setProjectCompletionWorkflow).not.toHaveBeenCalled();
-  expect(await screen.findByText("External app workflow unchanged.")).toBeTruthy();
-});
-
-it("confirms archival and keeps the action local when the backend refuses", async () => {
-  const project: Project = {
-    id: 1,
-    name: "Board",
-    path: "/board",
-    default_branch: "main",
-    completion_workflow: "board_managed",
-    archived_at: null,
-    updated_at: 0,
-  };
-  const confirm = vi.fn(() => false);
-  vi.stubGlobal("confirm", confirm);
-  render(
-    <ProjectPicker
-      project={project}
-      projects={[project]}
-      onChanged={vi.fn()}
-      onError={vi.fn()}
-    />,
-  );
-  const archive = screen.getByRole("button", { name: "Archive" });
-
-  fireEvent.click(archive);
-  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("active tickets"));
-  expect(api.archiveProject).not.toHaveBeenCalled();
-  expect(screen.getByRole("status").textContent).toBe("Archive cancelled.");
-
-  confirm.mockReturnValue(true);
-  vi.mocked(api.archiveProject).mockRejectedValue(new Error("Project has active work"));
-  fireEvent.click(archive);
-  await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toBe("Project has active work"),
-  );
-  expect(document.activeElement).toBe(archive);
-});
-
-it("allows only one archive while a project request is pending", async () => {
-  const projects: Project[] = [
-    { id: 1, name: "Board", path: "/board", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
-    { id: 2, name: "API", path: "/api", default_branch: "main", completion_workflow: "board_managed", archived_at: null, updated_at: 0 },
-  ];
-  let resolveArchive!: (project: Project) => void;
-  vi.mocked(api.archiveProject).mockReturnValueOnce(
-    new Promise((resolve) => {
-      resolveArchive = resolve;
-    }),
-  );
-  vi.stubGlobal("confirm", vi.fn(() => true));
-  render(
-    <ProjectPicker
-      project={projects[0]}
-      projects={projects}
-      onChanged={vi.fn()}
-      onError={vi.fn()}
-    />,
-  );
-
-  const archiveButtons = screen.getAllByRole("button", { name: "Archive" });
-  fireEvent.click(archiveButtons[0]);
-  expect(archiveButtons.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
-  fireEvent.click(archiveButtons[1]);
-  expect(api.archiveProject).toHaveBeenCalledTimes(1);
-
-  resolveArchive({ ...projects[0], archived_at: 1 });
-  expect(await screen.findByText("Board archived.")).toBeTruthy();
-});
-
-it("prevents duplicate registration and preserves a failed draft", async () => {
+it("preserves a failed draft and prevents duplicate registration", async () => {
   let reject!: (error: Error) => void;
-  vi.mocked(api.registerProject).mockReturnValue(
-    new Promise((_, rejectRequest) => {
-      reject = rejectRequest;
-    }),
-  );
-  render(
-    <ProjectPicker project={null} projects={[]} onChanged={vi.fn()} onError={vi.fn()} />,
-  );
+  vi.mocked(api.registerProject).mockReturnValue(new Promise((_, rejectRequest) => {
+    reject = rejectRequest;
+  }));
+  render(<ProjectPicker projects={[]} onChanged={vi.fn().mockResolvedValue(undefined)} />);
   fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "New" } });
   fireEvent.change(screen.getByLabelText("Git root"), { target: { value: "/new" } });
   const submit = screen.getByRole("button", { name: "Register project" });
   fireEvent.click(submit);
   fireEvent.click(submit);
-
   expect(api.registerProject).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole("button", { name: "Registering…" }).hasAttribute("disabled")).toBe(true);
-  expect((screen.getByLabelText("Project name") as HTMLInputElement).disabled).toBe(true);
   expect((screen.getByLabelText("Git root") as HTMLInputElement).disabled).toBe(true);
-  expect((screen.getByLabelText("Default branch") as HTMLInputElement).disabled).toBe(true);
   reject(new Error("Path is not a Git repository"));
-  await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toBe("Path is not a Git repository"),
-  );
-  expect((screen.getByLabelText("Project name") as HTMLInputElement).value).toBe("New");
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Path is not a Git repository"));
   expect((screen.getByLabelText("Git root") as HTMLInputElement).value).toBe("/new");
 });

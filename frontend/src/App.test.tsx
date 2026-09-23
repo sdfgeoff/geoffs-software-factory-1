@@ -20,7 +20,6 @@ vi.mock("./api", () => ({
     agentScopes: vi.fn(),
     agents: vi.fn(),
     channels: vi.fn(),
-    project: vi.fn(),
     projects: vi.fn(),
     settings: vi.fn(),
     tickets: vi.fn(),
@@ -98,7 +97,6 @@ describe("App agent routes", () => {
     vi.clearAllMocks();
     vi.stubGlobal("EventSource", MockEventSource);
     window.history.replaceState(null, "", "#agents/1/settings");
-    vi.mocked(api.project).mockResolvedValue(null);
     vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.settings).mockResolvedValue({
       merge_notification_channel: null,
@@ -146,6 +144,8 @@ describe("App agent routes", () => {
     expect(
       screen.getByRole("heading", { name: "Board settings" }),
     ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
+    expect(screen.queryByLabelText("Active project")).toBeNull();
     expect(window.location.hash).toBe("#settings");
     expect(
       screen
@@ -459,7 +459,6 @@ describe("App agent routes", () => {
     });
 
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
-    expect(api.project).toHaveBeenCalledTimes(2);
     expect(api.projects).toHaveBeenCalledTimes(2);
     expect(api.tickets).toHaveBeenCalledTimes(8);
     expect(api.channels).toHaveBeenCalledTimes(2);
@@ -476,7 +475,6 @@ describe("App agent routes", () => {
 
     expect(api.agents).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(3));
-    expect(api.project).toHaveBeenCalledTimes(3);
     expect(api.projects).toHaveBeenCalledTimes(3);
     expect(api.tickets).toHaveBeenCalledTimes(12);
     expect(api.channels).toHaveBeenCalledTimes(3);
@@ -489,9 +487,6 @@ describe("App agent routes", () => {
       description: "Release updates",
       most_recent_message_at: null,
     };
-    vi.mocked(api.project)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValue(project);
     vi.mocked(api.projects)
       .mockResolvedValueOnce([])
       .mockResolvedValue([project]);
@@ -512,7 +507,6 @@ describe("App agent routes", () => {
 
     await waitFor(() => expect(api.projects).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(api.channels).toHaveBeenCalledTimes(2));
-    expect(api.project).toHaveBeenCalledTimes(2);
     expect(api.tickets).toHaveBeenCalledTimes(4);
     expect(api.agents).toHaveBeenCalledTimes(1);
     expect(api.settings).toHaveBeenCalledTimes(1);
@@ -780,7 +774,6 @@ describe("App agent routes", () => {
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
 
     expect(api.agents).toHaveBeenCalledTimes(1);
-    expect(api.project).toHaveBeenCalledTimes(1);
     expect(api.projects).toHaveBeenCalledTimes(1);
     expect(api.tickets).toHaveBeenCalledTimes(4);
     expect(api.channels).toHaveBeenCalledTimes(1);

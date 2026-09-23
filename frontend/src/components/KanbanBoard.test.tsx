@@ -119,7 +119,7 @@ describe("KanbanBoard", () => {
           ticket,
           { ...ticket, id: 8, project_id: 2, title: "API work" },
         ]}
-        currentProjectId={2}
+        filterProjectId={2}
       />,
     );
 
@@ -134,6 +134,24 @@ describe("KanbanBoard", () => {
     await waitFor(() =>
       expect(api.createTicket).toHaveBeenCalledWith("Scoped work", 2),
     );
+  });
+
+  it("defaults from the route without overwriting an edited ticket draft", () => {
+    const { rerender } = render(
+      <KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />,
+    );
+    const project = screen.getByLabelText("Ticket project") as HTMLSelectElement;
+    expect(project.value).toBe("1");
+    fireEvent.change(screen.getByLabelText("New ticket title"), {
+      target: { value: "Keep this scoped" },
+    });
+    rerender(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={2} />);
+    expect(project.value).toBe("1");
+
+    cleanup();
+    render(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={null} />);
+    expect((screen.getByLabelText("Ticket project") as HTMLSelectElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "Create ticket" }).closest("form")?.checkValidity()).toBe(false);
   });
 
   it("opens and closes the complete ticket editor outside the card", () => {
@@ -383,7 +401,7 @@ describe("KanbanBoard", () => {
         reject = rejectRequest;
       }),
     );
-    render(<KanbanBoard {...baseProps} tickets={[]} currentProjectId={1} />);
+    render(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />);
     fireEvent.change(screen.getByLabelText("New ticket title"), {
       target: { value: "Draft ticket" },
     });
@@ -406,7 +424,7 @@ describe("KanbanBoard", () => {
         resolveCreate = resolve;
       }),
     );
-    render(<KanbanBoard {...baseProps} tickets={[]} currentProjectId={1} />);
+    render(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />);
     const title = screen.getByLabelText("New ticket title") as HTMLInputElement;
     fireEvent.change(title, { target: { value: "Submitted title" } });
     fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));

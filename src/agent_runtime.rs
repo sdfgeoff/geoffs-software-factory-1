@@ -511,16 +511,20 @@ impl AgentManager {
         Ok(agent)
     }
 
-    pub async fn create(&self, name: &str) -> Result<Agent, AppError> {
+    pub async fn create(&self, name: &str, project_id: i64) -> Result<Agent, AppError> {
         let _operation = self.operations.lock().await;
         validate_agent_name(name)?;
         if self.store.agent_named(name).await?.is_some() {
             return Err(AppError::conflict("agent name already exists"));
         }
-        let project =
-            self.store.project().await?.ok_or_else(|| {
-                AppError::bad_request("select a project before creating an agent")
-            })?;
+        let project = self
+            .store
+            .project_by_id(project_id)
+            .await?
+            .ok_or_else(|| AppError::bad_request("agent project does not exist"))?;
+        if project.archived_at.is_some() {
+            return Err(AppError::conflict("agent project is archived"));
+        }
         let root = PathBuf::from(project.path);
         let homes_root = agent_homes_root(&root)?;
         let homes_root = homes_root
@@ -629,16 +633,9 @@ impl AgentManager {
             .agent(agent_id)
             .await?
             .ok_or_else(|| AppError::not_found("agent not found"))?;
-        let project_id = match agent.active_project_id {
-            Some(project_id) => project_id,
-            None => {
-                self.store
-                    .project()
-                    .await?
-                    .ok_or_else(|| AppError::bad_request("project is not selected"))?
-                    .id
-            }
-        };
+        let project_id = agent
+            .active_project_id
+            .ok_or_else(|| AppError::bad_request("agent has no active project"))?;
         self.worktree_for_project(agent_id, project_id).await
     }
 
@@ -794,8 +791,8 @@ mod tests {
             "http://127.0.0.1:1/api".into(),
         );
 
-        let first = manager.create("backend").await.unwrap();
-        let second = manager.create("frontend").await.unwrap();
+        let first = manager.create("backend", project.id).await.unwrap();
+        let second = manager.create("frontend", project.id).await.unwrap();
         let first_worktree = store
             .agent_project_worktree(first.id, project.id)
             .await

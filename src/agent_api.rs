@@ -68,7 +68,9 @@ async fn create_agent(
     State(manager): State<AgentManager>,
     Json(input): Json<CreateAgentRequest>,
 ) -> Result<Json<protocol::Agent>, AppError> {
-    Ok(Json(manager.create(&input.name).await?.into()))
+    Ok(Json(
+        manager.create(&input.name, input.project_id).await?.into(),
+    ))
 }
 
 async fn rename_agent(
@@ -389,6 +391,40 @@ mod tests {
         .expect("stream should remain open")
         .expect("event body should be readable");
         String::from_utf8(chunk.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_creation_requires_an_explicit_valid_project() {
+        let store = Store::memory().await.unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(manager);
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::post("/agents")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"worker"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let unknown = app
+            .oneshot(
+                Request::post("/agents")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"worker","project_id":999}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

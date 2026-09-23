@@ -89,41 +89,36 @@ h2 {
   font-weight: 800;
   letter-spacing: 0.16em;
 }
-.project-picker {
-  position: relative;
-  min-width: min(34rem, 45vw);
-}
-.project-picker > summary {
-  cursor: pointer;
-  font-weight: 700;
-  text-align: right;
-}
-.project-picker[open] {
+.project-settings {
+  margin-top: 1rem;
   padding: 0.75rem;
   border: 1px solid #d8d1c5;
   border-radius: 0.65rem;
   background: #fffefa;
 }
-.project-picker form {
+.project-settings h2 {
+  margin-top: 0;
+}
+.project-settings form {
   display: grid;
   gap: 0.5rem;
   margin-top: 0.75rem;
 }
-.project-picker ul {
+.project-settings ul {
   display: grid;
   gap: 0.35rem;
   margin: 0.75rem 0 0;
   padding: 0;
   list-style: none;
 }
-.project-picker li {
+.project-settings li {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
   font-size: 0.75rem;
 }
-.project-picker li span {
+.project-settings li span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -326,9 +321,6 @@ nav a.active {
   line-height: 1.2;
   text-transform: uppercase;
   white-space: nowrap;
-}
-.project-picker > summary .workflow-badge {
-  margin-inline-start: 0.45rem;
 }
 .ticket-card-title {
   display: -webkit-box;
@@ -858,12 +850,6 @@ aside button.selected {
   header {
     align-items: stretch;
     flex-direction: column;
-  }
-  .project-picker {
-    min-width: 0;
-  }
-  .project-picker > summary {
-    text-align: left;
   }
   nav {
     overflow-x: auto;

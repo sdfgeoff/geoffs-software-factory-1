@@ -123,6 +123,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const [worktrees, setWorktrees] = useState<AgentProjectWorktree[]>([]);
   const [detailsAgentId, setDetailsAgentId] = useState<number | null>(null);
   const [name, setName] = useState("");
+  const [initialProjectId, setInitialProjectId] = useState("");
   const [prompts, setPrompts] = useState<Record<number, string>>({});
   const [settingsDrafts, setSettingsDrafts] = useState<
     Record<number, AgentSettingsDraft>
@@ -355,8 +356,9 @@ export const AgentWorkspace = memo(function AgentWorkspace({
     setCreating(true);
     setCreateStatus("Creating…");
     try {
-      const agent = await api.createAgent(name);
+      const agent = await api.createAgent(name, Number(initialProjectId));
       setName("");
+      setInitialProjectId("");
       setShowAgentCreator(false);
       onSelectAgent(agent.id);
       await onChanged(agent);
@@ -532,6 +534,23 @@ export const AgentWorkspace = memo(function AgentWorkspace({
               pattern="[A-Za-z0-9_-]+"
               required
             />
+          </label>
+          <label>
+            Initial project
+            <select
+              value={initialProjectId}
+              disabled={creating}
+              onChange={(event) => {
+                setInitialProjectId(event.target.value);
+                setCreateStatus("");
+              }}
+              required
+            >
+              <option value="" disabled>Select project</option>
+              {projects.filter((project) => !project.archived_at).map((project) => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
           </label>
           <button type="submit" disabled={creating}>
             {creating ? "Creating…" : "Create agent"}

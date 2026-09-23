@@ -18,7 +18,6 @@ interface Props {
   tickets: (TicketSummary | Ticket)[];
   agents: Agent[];
   projects?: Project[];
-  currentProjectId?: number | null;
   filterProjectId?: number | null;
   selectedTicketId?: number | null;
   selectedTicket?: Ticket | null;
@@ -34,7 +33,6 @@ export function KanbanBoard({
   tickets,
   agents,
   projects = [],
-  currentProjectId = null,
   filterProjectId: routedProjectId,
   selectedTicketId: routedTicketId,
   selectedTicket: loadedTicket,
@@ -48,7 +46,8 @@ export function KanbanBoard({
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
   const [createStatus, setCreateStatus] = useState("");
-  const [projectId, setProjectId] = useState(currentProjectId?.toString() ?? "");
+  const [projectId, setProjectId] = useState(routedProjectId?.toString() ?? "");
+  const [createDraftEdited, setCreateDraftEdited] = useState(false);
   const [filterProjectId, setFilterProjectId] = useState(
     routedProjectId?.toString() ?? "all",
   );
@@ -60,13 +59,11 @@ export function KanbanBoard({
     routedTicketId === undefined ? localTicketId : routedTicketId;
   const selectTicket = onSelectTicket ?? setLocalTicketId;
   useEffect(() => {
-    if (!projectId && currentProjectId) setProjectId(currentProjectId.toString());
-  }, [currentProjectId, projectId]);
-  useEffect(() => {
     if (routedProjectId !== undefined) {
       setFilterProjectId(routedProjectId?.toString() ?? "all");
+      if (!createDraftEdited) setProjectId(routedProjectId?.toString() ?? "");
     }
-  }, [routedProjectId]);
+  }, [createDraftEdited, routedProjectId]);
   const selectedSummary = tickets.find(
     (ticket) => ticket.id === selectedTicketId,
   );
@@ -101,6 +98,8 @@ export function KanbanBoard({
     try {
       const created = await api.createTicket(title, Number(projectId));
       setTitle("");
+      setCreateDraftEdited(false);
+      setProjectId(filterProjectId === "all" ? "" : filterProjectId);
       await onChanged(created);
       setCreateStatus("Ticket created.");
     } catch (error) {
@@ -118,7 +117,10 @@ export function KanbanBoard({
         <input
           id="ticket-title"
           value={title}
-          onChange={(event) => setTitle(event.target.value)}
+          onChange={(event) => {
+            setTitle(event.target.value);
+            setCreateDraftEdited(true);
+          }}
           disabled={creating}
           placeholder="Add a ticket"
           required
@@ -128,7 +130,10 @@ export function KanbanBoard({
         <select
           id="ticket-project"
           value={projectId}
-          onChange={(event) => setProjectId(event.target.value)}
+          onChange={(event) => {
+            setProjectId(event.target.value);
+            setCreateDraftEdited(true);
+          }}
           disabled={creating}
           required
         >
@@ -148,6 +153,9 @@ export function KanbanBoard({
           value={filterProjectId}
           onChange={(event) => {
             setFilterProjectId(event.target.value);
+            if (!createDraftEdited) {
+              setProjectId(event.target.value === "all" ? "" : event.target.value);
+            }
             onFilterProject?.(
               event.target.value === "all" ? null : Number(event.target.value),
             );

@@ -75,12 +75,6 @@ export const api = {
         merge_notification_channel: mergeNotificationChannel,
       }),
     }),
-  project: () => request<Project | null>("/project"),
-  setProject: (path: string) =>
-    request<Project>("/project", {
-      method: "PUT",
-      body: JSON.stringify({ path }),
-    }),
   projects: () => request<Project[]>("/projects"),
   registerProject: (
     name: string,
@@ -110,7 +104,7 @@ export const api = {
   tickets: (query: TicketSummaryQuery = {}) =>
     request<TicketSummaryPage>(`/tickets${ticketPageQuery(query)}`),
   ticket: (id: number) => request<Ticket>(`/tickets/${id}`),
-  createTicket: (title: string, projectId?: number) =>
+  createTicket: (title: string, projectId: number) =>
     request<Ticket>("/tickets", {
       method: "POST",
       body: JSON.stringify({ title, project_id: projectId }),
@@ -183,10 +177,10 @@ export const api = {
       body: JSON.stringify({ author: "human", body }),
     }),
   agents: () => request<Agent[]>("/agents"),
-  createAgent: (name: string) =>
+  createAgent: (name: string, projectId: number) =>
     request<Agent>("/agents", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, project_id: projectId }),
     }),
   renameAgent: (id: number, name: string) =>
     request<Agent>(`/agents/${id}`, {

@@ -18,7 +18,7 @@ use crate::{
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CreateTicketArguments {
-    project_id: Option<i64>,
+    project_id: i64,
     title: String,
     #[serde(default)]
     description: String,

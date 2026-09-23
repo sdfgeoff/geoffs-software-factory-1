@@ -303,10 +303,6 @@ export interface AgentMessageDelta {
   delta: string;
 }
 
-export interface SetProjectRequest {
-  path: string;
-}
-
 export interface RegisterProjectRequest {
   name: string;
   path: string;
@@ -319,7 +315,7 @@ export interface SetProjectCompletionWorkflowRequest {
 }
 
 export interface CreateTicketRequest {
-  project_id?: number | null;
+  project_id: number;
   title: string;
   description?: string;
   blocker_ids?: number[];
@@ -364,6 +360,7 @@ export interface CreateChannelRequest {
 
 export interface CreateAgentRequest {
   name: string;
+  project_id: number;
 }
 
 export interface RenameAgentRequest {

@@ -147,7 +147,6 @@ function routeHash(route: Route) {
 
 export function App() {
   const [route, setRoute] = useState(() => parseRoute(window.location.hash));
-  const [project, setProject] = useState<Project | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tickets, setTickets] = useState<TicketSummary[]>([]);
   const [ticketDetails, setTicketDetails] = useState<Record<number, Ticket>>({});
@@ -211,16 +210,14 @@ export function App() {
       setTicketDetailRepair((value) => value + 1);
     }
     try {
-      const [nextProject, nextProjects, activePages, nextChannels, nextAgents, nextSettings] =
+      const [nextProjects, activePages, nextChannels, nextAgents, nextSettings] =
         await Promise.all([
-          api.project(),
           api.projects(),
           Promise.all(activeTicketStates.map(loadTicketState)),
           api.channels(),
           api.agents(),
           api.settings(),
         ]);
-      setProject(nextProject);
       setProjects(nextProjects);
       setTickets((current) => {
         const active = activePages.flat();
@@ -290,12 +287,7 @@ export function App() {
 
   const reloadProjects = useCallback(async () => {
     try {
-      const [nextProject, nextProjects] = await Promise.all([
-        api.project(),
-        api.projects(),
-      ]);
-      setProject(nextProject);
-      setProjects(nextProjects);
+      setProjects(await api.projects());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -577,12 +569,6 @@ export function App() {
           <p className="eyebrow">LOCAL WORKSPACE</p>
           <h1>Multi-agent board</h1>
         </div>
-        <ProjectPicker
-          project={project}
-          projects={projects}
-          onChanged={reloadProjects}
-          onError={report}
-        />
       </header>
       <nav aria-label="Main views">
         {(["board", "messages", "agents", "settings"] as const).map((item) => {
@@ -632,7 +618,6 @@ export function App() {
           tickets={tickets}
           agents={agents}
           projects={projects}
-          currentProjectId={project?.id ?? null}
           filterProjectId={route.view === "board" ? route.projectId : lastBoardRoute.projectId}
           selectedTicketId={route.view === "board" ? route.ticketId : lastBoardRoute.ticketId}
           selectedTicket={selectedTicket}
@@ -698,6 +683,7 @@ export function App() {
           onChanged={setSettings}
           onError={report}
         />
+        <ProjectPicker projects={projects} onChanged={reloadProjects} />
         </div>
       )}
     </div>

@@ -10,9 +10,8 @@ use multi_agent_board_protocol::{
     ReviewRevisionRequest, ScheduleSelfReminderRequest, SendAgentMessageRequest,
     SetAgentChannelSubscriptionsRequest, SetAgentProjectSubscriptionsRequest,
     SetAgentScopesRequest, SetAgentWakeSettingsRequest, SetBoardSettingsRequest,
-    SetExternalChangeRequest, SetProjectCompletionWorkflowRequest, SetProjectRequest, Ticket,
-    TicketActivity, TicketClaimResponse, TicketSummary, TicketSummaryPage, UpdateTicketRequest,
-    WakeEvent,
+    SetExternalChangeRequest, SetProjectCompletionWorkflowRequest, Ticket, TicketActivity,
+    TicketClaimResponse, TicketSummary, TicketSummaryPage, UpdateTicketRequest, WakeEvent,
 };
 
 #[derive(Debug)]
@@ -119,14 +118,6 @@ impl BoardClient {
         request: &SetBoardSettingsRequest,
     ) -> Result<BoardSettings, McpError> {
         self.request(Method::PUT, "/settings", Some(request)).await
-    }
-
-    pub async fn project(&self) -> Result<Option<Project>, McpError> {
-        self.get("/project").await
-    }
-
-    pub async fn set_project(&self, request: &SetProjectRequest) -> Result<Project, McpError> {
-        self.request(Method::PUT, "/project", Some(request)).await
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Project>, McpError> {

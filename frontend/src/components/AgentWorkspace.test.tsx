@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import type { Agent, AgentMessagePage, Ticket } from "../types";
+import type { Agent, AgentMessagePage, Project, Ticket } from "../types";
 import { AgentWorkspace } from "./AgentWorkspace";
 
 const messageContentRender = vi.hoisted(() => vi.fn());
@@ -106,6 +106,40 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.setAgentChannelSubscriptions).mockResolvedValue(["general"]);
     vi.mocked(api.setAgentProjectSubscriptions).mockResolvedValue([]);
     vi.mocked(api.setAgentWakeSettings).mockResolvedValue(agent);
+  });
+
+  it("requires an explicit initial project when creating an agent", async () => {
+    const project: Project = {
+      id: 4,
+      name: "Fieldscan",
+      path: "/repo/fieldscan",
+      default_branch: "main",
+      completion_workflow: "external",
+      archived_at: null,
+      updated_at: 0,
+    };
+    render(
+      <AgentWorkspace
+        agents={[]}
+        channels={[]}
+        tickets={[]}
+        projects={[project]}
+        selectedAgentId={null}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("New agent"), { target: { value: "builder" } });
+    expect((screen.getByRole("button", { name: "Create agent" }) as HTMLButtonElement).form?.checkValidity()).toBe(false);
+    fireEvent.change(screen.getByLabelText("Initial project"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith("builder", 4));
   });
 
   it("does not rerender a 500-message history while typing", async () => {

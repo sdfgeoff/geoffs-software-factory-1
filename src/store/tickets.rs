@@ -71,6 +71,8 @@ enum TicketWakeReason {
 }
 
 impl Store {
+    // Legacy setup compatibility for migrations and tests. Runtime API and MCP
+    // paths require explicit project IDs and never read this board-wide value.
     pub async fn project(&self) -> Result<Option<Project>, sqlx::Error> {
         sqlx::query_as(
             "SELECT p.id, p.name, p.path, p.default_branch, p.completion_workflow, p.archived_at, p.updated_at FROM projects p \
@@ -89,33 +91,8 @@ impl Store {
             .await
     }
 
-    pub async fn project_by_path(&self, path: &str) -> Result<Option<Project>, sqlx::Error> {
-        sqlx::query_as(
-            "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE path = ?",
-        )
-        .bind(path)
-        .fetch_optional(&self.pool)
-        .await
-    }
-
-    pub async fn select_project(&self, id: i64) -> Result<Project, AppError> {
-        let project = self
-            .project_by_id(id)
-            .await?
-            .ok_or_else(|| AppError::not_found("project not found"))?;
-        if project.archived_at.is_some() {
-            return Err(AppError::conflict("project is archived"));
-        }
-        sqlx::query(
-            "INSERT INTO board_state (id, current_project_id) VALUES (1, ?) \
-             ON CONFLICT(id) DO UPDATE SET current_project_id = excluded.current_project_id",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(project)
-    }
-
+    // Creates a project fixture while preserving old migration-test semantics.
+    // Product registration uses register_project and does not select a default.
     pub async fn set_project(&self, path: &str) -> Result<Project, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let name = std::path::Path::new(path)
@@ -203,13 +180,6 @@ impl Store {
             .execute(&mut *transaction)
             .await?
             .last_insert_rowid();
-        sqlx::query(
-            "INSERT INTO board_state (id, current_project_id) VALUES (1, ?) \
-             ON CONFLICT(id) DO UPDATE SET current_project_id = COALESCE(current_project_id, excluded.current_project_id)",
-        )
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
         let project = sqlx::query_as(
             "SELECT id, name, path, default_branch, completion_workflow, archived_at, updated_at FROM projects WHERE id = ?",
         )
@@ -244,13 +214,6 @@ impl Store {
             sqlx::query(
                 "UPDATE projects SET archived_at = unixepoch(), updated_at = unixepoch() WHERE id = ?",
             )
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "UPDATE board_state SET current_project_id = (SELECT id FROM projects WHERE archived_at IS NULL AND id != ? ORDER BY id LIMIT 1) WHERE id = 1 AND current_project_id = ?",
-            )
-            .bind(id)
             .bind(id)
             .execute(&mut *transaction)
             .await?;
@@ -377,20 +340,25 @@ impl Store {
         &self,
         new: NewTicket,
     ) -> Result<(Ticket, Vec<i64>), AppError> {
-        self.create_ticket_for_project_with_wakes(new, None).await
+        let project_id = self
+            .project()
+            .await?
+            .ok_or_else(|| AppError::bad_request("ticket project is required"))?
+            .id;
+        self.create_ticket_for_project_with_wakes(new, project_id)
+            .await
     }
 
     pub async fn create_ticket_for_project_with_wakes(
         &self,
         new: NewTicket,
-        project_id: Option<i64>,
+        project_id: i64,
     ) -> Result<(Ticket, Vec<i64>), AppError> {
         validate_title(&new.title)?;
-        let project = match project_id {
-            Some(id) => self.project_by_id(id).await?,
-            None => self.project().await?,
-        }
-        .ok_or_else(|| AppError::bad_request("ticket project does not exist"))?;
+        let project = self
+            .project_by_id(project_id)
+            .await?
+            .ok_or_else(|| AppError::bad_request("ticket project does not exist"))?;
         if project.archived_at.is_some() {
             return Err(AppError::conflict("ticket project is archived"));
         }

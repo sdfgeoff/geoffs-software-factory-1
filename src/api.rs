@@ -14,8 +14,7 @@ use multi_agent_board_protocol::{
     RegisterProjectRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
     ScheduleSelfReminderRequest, SetAgentChannelSubscriptionsRequest,
     SetAgentProjectSubscriptionsRequest, SetBoardSettingsRequest, SetExternalChangeRequest,
-    SetProjectCompletionWorkflowRequest, SetProjectRequest, TicketSummaryQuery,
-    UpdateTicketRequest,
+    SetProjectCompletionWorkflowRequest, TicketSummaryQuery, UpdateTicketRequest,
 };
 
 use crate::{
@@ -28,7 +27,6 @@ use crate::{
 pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
         .route("/settings", get(get_settings).put(set_settings))
-        .route("/project", get(get_project).put(set_project))
         .route("/projects", get(list_projects).post(register_project))
         .route(
             "/projects/{id}/completion-workflow",
@@ -117,38 +115,6 @@ async fn set_settings(
             .await?
             .into(),
     ))
-}
-
-async fn get_project(
-    State(store): State<Store>,
-) -> Result<Json<Option<protocol::Project>>, AppError> {
-    Ok(Json(store.project().await?.map(Into::into)))
-}
-
-async fn set_project(
-    State(store): State<Store>,
-    Extension(agents): Extension<AgentManager>,
-    Json(input): Json<SetProjectRequest>,
-) -> Result<Json<protocol::Project>, AppError> {
-    let canonical = canonical_git_root(&input.path).await?;
-    let path = canonical
-        .to_str()
-        .ok_or_else(|| AppError::bad_request("project path is not valid UTF-8"))?;
-    let project = if let Some(project) = store.project_by_path(path).await? {
-        store.select_project(project.id).await?
-    } else {
-        let name = canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| AppError::bad_request("project name is not valid UTF-8"))?;
-        let default_branch = current_branch(&canonical).await?;
-        let project = store
-            .register_project(name, path, &default_branch, Default::default())
-            .await?;
-        store.select_project(project.id).await?
-    };
-    agents.emit_projects_changed().await;
-    Ok(Json(project.into()))
 }
 
 async fn list_projects(
@@ -256,24 +222,6 @@ async fn validate_default_branch(root: &std::path::Path, branch: &str) -> Result
         ));
     }
     Ok(())
-}
-
-async fn current_branch(root: &std::path::Path) -> Result<String, AppError> {
-    let output = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .output()
-        .await
-        .map_err(|error| AppError::internal(format!("failed to start Git: {error}")))?;
-    if !output.status.success() {
-        return Err(AppError::bad_request(
-            "project must have a checked-out default branch",
-        ));
-    }
-    String::from_utf8(output.stdout)
-        .map(|branch| branch.trim().to_owned())
-        .map_err(|_| AppError::bad_request("default branch is not valid UTF-8"))
 }
 
 async fn list_tickets(
@@ -1145,7 +1093,7 @@ mod tests {
                     blocker_ids: Vec::new(),
                     created_by_agent_id: None,
                 },
-                project["id"].as_i64(),
+                project["id"].as_i64().unwrap(),
             )
             .await
             .unwrap()
@@ -1246,12 +1194,6 @@ mod tests {
                 .unwrap();
 
         for request in [
-            Request::put("/project")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "path": project["path"] }).to_string(),
-                ))
-                .unwrap(),
             Request::put(format!("/projects/{}/completion-workflow", project["id"]))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"completion_workflow":"external"}"#))
@@ -1281,7 +1223,6 @@ mod tests {
             (2, "projects_changed"),
             (3, "projects_changed"),
             (4, "projects_changed"),
-            (5, "projects_changed"),
         ] {
             let chunk = tokio::time::timeout(
                 Duration::from_secs(2),
@@ -1361,6 +1302,12 @@ mod tests {
     #[tokio::test]
     async fn tickets_round_trip_over_http() {
         let app = test_router(Store::memory().await.unwrap());
+        let retired_project_route = app
+            .clone()
+            .oneshot(Request::get("/project").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(retired_project_route.status(), StatusCode::NOT_FOUND);
         let missing_project = app
             .clone()
             .oneshot(
@@ -1379,6 +1326,18 @@ mod tests {
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"title":"Wire the API"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"project_id":1,"title":"Wire the API"}"#))
                     .unwrap(),
             )
             .await
@@ -1434,7 +1393,7 @@ mod tests {
                     blocker_ids: Vec::new(),
                     created_by_agent_id: None,
                 },
-                Some(other.id),
+                other.id,
             )
             .await
             .unwrap()
@@ -1447,7 +1406,7 @@ mod tests {
                     blocker_ids: Vec::new(),
                     created_by_agent_id: None,
                 },
-                Some(preferred.id),
+                preferred.id,
             )
             .await
             .unwrap()
@@ -1491,7 +1450,7 @@ mod tests {
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"title":"Available work"}"#))
+                    .body(Body::from(r#"{"project_id":1,"title":"Available work"}"#))
                     .unwrap(),
             )
             .await
@@ -1513,7 +1472,7 @@ mod tests {
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"title":"Valid"}"#))
+                    .body(Body::from(r#"{"project_id":1,"title":"Valid"}"#))
                     .unwrap(),
             )
             .await
@@ -1607,7 +1566,7 @@ mod tests {
                     blocker_ids: Vec::new(),
                     created_by_agent_id: None,
                 },
-                Some(second_project.id),
+                second_project.id,
             )
             .await
             .unwrap()
@@ -1667,7 +1626,7 @@ mod tests {
                     blocker_ids: Vec::new(),
                     created_by_agent_id: None,
                 },
-                Some(first_project.id),
+                first_project.id,
             )
             .await
             .unwrap()
@@ -1749,7 +1708,7 @@ mod tests {
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(AGENT_ID_HEADER, 1)
-                    .body(Body::from(r#"{"title":"Owned work"}"#))
+                    .body(Body::from(r#"{"project_id":1,"title":"Owned work"}"#))
                     .unwrap(),
             )
             .await
@@ -1843,7 +1802,7 @@ mod tests {
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"title":"User work"}"#))
+                    .body(Body::from(r#"{"project_id":1,"title":"User work"}"#))
                     .unwrap(),
             )
             .await
@@ -1877,7 +1836,7 @@ mod tests {
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"title":"Available work"}"#))
+                    .body(Body::from(r#"{"project_id":1,"title":"Available work"}"#))
                     .unwrap(),
             )
             .await
@@ -1939,7 +1898,7 @@ mod tests {
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"title":"Foundation"}"#))
+                    .body(Body::from(r#"{"project_id":1,"title":"Foundation"}"#))
                     .unwrap(),
             )
             .await
@@ -1951,7 +1910,9 @@ mod tests {
             .oneshot(
                 Request::post("/tickets")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"title":"Follow-up","blocker_ids":[1]}"#))
+                    .body(Body::from(
+                        r#"{"project_id":1,"title":"Follow-up","blocker_ids":[1]}"#,
+                    ))
                     .unwrap(),
             )
             .await

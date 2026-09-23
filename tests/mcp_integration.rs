@@ -169,12 +169,26 @@ async fn mcp_calls_the_server_without_database_access() {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let base_url = format!("http://{address}");
 
-    let created = mcp_request(
+    let missing_project = mcp_request(
         &base_url,
         1,
         json!({
             "jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"create_ticket","arguments":{"title":"From MCP"}}
+        }),
+    )
+    .await;
+    assert_eq!(
+        missing_project.pointer("/result/isError"),
+        Some(&json!(true))
+    );
+
+    let created = mcp_request(
+        &base_url,
+        1,
+        json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"create_ticket","arguments":{"project_id":second_project.id,"title":"From MCP"}}
         }),
     )
     .await;
@@ -213,7 +227,7 @@ async fn mcp_calls_the_server_without_database_access() {
         1,
         3,
         "create_ticket",
-        json!({"title":"Blocked MCP ticket","blocker_ids":[1]}),
+        json!({"project_id":second_project.id,"title":"Blocked MCP ticket","blocker_ids":[1]}),
     )
     .await;
     assert_eq!(tool_content(&dependent)["blocker_ids"], json!([1]));
@@ -223,7 +237,7 @@ async fn mcp_calls_the_server_without_database_access() {
         1,
         4,
         "create_ticket",
-        json!({"title":"Reserved MCP ticket"}),
+        json!({"project_id":second_project.id,"title":"Reserved MCP ticket"}),
     )
     .await;
     assert_eq!(tool_content(&reservable)["created_by_agent_id"], 1);

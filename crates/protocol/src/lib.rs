@@ -490,11 +490,6 @@ pub struct AgentMessageDelta {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SetProjectRequest {
-    pub path: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub struct RegisterProjectRequest {
     pub name: String,
     pub path: String,
@@ -510,7 +505,7 @@ pub struct SetProjectCompletionWorkflowRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateTicketRequest {
-    pub project_id: Option<i64>,
+    pub project_id: i64,
     pub title: String,
     #[serde(default)]
     pub description: String,
@@ -612,6 +607,7 @@ pub struct CreateChannelRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateAgentRequest {
     pub name: String,
+    pub project_id: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

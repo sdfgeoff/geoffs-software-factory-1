@@ -1,31 +1,26 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Project, ProjectCompletionWorkflow } from "../types";
 
 interface Props {
-  project: Project | null;
   projects: Project[];
   onChanged: () => Promise<void>;
-  onError: (error: unknown) => void;
 }
 
-export function ProjectPicker({ project, projects, onChanged }: Props) {
-  const [path, setPath] = useState(project?.path ?? "");
+export function ProjectPicker({ projects, onChanged }: Props) {
+  const [path, setPath] = useState("");
   const [name, setName] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
   const [completionWorkflow, setCompletionWorkflow] =
     useState<ProjectCompletionWorkflow>("board_managed");
-  const [selecting, setSelecting] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [archivingId, setArchivingId] = useState<number | null>(null);
   const [changingWorkflowId, setChangingWorkflowId] = useState<number | null>(null);
-  const [selectionStatus, setSelectionStatus] = useState("");
   const [registerStatus, setRegisterStatus] = useState("");
   const [archiveStatus, setArchiveStatus] = useState("");
-  const summaryRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const projectBusy =
-    selecting || registering || archivingId !== null || changingWorkflowId !== null;
-  useEffect(() => setPath(project?.path ?? ""), [project?.path]);
+    registering || archivingId !== null || changingWorkflowId !== null;
   async function register(event: FormEvent) {
     event.preventDefault();
     if (projectBusy) return;
@@ -82,7 +77,7 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       await api.archiveProject(item.id);
       await onChanged();
       setArchiveStatus(`${item.name} archived.`);
-      summaryRef.current?.focus();
+      headingRef.current?.focus();
     } catch (error) {
       setArchiveStatus(error instanceof Error ? error.message : "Could not archive project");
       button.focus();
@@ -90,51 +85,12 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
       setArchivingId(null);
     }
   }
-  async function select(next: Project) {
-    if (projectBusy) return;
-    setSelecting(true);
-    setSelectionStatus("Selecting…");
-    setPath(next.path);
-    try {
-      await api.setProject(next.path);
-      await onChanged();
-      setSelectionStatus(`${next.name} selected.`);
-    } catch (error) {
-      setSelectionStatus(error instanceof Error ? error.message : "Could not select project");
-    } finally {
-      setSelecting(false);
-    }
-  }
   return (
-    <details className="project-picker">
-      <summary ref={summaryRef}>
-        {project?.name ?? "Choose project"}
-        {project?.completion_workflow === "external" && (
-          <span className="workflow-badge">External merge</span>
-        )}
-      </summary>
-      <label htmlFor="active-project">
-        Active project
-        <select
-          id="active-project"
-          value={project?.id ?? ""}
-          onChange={(event) => {
-            const selected = projects.find(
-              (item) => item.id === Number(event.target.value),
-            );
-            if (selected) {
-              void select(selected);
-            }
-          }}
-          disabled={projectBusy}
-        >
-          <option value="" disabled>Select a project</option>
-          {projects.filter((item) => !item.archived_at).map((item) => (
-            <option key={item.id} value={item.id}>{item.name}</option>
-          ))}
-        </select>
-      </label>
-      {selectionStatus && <p role="status" aria-live="polite">{selectionStatus}</p>}
+    <section className="project-settings" aria-labelledby="project-settings-heading">
+      <h2 id="project-settings-heading" ref={headingRef} tabIndex={-1}>Projects</h2>
+      <p className="field-help">
+        Register repositories and choose how newly submitted reviews are completed.
+      </p>
       <form onSubmit={register}>
         <label>
           Project name
@@ -227,6 +183,6 @@ export function ProjectPicker({ project, projects, onChanged }: Props) {
         ))}
       </ul>
       {archiveStatus && <p role="status" aria-live="polite">{archiveStatus}</p>}
-    </details>
+    </section>
   );
 }

@@ -568,7 +568,7 @@ mod tests {
         }
 
         let store = Store::memory().await.unwrap();
-        store
+        let project = store
             .set_project(repository.to_str().unwrap())
             .await
             .unwrap();
@@ -583,10 +583,10 @@ mod tests {
         assert!(store.channel("merges").await.unwrap().is_none());
         manager.set_settings(Some("merges")).await.unwrap();
         assert!(store.channel("merges").await.unwrap().is_some());
-        let worker = manager.create("worker").await.unwrap();
+        let worker = manager.create("worker", project.id).await.unwrap();
         let worker_worktree = agent_worktree(&store, worker.id).await;
-        let reviewer = manager.create("reviewer").await.unwrap();
-        let subscriber = manager.create("subscriber").await.unwrap();
+        let reviewer = manager.create("reviewer", project.id).await.unwrap();
+        let subscriber = manager.create("subscriber", project.id).await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
@@ -988,7 +988,7 @@ mod tests {
         }
 
         let store = Store::memory().await.unwrap();
-        store
+        let project = store
             .set_project(repository.to_str().unwrap())
             .await
             .unwrap();
@@ -998,9 +998,9 @@ mod tests {
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
         );
-        let worker = manager.create("old-name").await.unwrap();
+        let worker = manager.create("old-name", project.id).await.unwrap();
         let worker_worktree = agent_worktree(&store, worker.id).await;
-        let reviewer = manager.create("reviewer").await.unwrap();
+        let reviewer = manager.create("reviewer", project.id).await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
@@ -1092,7 +1092,7 @@ mod tests {
         }
 
         let store = Store::memory().await.unwrap();
-        store
+        let project = store
             .set_project(repository.to_str().unwrap())
             .await
             .unwrap();
@@ -1102,9 +1102,12 @@ mod tests {
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
         );
-        let worker = manager.create("project-worker").await.unwrap();
+        let worker = manager.create("project-worker", project.id).await.unwrap();
         let worker_worktree = agent_worktree(&store, worker.id).await;
-        let reviewer = manager.create("project-reviewer").await.unwrap();
+        let reviewer = manager
+            .create("project-reviewer", project.id)
+            .await
+            .unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
@@ -1198,9 +1201,9 @@ mod tests {
         )
         .with_merge_notification_channel(Some("merges".into()))
         .unwrap();
-        let worker = manager.create("worker").await.unwrap();
+        let worker = manager.create("worker", project.id).await.unwrap();
         let worker_worktree = agent_worktree(&store, worker.id).await;
-        let reviewer = manager.create("reviewer").await.unwrap();
+        let reviewer = manager.create("reviewer", project.id).await.unwrap();
         store
             .set_agent_scopes(reviewer.id, &["approve_review".into()])
             .await
