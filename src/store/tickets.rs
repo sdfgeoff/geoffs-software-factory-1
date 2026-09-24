@@ -357,6 +357,21 @@ impl Store {
         new: NewTicket,
         project_id: i64,
     ) -> Result<(Ticket, Vec<i64>), AppError> {
+        self.create_ticket_for_project_in_state_with_wakes(new, project_id, TicketState::Todo)
+            .await
+    }
+
+    pub async fn create_ticket_for_project_in_state_with_wakes(
+        &self,
+        new: NewTicket,
+        project_id: i64,
+        state: TicketState,
+    ) -> Result<(Ticket, Vec<i64>), AppError> {
+        if !matches!(state, TicketState::Draft | TicketState::Todo) {
+            return Err(AppError::bad_request(
+                "new tickets must be created as draft or todo",
+            ));
+        }
         validate_title(&new.title)?;
         let project = self
             .project_by_id(project_id)
@@ -372,11 +387,12 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
-            "INSERT INTO tickets (project_id, title, description, created_by_agent_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO tickets (project_id, title, description, state, created_by_agent_id) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(project.id)
         .bind(new.title.trim())
         .bind(new.description)
+        .bind(state)
         .bind(new.created_by_agent_id)
         .execute(&mut *transaction)
         .await?;
@@ -430,11 +446,24 @@ impl Store {
         if current.state != state {
             match (current.state, state) {
                 (
-                    TicketState::Todo
+                    TicketState::Draft
+                    | TicketState::Todo
                     | TicketState::InProgress
                     | TicketState::AwaitingExternalMerge,
                     TicketState::Cancelled,
                 ) => {}
+                (TicketState::Draft, TicketState::Todo)
+                | (TicketState::Todo, TicketState::Draft) => {}
+                (_, TicketState::Draft) => {
+                    return Err(AppError::conflict(
+                        "only todo tickets can be moved to draft",
+                    ));
+                }
+                (TicketState::Draft, _) => {
+                    return Err(AppError::conflict(
+                        "draft tickets must be published to todo before work starts",
+                    ));
+                }
                 (TicketState::Review, TicketState::Cancelled) => {
                     return Err(AppError::conflict(
                         "a ticket under review cannot be cancelled",
@@ -459,10 +488,21 @@ impl Store {
                 _ => {}
             }
         }
-        let assignee_id = changes.assignee_id.unwrap_or(current.assignee_id);
-        let reserved_for_agent_id = changes
-            .reserved_for_agent_id
-            .unwrap_or(current.reserved_for_agent_id);
+        if state == TicketState::Draft && matches!(changes.assignee_id, Some(Some(_))) {
+            return Err(AppError::conflict("draft tickets cannot be assigned"));
+        }
+        let assignee_id = if state == TicketState::Draft {
+            None
+        } else {
+            changes.assignee_id.unwrap_or(current.assignee_id)
+        };
+        let reserved_for_agent_id = if state == TicketState::Draft {
+            None
+        } else {
+            changes
+                .reserved_for_agent_id
+                .unwrap_or(current.reserved_for_agent_id)
+        };
         if reserved_for_agent_id.is_some()
             && assignee_id != current.assignee_id
             && assignee_id != reserved_for_agent_id
@@ -542,13 +582,23 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
+        if current.state != TicketState::Draft && ticket.state == TicketState::Draft {
+            sqlx::query(
+                "DELETE FROM agent_wake_events WHERE delivery_state = 'pending' \
+                 AND kind LIKE 'ticket.%' \
+                 AND json_extract(payload, '$.ticket_id') = ?",
+            )
+            .bind(ticket.id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         if !ticket.unresolved_blockers.is_empty()
             && ((current.state == TicketState::Todo && ticket.state == TicketState::InProgress)
                 || (current.assignee_id.is_none() && ticket.assignee_id.is_some()))
         {
             return Err(blocked_ticket_error(&ticket));
         }
-        let reason = if ticket.state == TicketState::Cancelled {
+        let reason = if matches!(ticket.state, TicketState::Draft | TicketState::Cancelled) {
             None
         } else if current.assignee_id != ticket.assignee_id && ticket.assignee_id.is_some() {
             Some(TicketWakeReason::Assigned)
@@ -2202,7 +2252,10 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let database = directory.join("board.sqlite3");
         let store = Store::open(&database).await.unwrap();
-        store.set_project(directory.to_str().unwrap()).await.unwrap();
+        store
+            .set_project(directory.to_str().unwrap())
+            .await
+            .unwrap();
         let ticket = store
             .create_ticket(NewTicket {
                 title: "Persistent evidence".into(),
@@ -2797,6 +2850,173 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn drafts_are_not_work_until_a_human_publishes_them() {
+        let store = Store::memory().await.unwrap();
+        let project = store.project().await.unwrap().unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .set_agent_wake_settings(worker.id, true, false, None)
+            .await
+            .unwrap();
+
+        let (draft, targets) = store
+            .create_ticket_for_project_in_state_with_wakes(
+                NewTicket {
+                    title: "Needs planning".into(),
+                    description: String::new(),
+                    blocker_ids: Vec::new(),
+                    created_by_agent_id: None,
+                },
+                project.id,
+                TicketState::Draft,
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft.state, TicketState::Draft);
+        assert!(targets.is_empty());
+        assert!(store.wake_events(worker.id).await.unwrap().is_empty());
+        assert!(
+            store
+                .claim_ticket(draft.id, worker.id, Some(draft.revision))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .reserve_tickets(&[draft.id], worker.id, Some(worker.id), false)
+                .await
+                .is_err()
+        );
+
+        let (published, targets, _) = store
+            .update_ticket_with_wakes(
+                draft.id,
+                TicketChanges {
+                    state: Some(TicketState::Todo),
+                    expected_revision: Some(draft.revision),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.state, TicketState::Todo);
+        assert_eq!(targets, vec![worker.id]);
+        assert_eq!(store.wake_events(worker.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn moving_todo_to_draft_clears_ownership_and_pending_work_wakes() {
+        let store = Store::memory().await.unwrap();
+        let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .set_agent_wake_settings(worker.id, true, false, None)
+            .await
+            .unwrap();
+        let (todo, targets) = store
+            .create_ticket_with_wakes(NewTicket {
+                title: "Premature work".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(targets, vec![worker.id]);
+
+        let assigned = store
+            .update_ticket(
+                todo.id,
+                TicketChanges {
+                    assignee_id: Some(Some(worker.id)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (draft, targets, _) = store
+            .update_ticket_with_wakes(
+                assigned.id,
+                TicketChanges {
+                    state: Some(TicketState::Draft),
+                    expected_revision: Some(assigned.revision),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft.state, TicketState::Draft);
+        assert_eq!(draft.assignee_id, None);
+        assert_eq!(draft.reserved_for_agent_id, None);
+        assert!(targets.is_empty());
+        assert!(store.wake_events(worker.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn draft_state_migration_preserves_ticket_dependencies_and_activity() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 31) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch) VALUES (1, 'Board', '/board', 'main')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tickets (id, project_id, title) VALUES (7, 1, 'Existing'), (8, 1, 'Dependent')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO ticket_dependencies (ticket_id, blocker_id) VALUES (8, 7)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO ticket_activity (id, ticket_id, action, detail, author) VALUES (9, 7, 'comment', 'Keep me', 'human')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 31)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT title FROM tickets WHERE id = 7")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "Existing"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT blocker_id FROM ticket_dependencies WHERE ticket_id = 8",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            7
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT detail FROM ticket_activity WHERE id = 9")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "Keep me"
+        );
+        sqlx::query("INSERT INTO tickets (project_id, title, state) VALUES (1, 'Later', 'draft')")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

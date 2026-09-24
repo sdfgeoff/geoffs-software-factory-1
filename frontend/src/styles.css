@@ -207,19 +207,19 @@ nav a.active {
 }
 .kanban {
   display: grid;
-  grid-template-columns: repeat(4, minmax(16rem, 1fr));
+  grid-template-columns: repeat(5, minmax(16rem, 1fr));
   gap: 1rem;
   align-items: start;
   overflow-x: auto;
 }
 .kanban-with-cancelled {
-  grid-template-columns: repeat(5, minmax(16rem, 1fr));
+  grid-template-columns: repeat(6, minmax(16rem, 1fr));
 }
 .kanban-with-external {
-  grid-template-columns: repeat(5, minmax(16rem, 1fr));
+  grid-template-columns: repeat(6, minmax(16rem, 1fr));
 }
 .kanban-with-external.kanban-with-cancelled {
-  grid-template-columns: repeat(6, minmax(16rem, 1fr));
+  grid-template-columns: repeat(7, minmax(16rem, 1fr));
 }
 .column {
   min-height: 30rem;
@@ -943,16 +943,16 @@ aside button.selected {
     grid-template-columns: 13rem minmax(0, 1fr);
   }
   .kanban {
-    grid-template-columns: repeat(4, minmax(14rem, 1fr));
+    grid-template-columns: repeat(5, minmax(14rem, 1fr));
   }
   .kanban-with-cancelled {
-    grid-template-columns: repeat(5, minmax(14rem, 1fr));
+    grid-template-columns: repeat(6, minmax(14rem, 1fr));
   }
   .kanban-with-external {
-    grid-template-columns: repeat(5, minmax(14rem, 1fr));
+    grid-template-columns: repeat(6, minmax(14rem, 1fr));
   }
   .kanban-with-external.kanban-with-cancelled {
-    grid-template-columns: repeat(6, minmax(14rem, 1fr));
+    grid-template-columns: repeat(7, minmax(14rem, 1fr));
   }
 }
 @media (max-width: 820px) {

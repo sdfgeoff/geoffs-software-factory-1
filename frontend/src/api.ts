@@ -14,6 +14,7 @@ import type {
   TicketActivityPage,
   TicketSummaryPage,
   TicketSummaryQuery,
+  TicketState,
   ProjectCompletionWorkflow,
 } from "./types";
 
@@ -132,6 +133,7 @@ export const api = {
     description: string;
     blocker_ids: number[];
     project_id: number;
+    state?: Extract<TicketState, "draft" | "todo">;
   }) =>
     request<Ticket>("/tickets", {
       method: "POST",

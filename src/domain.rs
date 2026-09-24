@@ -132,6 +132,7 @@ pub struct TicketClaimResponse {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 pub enum TicketState {
+    Draft,
     Todo,
     InProgress,
     Review,
@@ -537,6 +538,7 @@ impl From<wire::ProjectCompletionWorkflow> for ProjectCompletionWorkflow {
 impl From<TicketState> for wire::TicketState {
     fn from(value: TicketState) -> Self {
         match value {
+            TicketState::Draft => Self::Draft,
             TicketState::Todo => Self::Todo,
             TicketState::InProgress => Self::InProgress,
             TicketState::Review => Self::Review,
@@ -550,6 +552,7 @@ impl From<TicketState> for wire::TicketState {
 impl From<wire::TicketState> for TicketState {
     fn from(value: wire::TicketState) -> Self {
         match value {
+            wire::TicketState::Draft => Self::Draft,
             wire::TicketState::Todo => Self::Todo,
             wire::TicketState::InProgress => Self::InProgress,
             wire::TicketState::Review => Self::Review,

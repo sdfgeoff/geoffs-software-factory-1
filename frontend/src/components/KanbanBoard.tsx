@@ -19,6 +19,7 @@ import {
 } from "./TicketEditorFields";
 
 const columns: { state: TicketState; label: string }[] = [
+  { state: "draft", label: "Draft" },
   { state: "todo", label: "To do" },
   { state: "in_progress", label: "In progress" },
   { state: "review", label: "Review" },
@@ -68,6 +69,7 @@ export function KanbanBoard({
     blockerQuery: "",
   });
   const [creating, setCreating] = useState(false);
+  const [createState, setCreateState] = useState<"draft" | "todo">("todo");
   const [createStatus, setCreateStatus] = useState("");
   const [projectId, setProjectId] = useState(routedProjectId?.toString() ?? "");
   const [createDraftEdited, setCreateDraftEdited] = useState(false);
@@ -126,6 +128,7 @@ export function KanbanBoard({
         description: createDraft.description,
         blocker_ids: createDraft.blockerIds,
         project_id: Number(projectId),
+        state: createState,
       });
       setCreateDraft({
         title: "",
@@ -135,6 +138,7 @@ export function KanbanBoard({
         blockerQuery: "",
       });
       setCreateDraftEdited(false);
+      setCreateState("todo");
       setProjectId(filterProjectId === "all" ? "" : filterProjectId);
       await onChanged(created);
       selectTicket(created.id);
@@ -326,6 +330,20 @@ export function KanbanBoard({
                 if (markDirty) setCreateDraftEdited(true);
               }}
             />
+            <label>
+              Initial status
+              <select
+                value={createState}
+                disabled={creating}
+                onChange={(event) => {
+                  setCreateState(event.target.value as "draft" | "todo");
+                  setCreateDraftEdited(true);
+                }}
+              >
+                <option value="todo">To do — ready to be picked up</option>
+                <option value="draft">Draft — not ready to be picked up</option>
+              </select>
+            </label>
             <div className="ticket-actions">
               <button type="submit" disabled={creating}>
                 {creating ? "Creating…" : "Create ticket"}

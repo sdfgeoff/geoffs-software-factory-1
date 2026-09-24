@@ -22,7 +22,7 @@ use multi_agent_board_protocol::{
 
 use crate::{
     agent_runtime::AgentManager,
-    domain::{TicketClaimResponse, WakeDeliveryPolicy},
+    domain::{TicketClaimResponse, TicketState, WakeDeliveryPolicy},
     error::AppError,
     store::{
         AttachmentOwner, AttachmentUpload, MAX_REMINDER_DELAY_SECONDS, NewTicket, Store,
@@ -441,8 +441,20 @@ async fn create_ticket(
     Json(input): Json<CreateTicketRequest>,
 ) -> Result<Json<protocol::Ticket>, AppError> {
     let caller = agent_header(&headers)?;
+    let state = input.state.unwrap_or(protocol::TicketState::Todo);
+    if caller.is_some() && state == protocol::TicketState::Draft {
+        return Err(AppError::forbidden("agents cannot create draft tickets"));
+    }
+    if !matches!(
+        state,
+        protocol::TicketState::Draft | protocol::TicketState::Todo
+    ) {
+        return Err(AppError::bad_request(
+            "new tickets must be created as draft or todo",
+        ));
+    }
     let (ticket, wake_agent_ids) = store
-        .create_ticket_for_project_with_wakes(
+        .create_ticket_for_project_in_state_with_wakes(
             NewTicket {
                 title: input.title,
                 description: input.description,
@@ -450,6 +462,7 @@ async fn create_ticket(
                 created_by_agent_id: caller,
             },
             input.project_id,
+            state.into(),
         )
         .await?;
     agents
@@ -622,7 +635,8 @@ async fn update_ticket(
         && matches!(
             input.state,
             Some(
-                protocol::TicketState::Review
+                protocol::TicketState::Draft
+                    | protocol::TicketState::Review
                     | protocol::TicketState::AwaitingExternalMerge
                     | protocol::TicketState::Done
                     | protocol::TicketState::Cancelled
@@ -630,7 +644,18 @@ async fn update_ticket(
         )
     {
         return Err(AppError::forbidden(
-            "agents cannot directly set review, awaiting external merge, done, or cancelled states",
+            "agents cannot directly set draft, review, awaiting external merge, done, or cancelled states",
+        ));
+    }
+    if caller.is_some()
+        && input.state == Some(protocol::TicketState::Todo)
+        && store
+            .ticket(id)
+            .await?
+            .is_some_and(|ticket| ticket.state == TicketState::Draft)
+    {
+        return Err(AppError::forbidden(
+            "only a human can publish a draft ticket",
         ));
     }
     if caller.is_some() && !input.reserved_for_agent_id.is_missing() {
@@ -1764,6 +1789,111 @@ mod tests {
         assert_eq!(page["tickets"][0]["id"], ticket["id"]);
         assert_eq!(page["has_more"], false);
         assert!(page["tickets"][0].get("description").is_none());
+    }
+
+    #[tokio::test]
+    async fn humans_can_create_and_publish_drafts_but_agents_cannot_claim_or_move_them() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let app = test_router(store);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"project_id":1,"title":"Plan first","state":"draft"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let draft: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(draft["state"], "draft");
+
+        let claim = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/tickets/{}/claim", draft["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::from(format!(
+                        r#"{{"expected_revision":{}}}"#,
+                        draft["revision"]
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::CONFLICT);
+
+        let agent_move = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/tickets/{}", draft["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::from(format!(
+                        r#"{{"state":"todo","expected_revision":{}}}"#,
+                        draft["revision"]
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_move.status(), StatusCode::FORBIDDEN);
+
+        let agent_create = app
+            .clone()
+            .oneshot(
+                Request::post("/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::from(
+                        r#"{"project_id":1,"title":"Hidden work","state":"draft"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_create.status(), StatusCode::FORBIDDEN);
+
+        let human_move = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/tickets/{}", draft["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"state":"todo","expected_revision":{}}}"#,
+                        draft["revision"]
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(human_move.status(), StatusCode::OK);
+        let published: Value =
+            serde_json::from_slice(&to_bytes(human_move.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let agent_redraft = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/tickets/{}", published["id"]))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(AGENT_ID_HEADER, agent.id)
+                    .body(Body::from(format!(
+                        r#"{{"state":"draft","expected_revision":{}}}"#,
+                        published["revision"]
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_redraft.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

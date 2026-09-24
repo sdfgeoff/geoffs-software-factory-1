@@ -23,6 +23,7 @@ import type {
 } from "./types";
 
 const activeTicketStates: TicketState[] = [
+  "draft",
   "todo",
   "in_progress",
   "review",
