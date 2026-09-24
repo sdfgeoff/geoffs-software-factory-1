@@ -444,6 +444,54 @@ describe("App agent routes", () => {
     expect(screen.getByText("1 timeline item")).toBeTruthy();
   });
 
+  it.each([
+    ["older summary", 0, null],
+    ["summary containing the event", 1, 50],
+  ] as const)(
+    "reconciles activity received before an initial %s",
+    async (_label, activityCount, latestActivityId) => {
+      window.history.replaceState(null, "", "#board?project=2");
+      vi.mocked(api.projects).mockResolvedValue([project]);
+      let resolveSummary!: (value: Awaited<ReturnType<typeof api.tickets>>) => void;
+      const summary = new Promise<Awaited<ReturnType<typeof api.tickets>>>((resolve) => {
+        resolveSummary = resolve;
+      });
+      vi.mocked(api.tickets).mockImplementation(({ state } = {}) =>
+        state === ticket.state
+          ? summary
+          : Promise.resolve({ tickets: [], has_more: false }),
+      );
+      render(<App />);
+      await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(4));
+
+      act(() => {
+        latestEventSource.onmessage?.({
+          data: JSON.stringify({
+            agent_id: 0,
+            kind: "ticket_activity_created",
+            data: ticketActivity(50),
+          }),
+        } as MessageEvent);
+      });
+      await act(async () => {
+        resolveSummary({
+          tickets: [{
+            ...ticket,
+            has_review_feedback: false,
+            activity_count: activityCount,
+            latest_activity_id: latestActivityId,
+          }],
+          has_more: false,
+        });
+        await summary;
+      });
+
+      expect(await screen.findByText(ticket.title)).toBeTruthy();
+      expect(screen.getByText("1 timeline item")).toBeTruthy();
+      expect(screen.queryByText("2 timeline items")).toBeNull();
+    },
+  );
+
   it("shows remotely created tickets and moves them between columns without reloading", async () => {
     window.history.replaceState(null, "", "#board?project=2");
     vi.mocked(api.projects).mockResolvedValue([project]);
