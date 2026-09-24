@@ -458,6 +458,14 @@ impl AgentManager {
         }
     }
 
+    async fn process_is_current(&self, agent_id: i64, expected: &Arc<RunningAgent>) -> bool {
+        self.processes
+            .lock()
+            .await
+            .get(&agent_id)
+            .is_some_and(|running| Arc::ptr_eq(running, expected))
+    }
+
     fn consume_events(
         &self,
         agent_id: i64,
@@ -467,8 +475,20 @@ impl AgentManager {
         let manager = self.clone();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
+                let _operation = manager.operations.lock().await;
+                if !manager.process_is_current(agent_id, &running).await {
+                    let method = event.get("method").and_then(Value::as_str).unwrap_or("");
+                    if event.get("id").is_some() && method.contains("request") {
+                        let _ = running
+                            .rpc
+                            .respond(event["id"].clone(), json!({"decision": "decline"}))
+                            .await;
+                    }
+                    break;
+                }
                 manager.handle_event(agent_id, &running.rpc, event).await;
             }
+            let _operation = manager.operations.lock().await;
             if manager.remove_process_if_current(agent_id, &running).await
                 && let Ok(Some(agent)) = manager.store.agent(agent_id).await
                 && matches!(
@@ -1486,7 +1506,7 @@ mod tests {
             rpc: old_rpc,
             child: Mutex::new(old_command.spawn().unwrap()),
         });
-        let (finish_old, old_events) = mpsc::channel(1);
+        let (finish_old, old_events) = mpsc::channel(4);
         let old_consumer = manager.consume_events(agent.id, old.clone(), old_events);
         manager.processes.lock().await.insert(agent.id, old.clone());
 
@@ -1522,6 +1542,20 @@ mod tests {
             .await
             .insert(agent.id, replacement.clone());
 
+        finish_old
+            .send(json!({
+                "method": "error",
+                "params": {"error": {"message": "stale process error"}}
+            }))
+            .await
+            .unwrap();
+        finish_old
+            .send(json!({
+                "method": "item/completed",
+                "params": {"item": {"type": "agentMessage", "text": "stale output"}}
+            }))
+            .await
+            .unwrap();
         drop(finish_old);
         old_consumer.await.unwrap();
 
@@ -1536,6 +1570,15 @@ mod tests {
         assert_eq!(current.thread_id.as_deref(), Some("durable-thread"));
         assert_eq!(current.active_turn_id.as_deref(), Some("replacement-turn"));
         assert_eq!(current.last_error, None);
+        assert!(
+            manager
+                .store
+                .agent_messages(agent.id, None, None, None)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
     }
 
     #[tokio::test]
