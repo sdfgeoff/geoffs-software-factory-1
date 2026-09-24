@@ -117,6 +117,7 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
                         &PostMessageRequest {
                             author: arguments.author,
                             body: arguments.message,
+                            attachment_ids: Vec::new(),
                         },
                     )
                     .await

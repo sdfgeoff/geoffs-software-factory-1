@@ -43,6 +43,7 @@ Then open <http://127.0.0.1:5173>. Vite proxies API requests to the Rust server.
 7. If the board stops during a turn, that agent starts in `error` state with its thread intact; sending another message resumes the thread.
 8. Agents run with approvals disabled and unrestricted filesystem, command, and network access. Only select repositories and create agents that you trust.
 9. Agent capabilities are stored as scope strings. Assign `approve_review` in the Agents view to designate a reviewer.
+10. Image attachments are stored under `attachments/` beside the configured database. JPEG, PNG, WebP, GIF, and sanitized SVG are accepted, up to 10 MiB per image, five images and 25 MiB total per message or ticket comment. Unlinked uploads expire after 24 hours.
 
 The server binds to loopback by default. It has no authentication, so do not expose it on a network without adding an authenticated reverse proxy.
 

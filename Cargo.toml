@@ -10,17 +10,21 @@ build = "build.rs"
 
 [dependencies]
 async-stream = "0.3"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 futures-core = "0.3"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 mime_guess = "2"
 multi-agent-board-mcp = { path = "crates/mcp" }
 multi-agent-board-protocol = { path = "crates/protocol" }
 rust-embed = "8"
+roxmltree = "0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "io-std", "process", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

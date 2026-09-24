@@ -13,6 +13,7 @@ use crate::{
 
 use super::{
     Store,
+    attachments::{AttachmentOwner, attachments_for, link_attachments},
     messages::{MessageWrite, insert_message},
 };
 
@@ -708,14 +709,18 @@ impl Store {
         if self.ticket(ticket_id).await?.is_none() {
             return Err(AppError::not_found("ticket not found"));
         }
-        Ok(sqlx::query_as(
+        let mut entries: Vec<TicketActivity> = sqlx::query_as(
             "SELECT id, ticket_id, action, detail, author, actor_agent_id, previous_reserved_for_agent_id, \
              reserved_for_agent_id, implementation_branch, review_commit, review_target_branch, created_at FROM ticket_activity \
              WHERE ticket_id = ? ORDER BY created_at, id",
         )
         .bind(ticket_id)
         .fetch_all(&self.pool)
-        .await?)
+        .await?;
+        for entry in &mut entries {
+            entry.attachments = attachments_for(&self.pool, "ticket_activity", entry.id).await?;
+        }
+        Ok(entries)
     }
 
     pub async fn ticket_activity_page(
@@ -750,6 +755,9 @@ impl Store {
         let has_more = entries.len() > limit as usize;
         entries.truncate(limit as usize);
         entries.reverse();
+        for entry in &mut entries {
+            entry.attachments = attachments_for(&self.pool, "ticket_activity", entry.id).await?;
+        }
         Ok((entries, has_more))
     }
 
@@ -759,8 +767,19 @@ impl Store {
         actor_agent_id: Option<i64>,
         body: &str,
     ) -> Result<(TicketActivity, Vec<i64>), AppError> {
+        self.add_ticket_comment_with_attachments(ticket_id, actor_agent_id, body, &[])
+            .await
+    }
+
+    pub async fn add_ticket_comment_with_attachments(
+        &self,
+        ticket_id: i64,
+        actor_agent_id: Option<i64>,
+        body: &str,
+        attachment_ids: &[String],
+    ) -> Result<(TicketActivity, Vec<i64>), AppError> {
         let body = body.trim();
-        if body.is_empty() || body.chars().count() > 10_000 {
+        if (body.is_empty() && attachment_ids.is_empty()) || body.chars().count() > 10_000 {
             return Err(AppError::bad_request(
                 "comment must contain between 1 and 10000 characters",
             ));
@@ -778,7 +797,7 @@ impl Store {
         } else {
             "human".to_owned()
         };
-        let activity: TicketActivity = sqlx::query_as(
+        let mut activity: TicketActivity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, author, actor_agent_id) \
              VALUES (?, 'comment', ?, ?, ?) RETURNING id, ticket_id, action, detail, author, \
              actor_agent_id, previous_reserved_for_agent_id, reserved_for_agent_id, \
@@ -789,6 +808,14 @@ impl Store {
         .bind(&author)
         .bind(actor_agent_id)
         .fetch_one(&mut *transaction)
+        .await?;
+        activity.attachments = link_attachments(
+            &mut transaction,
+            attachment_ids,
+            actor_agent_id.map_or(AttachmentOwner::Human, AttachmentOwner::Agent),
+            "ticket_activity",
+            activity.id,
+        )
         .await?;
         let agents: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM agents ORDER BY id")
             .fetch_all(&mut *transaction)
@@ -1218,6 +1245,7 @@ impl Store {
                     author: notification.author,
                     body: notification.body,
                     deduplication_key: Some(notification.deduplication_key),
+                    attachment_ids: &[],
                 },
             )
             .await?;
@@ -1502,6 +1530,7 @@ impl Store {
                     author: notification.author,
                     body: notification.body,
                     deduplication_key: Some(notification.deduplication_key),
+                    attachment_ids: &[],
                 },
             )
             .await?;
@@ -1575,6 +1604,7 @@ impl Store {
                     author: notification.author,
                     body: notification.body,
                     deduplication_key: Some(notification.deduplication_key),
+                    attachment_ids: &[],
                 }),
             )
             .await?;

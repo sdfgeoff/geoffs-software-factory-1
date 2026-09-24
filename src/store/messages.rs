@@ -5,6 +5,7 @@ use crate::{
     error::AppError,
 };
 
+use super::attachments::{AttachmentOwner, attachments_for, link_attachments};
 use super::{Store, message_page_size};
 
 pub(super) struct MessageWrite<'a> {
@@ -13,6 +14,7 @@ pub(super) struct MessageWrite<'a> {
     pub(super) author: &'a str,
     pub(super) body: &'a str,
     pub(super) deduplication_key: Option<&'a str>,
+    pub(super) attachment_ids: &'a [String],
 }
 
 impl Store {
@@ -106,6 +108,10 @@ impl Store {
         if after_id.is_none() {
             messages.reverse();
         }
+        for message in &mut messages {
+            message.attachments =
+                attachments_for(&self.pool, "channel_message", message.id).await?;
+        }
         Ok((messages, has_more))
     }
 
@@ -152,6 +158,25 @@ impl Store {
             .await
     }
 
+    pub async fn post_message_with_attachments(
+        &self,
+        channel: &str,
+        agent_id: Option<i64>,
+        author: &str,
+        body: &str,
+        attachment_ids: &[String],
+    ) -> Result<(Message, Vec<i64>), AppError> {
+        self.post_message_with_key_and_attachments(
+            channel,
+            agent_id,
+            author,
+            body,
+            None,
+            attachment_ids,
+        )
+        .await
+    }
+
     async fn post_message_with_key(
         &self,
         channel: &str,
@@ -159,6 +184,26 @@ impl Store {
         author: &str,
         body: &str,
         deduplication_key: Option<&str>,
+    ) -> Result<(Message, Vec<i64>), AppError> {
+        self.post_message_with_key_and_attachments(
+            channel,
+            agent_id,
+            author,
+            body,
+            deduplication_key,
+            &[],
+        )
+        .await
+    }
+
+    async fn post_message_with_key_and_attachments(
+        &self,
+        channel: &str,
+        agent_id: Option<i64>,
+        author: &str,
+        body: &str,
+        deduplication_key: Option<&str>,
+        attachment_ids: &[String],
     ) -> Result<(Message, Vec<i64>), AppError> {
         let mut transaction = self.pool.begin().await?;
         let message = insert_message(
@@ -169,6 +214,7 @@ impl Store {
                 author,
                 body,
                 deduplication_key,
+                attachment_ids,
             },
         )
         .await?;
@@ -291,8 +337,16 @@ pub(super) async fn insert_message(
     transaction: &mut Transaction<'_, Sqlite>,
     message: MessageWrite<'_>,
 ) -> Result<(Message, Vec<i64>), AppError> {
+    let attachment_ids = message.attachment_ids;
+    let attachment_owner = message
+        .agent_id
+        .map_or(AttachmentOwner::Human, AttachmentOwner::Agent);
     validate_channel(message.channel)?;
-    validate_message(message.author, message.body)?;
+    validate_message(
+        message.author,
+        message.body,
+        !message.attachment_ids.is_empty(),
+    )?;
     if message
         .deduplication_key
         .is_some_and(|key| key.is_empty() || key.len() > 500)
@@ -330,11 +384,19 @@ pub(super) async fn insert_message(
             .fetch_one(&mut **transaction)
             .await?
     };
-    let message: Message = sqlx::query_as(
+    let mut message: Message = sqlx::query_as(
         "SELECT id, channel_name, agent_id, author, body, created_at FROM messages WHERE id = ?",
     )
     .bind(id)
     .fetch_one(&mut **transaction)
+    .await?;
+    message.attachments = link_attachments(
+        transaction,
+        attachment_ids,
+        attachment_owner,
+        "channel_message",
+        message.id,
+    )
     .await?;
     let agents: Vec<(i64, String, bool)> = sqlx::query_as(
         "SELECT a.id, a.name, EXISTS(SELECT 1 FROM agent_channel_subscriptions s \
@@ -406,13 +468,13 @@ fn validate_channel_description(description: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_message(author: &str, body: &str) -> Result<(), AppError> {
+fn validate_message(author: &str, body: &str, has_attachments: bool) -> Result<(), AppError> {
     if author.trim().is_empty() || author.chars().count() > 100 {
         return Err(AppError::bad_request(
             "author must contain between 1 and 100 characters",
         ));
     }
-    if body.trim().is_empty() || body.chars().count() > 10_000 {
+    if (!has_attachments && body.trim().is_empty()) || body.chars().count() > 10_000 {
         return Err(AppError::bad_request(
             "message must contain between 1 and 10000 characters",
         ));

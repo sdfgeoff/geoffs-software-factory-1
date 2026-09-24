@@ -121,6 +121,8 @@ pub struct TicketActivity {
     pub implementation_branch: Option<String>,
     pub review_commit: Option<String>,
     pub review_target_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub created_at: i64,
 }
 
@@ -140,6 +142,8 @@ pub struct TicketActivityQuery {
 #[serde(deny_unknown_fields)]
 pub struct PostTicketCommentRequest {
     pub body: String,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -174,7 +178,18 @@ pub struct Message {
     pub agent_id: Option<i64>,
     pub author: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Attachment {
+    pub id: String,
+    pub original_filename: String,
+    pub media_type: String,
+    pub byte_size: i64,
+    pub download_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -247,6 +262,8 @@ pub struct AgentMessage {
     pub agent_id: i64,
     pub role: AgentMessageRole,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
     pub created_at: i64,
 }
 
@@ -621,6 +638,8 @@ pub struct MessagePageQuery {
 pub struct PostMessageRequest {
     pub author: String,
     pub body: String,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -644,6 +663,8 @@ pub struct RenameAgentRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SendAgentMessageRequest {
     pub message: String,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

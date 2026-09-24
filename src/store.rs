@@ -1,4 +1,11 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use sqlx::{
     SqlitePool,
@@ -6,6 +13,7 @@ use sqlx::{
 };
 
 mod agents;
+mod attachments;
 mod events;
 mod messages;
 mod reminders;
@@ -13,6 +21,9 @@ mod settings;
 mod tickets;
 mod wakes;
 
+#[cfg(test)]
+pub(crate) use attachments::test_png_bytes;
+pub use attachments::{AttachmentOwner, AttachmentUpload};
 #[cfg(test)]
 pub(crate) use events::BOARD_EVENT_RETENTION;
 pub(crate) use events::{BoardEventReplay, StoredBoardEvent};
@@ -52,7 +63,10 @@ fn message_page_size(
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    attachment_root: Arc<PathBuf>,
 }
+
+static MEMORY_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Store {
     pub async fn open(path: &Path) -> Result<Self, sqlx::Error> {
@@ -66,7 +80,15 @@ impl Store {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        let store = Self { pool };
+        let attachment_root = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("attachments");
+        tokio::fs::create_dir_all(&attachment_root).await?;
+        let store = Self {
+            pool,
+            attachment_root: Arc::new(attachment_root),
+        };
         store.migrate().await?;
         Ok(store)
     }
@@ -76,7 +98,16 @@ impl Store {
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        let store = Self { pool };
+        let attachment_root = std::env::temp_dir().join(format!(
+            "multi-agent-board-attachments-{}-{}",
+            std::process::id(),
+            MEMORY_STORE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        tokio::fs::create_dir_all(&attachment_root).await?;
+        let store = Self {
+            pool,
+            attachment_root: Arc::new(attachment_root),
+        };
         store.migrate().await?;
         store
             .set_project("/tmp/multi-agent-board-test-project")
@@ -212,6 +243,65 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(active_project_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn attachment_migration_preserves_existing_message_history() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 30) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO messages (channel_name, author, body) VALUES ('general', 'human', 'kept')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agents (name, home_path) VALUES ('worker', '/tmp/worker')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_messages (agent_id, role, body) VALUES (1, 'user', 'also kept')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 30)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT body FROM messages WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT body FROM agent_messages WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "also kept"
+        );
+        sqlx::query(
+            "INSERT INTO messages (channel_name, author, body) VALUES ('general', 'human', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agent_messages (agent_id, role, body) VALUES (1, 'user', '')")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

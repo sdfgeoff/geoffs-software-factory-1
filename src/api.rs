@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Query, State},
-    http::HeaderMap,
+    body::Body,
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    http::{HeaderMap, HeaderValue, header},
+    response::Response,
     routing::get,
 };
 use jiff::Timestamp;
@@ -22,12 +24,17 @@ use crate::{
     agent_runtime::AgentManager,
     domain::{TicketClaimResponse, WakeDeliveryPolicy},
     error::AppError,
-    store::{MAX_REMINDER_DELAY_SECONDS, NewTicket, Store, TicketChanges, TicketSummaryFilter},
+    store::{
+        AttachmentOwner, AttachmentUpload, MAX_REMINDER_DELAY_SECONDS, NewTicket, Store,
+        TicketChanges, TicketSummaryFilter,
+    },
 };
 
 pub fn router(store: Store, agents: AgentManager) -> Router {
     Router::new()
         .route("/settings", get(get_settings).put(set_settings))
+        .route("/attachments", axum::routing::post(upload_attachment))
+        .route("/attachments/{id}", get(download_attachment))
         .route("/projects", get(list_projects).post(register_project))
         .route(
             "/projects/{id}/completion-workflow",
@@ -99,8 +106,179 @@ pub fn router(store: Store, agents: AgentManager) -> Router {
             "/channels/{name}/messages",
             get(read_messages).post(post_message),
         )
+        .layer(DefaultBodyLimit::max(11 * 1024 * 1024))
         .layer(Extension(agents))
         .with_state(store)
+}
+
+async fn upload_attachment(
+    State(store): State<Store>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<protocol::Attachment>, AppError> {
+    let owner = match agent_header(&headers)? {
+        Some(agent_id) => {
+            if store.agent(agent_id).await?.is_none() {
+                return Err(AppError::forbidden("agent identity is invalid"));
+            }
+            AttachmentOwner::Agent(agent_id)
+        }
+        None => AttachmentOwner::Human,
+    };
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::bad_request(format!("invalid image upload: {error}")))?
+        .ok_or_else(|| AppError::bad_request("image upload is missing a file"))?;
+    let filename = field.file_name().unwrap_or("").to_owned();
+    let declared_media_type = field.content_type().unwrap_or("").to_owned();
+    let bytes = field
+        .bytes()
+        .await
+        .map_err(|error| AppError::bad_request(format!("invalid image upload: {error}")))?;
+    if multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::bad_request(format!("invalid image upload: {error}")))?
+        .is_some()
+    {
+        return Err(AppError::bad_request("upload one image at a time"));
+    }
+    let _ = store
+        .cleanup_orphaned_attachments(jiff::Timestamp::now().as_second())
+        .await;
+    Ok(Json(
+        store
+            .upload_attachment(
+                owner,
+                AttachmentUpload {
+                    filename,
+                    declared_media_type,
+                    bytes: bytes.to_vec(),
+                },
+            )
+            .await?
+            .into(),
+    ))
+}
+
+async fn download_attachment(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+    request_headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let download = store
+        .attachment_download(&id)
+        .await?
+        .ok_or_else(|| AppError::not_found("attachment not found"))?;
+    let mut file = tokio::fs::File::open(&download.path)
+        .await
+        .map_err(|error| AppError::internal(format!("failed to open attachment: {error}")))?;
+    let full_length = download.attachment.byte_size as u64;
+    let range = request_headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_byte_range(value, full_length))
+        .transpose()?;
+    let (start, end) = range.unwrap_or((0, full_length.saturating_sub(1)));
+    let response_length = if full_length == 0 { 0 } else { end - start + 1 };
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| AppError::internal(format!("failed to seek attachment: {error}")))?;
+    let stream = tokio_util::io::ReaderStream::new(file.take(response_length));
+    let safe_name = download
+        .attachment
+        .original_filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || ".-_ ".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let mut response = Response::new(Body::from_stream(stream));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&download.attachment.media_type)
+            .map_err(|_| AppError::internal("invalid stored attachment media type"))?,
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(response_length));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("inline; filename=\"{safe_name}\""))
+            .map_err(|_| AppError::internal("invalid stored attachment filename"))?,
+    );
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    if download.attachment.media_type == "image/svg+xml" {
+        headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static(
+                "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+            ),
+        );
+    }
+    if range.is_some() {
+        *response.status_mut() = axum::http::StatusCode::PARTIAL_CONTENT;
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{full_length}"))
+                .map_err(|_| AppError::internal("invalid attachment byte range"))?,
+        );
+    }
+    Ok(response)
+}
+
+fn parse_byte_range(value: &str, length: u64) -> Result<(u64, u64), AppError> {
+    let value = value
+        .strip_prefix("bytes=")
+        .ok_or_else(|| AppError::range_not_satisfiable("invalid byte range"))?;
+    if value.contains(',') || length == 0 {
+        return Err(AppError::range_not_satisfiable("invalid byte range"));
+    }
+    let (start, end) = value
+        .split_once('-')
+        .ok_or_else(|| AppError::range_not_satisfiable("invalid byte range"))?;
+    let (start, end) = if start.is_empty() {
+        let suffix = end
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| AppError::range_not_satisfiable("invalid byte range"))?;
+        (length.saturating_sub(suffix.min(length)), length - 1)
+    } else {
+        let start = start
+            .parse::<u64>()
+            .map_err(|_| AppError::range_not_satisfiable("invalid byte range"))?;
+        let end = if end.is_empty() {
+            length - 1
+        } else {
+            end.parse::<u64>()
+                .map_err(|_| AppError::range_not_satisfiable("invalid byte range"))?
+        };
+        (start, end.min(length - 1))
+    };
+    if start >= length || start > end {
+        return Err(AppError::range_not_satisfiable(
+            "byte range is outside the attachment",
+        ));
+    }
+    Ok((start, end))
 }
 
 async fn get_settings(
@@ -319,7 +497,12 @@ async fn post_ticket_comment(
 ) -> Result<Json<protocol::TicketActivity>, AppError> {
     Ok(Json(
         agents
-            .add_ticket_comment(id, agent_header(&headers)?, &input.body)
+            .add_ticket_comment_with_attachments(
+                id,
+                agent_header(&headers)?,
+                &input.body,
+                &input.attachment_ids,
+            )
             .await?
             .into(),
     ))
@@ -733,7 +916,7 @@ fn calling_agent(headers: &HeaderMap) -> Result<i64, AppError> {
     agent_header(headers)?.ok_or_else(|| AppError::forbidden("agent identity is required"))
 }
 
-fn agent_header(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
+pub(crate) fn agent_header(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
     headers
         .get(AGENT_ID_HEADER)
         .map(|value| {
@@ -820,7 +1003,7 @@ async fn post_message(
         input.author
     };
     let (message, wake_agent_ids) = store
-        .post_message_with_wakes(&name, agent_id, &author, &input.body)
+        .post_message_with_attachments(&name, agent_id, &author, &input.body, &input.attachment_ids)
         .await?;
     agents.emit_board_message(&message).await;
     for agent_id in wake_agent_ids {
@@ -944,6 +1127,77 @@ mod tests {
                 "http://127.0.0.1:1/api".into(),
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn attachment_upload_link_and_stream_range_are_secure() {
+        let store = Store::memory().await.unwrap();
+        let app = test_router(store);
+        let image = crate::store::test_png_bytes();
+        let mut multipart = b"--image-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../photo.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
+        multipart.extend_from_slice(&image);
+        multipart.extend_from_slice(b"\r\n--image-boundary--\r\n");
+        let upload = app
+            .clone()
+            .oneshot(
+                Request::post("/attachments")
+                    .header(
+                        header::CONTENT_TYPE,
+                        "multipart/form-data; boundary=image-boundary",
+                    )
+                    .body(Body::from(multipart))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload.status(), StatusCode::OK);
+        let attachment: protocol::Attachment =
+            serde_json::from_slice(&to_bytes(upload.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(attachment.original_filename, "photo.png");
+
+        let linked = app
+            .clone()
+            .oneshot(
+                Request::post("/channels/general/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "author": "human",
+                            "body": "",
+                            "attachment_ids": [attachment.id]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(linked.status(), StatusCode::OK);
+
+        let download = app
+            .oneshot(
+                Request::get(attachment.download_url.strip_prefix("/api").unwrap())
+                    .header(header::RANGE, "bytes=0-3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(download.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(download.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(download.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            download.headers()[header::CONTENT_RANGE],
+            format!("bytes 0-3/{}", image.len())
+        );
+        assert_eq!(
+            to_bytes(download.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            &image[..4]
+        );
     }
 
     #[tokio::test]

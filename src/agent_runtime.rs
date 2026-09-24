@@ -280,9 +280,20 @@ impl AgentManager {
         actor_agent_id: Option<i64>,
         body: &str,
     ) -> Result<TicketActivity, AppError> {
+        self.add_ticket_comment_with_attachments(ticket_id, actor_agent_id, body, &[])
+            .await
+    }
+
+    pub async fn add_ticket_comment_with_attachments(
+        &self,
+        ticket_id: i64,
+        actor_agent_id: Option<i64>,
+        body: &str,
+        attachment_ids: &[String],
+    ) -> Result<TicketActivity, AppError> {
         let (activity, recipients) = self
             .store
-            .add_ticket_comment(ticket_id, actor_agent_id, body)
+            .add_ticket_comment_with_attachments(ticket_id, actor_agent_id, body, attachment_ids)
             .await?;
         self.emit(AgentEvent::TicketActivityCreated {
             agent_id: actor_agent_id.unwrap_or_default(),

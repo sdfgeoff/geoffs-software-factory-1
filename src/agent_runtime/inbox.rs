@@ -142,12 +142,31 @@ impl AgentManager {
     }
 
     pub async fn send_message(&self, agent_id: i64, message: &str) -> Result<Agent, AppError> {
+        self.send_message_with_attachments(
+            agent_id,
+            message,
+            &[],
+            crate::store::AttachmentOwner::Human,
+        )
+        .await
+    }
+
+    pub async fn send_message_with_attachments(
+        &self,
+        agent_id: i64,
+        message: &str,
+        attachment_ids: &[String],
+        owner: crate::store::AttachmentOwner,
+    ) -> Result<Agent, AppError> {
         {
             let _operation = self.operations.lock().await;
             if self.store.agent(agent_id).await?.is_none() {
                 return Err(AppError::not_found("agent not found"));
             }
-            let user_message = self.store.enqueue_agent_message(agent_id, message).await?;
+            let user_message = self
+                .store
+                .enqueue_agent_message_with_attachments(agent_id, message, attachment_ids, owner)
+                .await?;
             self.emit(AgentEvent::Message {
                 agent_id,
                 data: user_message,

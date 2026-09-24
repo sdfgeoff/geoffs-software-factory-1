@@ -6,6 +6,7 @@ use crate::{
     error::AppError,
 };
 
+use super::attachments::{AttachmentOwner, attachments_for, link_attachments};
 use super::{Store, message_page_size};
 
 impl Store {
@@ -528,6 +529,9 @@ impl Store {
         if after_id.is_none() {
             messages.reverse();
         }
+        for message in &mut messages {
+            message.attachments = attachments_for(&self.pool, "agent_message", message.id).await?;
+        }
         Ok((messages, has_more))
     }
 
@@ -562,7 +566,18 @@ impl Store {
         agent_id: i64,
         body: &str,
     ) -> Result<AgentMessage, AppError> {
-        if body.trim().is_empty() || body.chars().count() > 50_000 {
+        self.enqueue_agent_message_with_attachments(agent_id, body, &[], AttachmentOwner::Human)
+            .await
+    }
+
+    pub async fn enqueue_agent_message_with_attachments(
+        &self,
+        agent_id: i64,
+        body: &str,
+        attachment_ids: &[String],
+        owner: AttachmentOwner,
+    ) -> Result<AgentMessage, AppError> {
+        if (body.trim().is_empty() && attachment_ids.is_empty()) || body.chars().count() > 50_000 {
             return Err(AppError::bad_request(
                 "agent message must contain between 1 and 50000 characters",
             ));
@@ -574,14 +589,26 @@ impl Store {
                 .bind(body.trim())
                 .execute(&mut *transaction)
                 .await?;
-        let message: AgentMessage = sqlx::query_as(
+        let mut message: AgentMessage = sqlx::query_as(
             "SELECT id, agent_id, role, body, created_at FROM agent_messages WHERE id = ?",
         )
         .bind(result.last_insert_rowid())
         .fetch_one(&mut *transaction)
         .await?;
+        message.attachments = link_attachments(
+            &mut transaction,
+            attachment_ids,
+            owner,
+            "agent_message",
+            message.id,
+        )
+        .await?;
         let event = WakeEventData::Message(AgentMessageWakePayload {
-            message: message.body.clone(),
+            message: if message.body.is_empty() {
+                "[Image attachment]".to_owned()
+            } else {
+                message.body.clone()
+            },
             message_id: message.id,
         });
         sqlx::query(

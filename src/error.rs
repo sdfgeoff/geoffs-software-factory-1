@@ -40,6 +40,13 @@ impl AppError {
         }
     }
 
+    pub fn range_not_satisfiable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::RANGE_NOT_SATISFIABLE,
+            message: message.into(),
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

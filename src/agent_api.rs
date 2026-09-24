@@ -116,9 +116,19 @@ async fn list_messages(
 async fn send_message(
     State(manager): State<AgentManager>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     Json(input): Json<SendAgentMessageRequest>,
 ) -> Result<Json<protocol::Agent>, AppError> {
-    Ok(Json(manager.send_message(id, &input.message).await?.into()))
+    let owner = match crate::api::agent_header(&headers)? {
+        Some(agent_id) => crate::store::AttachmentOwner::Agent(agent_id),
+        None => crate::store::AttachmentOwner::Human,
+    };
+    Ok(Json(
+        manager
+            .send_message_with_attachments(id, &input.message, &input.attachment_ids, owner)
+            .await?
+            .into(),
+    ))
 }
 
 async fn pause_agent(

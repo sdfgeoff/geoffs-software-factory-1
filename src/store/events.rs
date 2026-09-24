@@ -127,6 +127,7 @@ mod tests {
                 implementation_branch: None,
                 review_commit: None,
                 review_target_branch: None,
+                attachments: Vec::new(),
                 created_at: 1,
             },
         };

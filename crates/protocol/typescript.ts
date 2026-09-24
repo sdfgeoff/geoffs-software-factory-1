@@ -94,6 +94,7 @@ export interface TicketActivity {
   implementation_branch: string | null;
   review_commit: string | null;
   review_target_branch: string | null;
+  attachments?: Attachment[];
   created_at: number;
 }
 
@@ -109,6 +110,7 @@ export interface TicketActivityQuery {
 
 export interface PostTicketCommentRequest {
   body: string;
+  attachment_ids?: string[];
 }
 
 export interface ProjectTransition {
@@ -137,10 +139,19 @@ export interface Message {
   agent_id: number | null;
   author: string;
   body: string;
+  attachments?: Attachment[];
   created_at: number;
 }
 
 export type BoardMessage = Message;
+
+export interface Attachment {
+  id: string;
+  original_filename: string;
+  media_type: string;
+  byte_size: number;
+  download_url: string;
+}
 
 export interface MessagePage {
   messages: Message[];
@@ -181,6 +192,7 @@ export interface AgentMessage {
   agent_id: number;
   role: AgentMessageRole;
   body: string;
+  attachments?: Attachment[];
   created_at: number;
 }
 
@@ -370,6 +382,7 @@ export interface MessagePageQuery {
 export interface PostMessageRequest {
   author: string;
   body: string;
+  attachment_ids?: string[];
 }
 
 export interface CreateChannelRequest {
@@ -388,6 +401,7 @@ export interface RenameAgentRequest {
 
 export interface SendAgentMessageRequest {
   message: string;
+  attachment_ids?: string[];
 }
 
 export type CreateWakeEventRequest = WakeEventData & {

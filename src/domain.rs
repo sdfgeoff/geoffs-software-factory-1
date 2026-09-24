@@ -97,6 +97,8 @@ pub struct TicketActivity {
     pub implementation_branch: Option<String>,
     pub review_commit: Option<String>,
     pub review_target_branch: Option<String>,
+    #[sqlx(skip)]
+    pub attachments: Vec<Attachment>,
     pub created_at: i64,
 }
 
@@ -150,7 +152,17 @@ pub struct Message {
     pub agent_id: Option<i64>,
     pub author: String,
     pub body: String,
+    #[sqlx(skip)]
+    pub attachments: Vec<Attachment>,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, FromRow, PartialEq, Eq)]
+pub struct Attachment {
+    pub id: String,
+    pub original_filename: String,
+    pub media_type: String,
+    pub byte_size: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, FromRow, PartialEq, Eq)]
@@ -188,6 +200,8 @@ pub struct AgentMessage {
     pub agent_id: i64,
     pub role: String,
     pub body: String,
+    #[sqlx(skip)]
+    pub attachments: Vec<Attachment>,
     pub created_at: i64,
 }
 
@@ -631,6 +645,7 @@ impl From<TicketActivity> for wire::TicketActivity {
             implementation_branch: value.implementation_branch,
             review_commit: value.review_commit,
             review_target_branch: value.review_target_branch,
+            attachments: value.attachments.into_iter().map(Into::into).collect(),
             created_at: value.created_at,
         }
     }
@@ -677,7 +692,20 @@ impl From<Message> for wire::Message {
             agent_id: value.agent_id,
             author: value.author,
             body: value.body,
+            attachments: value.attachments.into_iter().map(Into::into).collect(),
             created_at: value.created_at,
+        }
+    }
+}
+
+impl From<Attachment> for wire::Attachment {
+    fn from(value: Attachment) -> Self {
+        Self {
+            download_url: format!("/api/attachments/{}", value.id),
+            id: value.id,
+            original_filename: value.original_filename,
+            media_type: value.media_type,
+            byte_size: value.byte_size,
         }
     }
 }
@@ -736,6 +764,7 @@ impl TryFrom<AgentMessage> for wire::AgentMessage {
             agent_id: value.agent_id,
             role: wire::AgentMessageRole::try_from(value.role.as_str())?,
             body: value.body,
+            attachments: value.attachments.into_iter().map(Into::into).collect(),
             created_at: value.created_at,
         })
     }
@@ -1095,6 +1124,7 @@ mod tests {
             agent_id: 2,
             role: "assistant".into(),
             body: "hello".into(),
+            attachments: Vec::new(),
             created_at: 3,
         };
 

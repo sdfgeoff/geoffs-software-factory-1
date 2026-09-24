@@ -192,7 +192,10 @@ impl BoardClient {
         self.request(
             Method::POST,
             &format!("/tickets/{ticket_id}/activity"),
-            Some(&PostTicketCommentRequest { body }),
+            Some(&PostTicketCommentRequest {
+                body,
+                attachment_ids: Vec::new(),
+            }),
         )
         .await
     }
