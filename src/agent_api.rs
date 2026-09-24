@@ -9,7 +9,8 @@ use multi_agent_board_protocol as protocol;
 use multi_agent_board_protocol::{
     AGENT_ID_HEADER, CreateAgentRequest, RenameAgentRequest, RequestChangesRequest,
     ReviewRevisionRequest, SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
-    SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
+    SetAgentInstructionsRequest, SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest,
+    SetAgentWakeSettingsRequest,
 };
 use std::{convert::Infallible, time::Duration};
 
@@ -22,6 +23,10 @@ pub fn router(manager: AgentManager) -> Router {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/{id}", axum::routing::patch(rename_agent))
+        .route(
+            "/agents/{id}/instructions",
+            axum::routing::put(set_agent_instructions),
+        )
         .route(
             "/agents/{id}/project-worktrees",
             get(agent_project_worktrees),
@@ -79,6 +84,19 @@ async fn rename_agent(
     Json(input): Json<RenameAgentRequest>,
 ) -> Result<Json<protocol::Agent>, AppError> {
     Ok(Json(manager.rename(id, &input.name).await?.into()))
+}
+
+async fn set_agent_instructions(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+    Json(input): Json<SetAgentInstructionsRequest>,
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(
+        manager
+            .set_instructions(id, &input.instructions)
+            .await?
+            .into(),
+    ))
 }
 
 async fn agent_project_worktrees(
@@ -697,6 +715,73 @@ mod tests {
                 .unwrap();
         assert_eq!(body[0]["agent_id"], agent.id);
         assert_eq!(body[0]["path"], "/tmp/worker");
+    }
+
+    #[tokio::test]
+    async fn instructions_are_typed_replayable_and_protected_during_active_turns() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Running,
+                Some("thread-1"),
+                Some("turn-1"),
+                None,
+            )
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let app = router(manager.clone());
+        let blocked = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/agents/{}/instructions", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"instructions":"Be skeptical."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            store.agent(agent.id).await.unwrap().unwrap().instructions,
+            ""
+        );
+
+        store
+            .update_agent_runtime(agent.id, AgentState::Idle, None, None, None)
+            .await
+            .unwrap();
+        let mut events = manager.subscribe();
+        let saved = app
+            .oneshot(
+                Request::put(format!("/agents/{}/instructions", agent.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"instructions":"  Be skeptical.\r\nExplain tradeoffs.  "}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(saved.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["thread_id"], "thread-1");
+        assert_eq!(body["instructions"], "Be skeptical.\nExplain tradeoffs.");
+        let published = events.recv().await.unwrap();
+        assert!(published.id.is_some());
+        let crate::agent_runtime::AgentEvent::AgentUpdated { data, .. } = published.event else {
+            panic!("expected agent update");
+        };
+        assert_eq!(data.instructions, "Be skeptical.\nExplain tradeoffs.");
     }
 
     #[tokio::test]

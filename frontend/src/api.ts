@@ -199,6 +199,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ name }),
     }),
+  setAgentInstructions: (id: number, instructions: string) =>
+    request<Agent>(`/agents/${id}/instructions`, {
+      method: "PUT",
+      body: JSON.stringify({ instructions }),
+    }),
   agentScopes: (id: number) => request<string[]>(`/agents/${id}/scopes`),
   setAgentScopes: (id: number, scopes: string[]) =>
     request<string[]>(`/agents/${id}/scopes`, {

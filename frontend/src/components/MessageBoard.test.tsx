@@ -31,6 +31,7 @@ vi.mock("../api", () => ({
 const agent: Agent = {
   id: 2,
   name: "Worker-Bartholemew",
+  instructions: "",
   state: "idle",
   thread_id: null,
   home_path: "/repo/worker-home",

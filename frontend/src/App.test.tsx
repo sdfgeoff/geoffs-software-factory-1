@@ -33,6 +33,7 @@ vi.mock("./api", () => ({
 const agent: Agent = {
   id: 1,
   name: "worker",
+  instructions: "",
   state: "idle",
   thread_id: null,
   home_path: "/repo/worker-home",

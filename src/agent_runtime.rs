@@ -799,6 +799,7 @@ mod tests {
         let agent = Agent {
             id: 1,
             name: "worker".into(),
+            instructions: String::new(),
             state: crate::domain::AgentState::Idle,
             thread_id: None,
             home_path: "/tmp/worker".into(),

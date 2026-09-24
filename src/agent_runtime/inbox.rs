@@ -129,6 +129,44 @@ impl AgentManager {
         Ok(agent)
     }
 
+    pub async fn set_instructions(
+        &self,
+        agent_id: i64,
+        instructions: &str,
+    ) -> Result<Agent, AppError> {
+        let _operation = self.operations.lock().await;
+        let requested = crate::store::normalize_agent_instructions(instructions)?;
+        let current = self
+            .store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        if requested == current.instructions {
+            return Ok(current);
+        }
+        if matches!(
+            current.state,
+            AgentState::Running | AgentState::AwaitingApproval
+        ) {
+            return Err(AppError::conflict(
+                "wait for the active turn to finish before changing agent instructions",
+            ));
+        }
+        let agent = self
+            .store
+            .set_agent_instructions(agent_id, &requested)
+            .await?;
+        if let Some(running) = self.processes.lock().await.remove(&agent_id) {
+            let _ = running.child.lock().await.kill().await;
+        }
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id,
+            data: agent.clone(),
+        })
+        .await;
+        Ok(agent)
+    }
+
     pub async fn messages(
         &self,
         agent_id: i64,
@@ -376,24 +414,7 @@ impl AgentManager {
         .await?;
         rpc.notify("initialized", json!({})).await?;
 
-        let instructions = agent_instructions(agent);
-        let params = if let Some(thread_id) = &agent.thread_id {
-            json!({
-                "threadId": thread_id, "cwd": worktree.path,
-                "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": instructions
-            })
-        } else {
-            json!({
-                "cwd": worktree.path, "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": instructions, "serviceName": "multi_agent_board"
-            })
-        };
-        let method = if agent.thread_id.is_some() {
-            "thread/resume"
-        } else {
-            "thread/start"
-        };
+        let (method, params) = thread_open_request(agent, &worktree.path);
         let result = rpc.request(method, params).await?;
         let thread_id = result
             .pointer("/thread/id")
@@ -565,10 +586,41 @@ impl AgentManager {
 }
 
 fn agent_instructions(agent: &Agent) -> String {
-    format!(
+    let fixed = format!(
         "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
         agent.id, agent.name
+    );
+    if agent.instructions.is_empty() {
+        return fixed;
+    }
+    format!(
+        "{fixed}\n\n--- BEGIN USER-CONFIGURED AGENT INSTRUCTIONS ---\n\
+         These preferences are subordinate to the fixed board coordination and authorization rules above.\n\
+         {}\n\
+         --- END USER-CONFIGURED AGENT INSTRUCTIONS ---",
+        agent.instructions
     )
+}
+
+fn thread_open_request(agent: &Agent, worktree_path: &str) -> (&'static str, Value) {
+    let instructions = agent_instructions(agent);
+    match &agent.thread_id {
+        Some(thread_id) => (
+            "thread/resume",
+            json!({
+                "threadId": thread_id, "cwd": worktree_path,
+                "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "developerInstructions": instructions
+            }),
+        ),
+        None => (
+            "thread/start",
+            json!({
+                "cwd": worktree_path, "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "developerInstructions": instructions, "serviceName": "multi_agent_board"
+            }),
+        ),
+    }
 }
 
 fn turn_params(thread_id: &str, message: &str, worktree_path: &str) -> Value {
@@ -1266,6 +1318,10 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
         let agent = store
+            .set_agent_instructions(agent.id, "Prefer explicit tradeoffs.")
+            .await
+            .unwrap();
+        let agent = store
             .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
             .await
             .unwrap();
@@ -1292,5 +1348,105 @@ mod tests {
         assert!(!manager.processes.lock().await.contains_key(&agent.id));
         assert!(agent_instructions(&renamed).contains("agent name is 'builder'"));
         assert!(!agent_instructions(&renamed).contains("agent name is 'worker'"));
+        assert!(agent_instructions(&renamed).ends_with(
+            "Prefer explicit tradeoffs.\n--- END USER-CONFIGURED AGENT INSTRUCTIONS ---"
+        ));
+    }
+
+    #[tokio::test]
+    async fn instruction_changes_restart_idle_process_and_resume_the_same_context() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store
+            .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
+            .await
+            .unwrap();
+        let original_project = agent.active_project_id;
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let (client, _server) = duplex(4096);
+        let (reader, writer) = split(client);
+        let (rpc, _events) = RpcPeer::attach(BufReader::new(reader), writer);
+        let child = Command::new("sh").args(["-c", "sleep 60"]).spawn().unwrap();
+        manager.processes.lock().await.insert(
+            agent.id,
+            Arc::new(RunningAgent {
+                rpc,
+                child: Mutex::new(child),
+            }),
+        );
+
+        let updated = manager
+            .set_instructions(
+                agent.id,
+                "  Challenge assumptions.\r\nKeep answers compact.  ",
+            )
+            .await
+            .unwrap();
+
+        assert!(!manager.processes.lock().await.contains_key(&agent.id));
+        assert_eq!(updated.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(updated.active_project_id, original_project);
+        assert_eq!(
+            updated.instructions,
+            "Challenge assumptions.\nKeep answers compact."
+        );
+        let composed = agent_instructions(&updated);
+        let fixed_position = composed.find(COORDINATION_INSTRUCTIONS).unwrap();
+        let custom_position = composed
+            .find("--- BEGIN USER-CONFIGURED AGENT INSTRUCTIONS ---")
+            .unwrap();
+        assert!(fixed_position < custom_position);
+        let (method, params) = thread_open_request(&updated, "/tmp/worker");
+        assert_eq!(method, "thread/resume");
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["developerInstructions"], composed);
+
+        let second_project = manager
+            .store
+            .set_project("/tmp/second-project")
+            .await
+            .unwrap();
+        let transitioned = manager
+            .store
+            .set_agent_active_project(updated.id, Some(second_project.id))
+            .await
+            .unwrap();
+        assert_eq!(transitioned.instructions, updated.instructions);
+        assert_eq!(transitioned.thread_id, updated.thread_id);
+
+        manager
+            .store
+            .update_agent_runtime(updated.id, AgentState::Paused, None, None, None)
+            .await
+            .unwrap();
+        let paused = manager
+            .set_instructions(updated.id, "Use a calm, direct tone.")
+            .await
+            .unwrap();
+        assert_eq!(paused.state, AgentState::Paused);
+        assert_eq!(paused.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(paused.instructions, "Use a calm, direct tone.");
+    }
+
+    #[tokio::test]
+    async fn empty_agent_instructions_preserve_the_previous_developer_contract() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+
+        let instructions = agent_instructions(&agent);
+
+        assert_eq!(
+            instructions,
+            format!(
+                "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
+                agent.id, agent.name
+            )
+        );
+        assert!(!instructions.contains("USER-CONFIGURED"));
     }
 }

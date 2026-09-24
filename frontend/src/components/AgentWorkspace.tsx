@@ -34,6 +34,7 @@ interface Props {
 
 interface AgentSettingsDraft {
   name: string;
+  instructions: string;
   wakeOnPendingWork: boolean;
   wakeOnPendingReview: boolean;
   heartbeatEnabled: boolean;
@@ -157,6 +158,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const settingsDraft = selected
     ? settingsDrafts[selected.id] ?? {
         name: selected.name,
+        instructions: selected.instructions,
         wakeOnPendingWork: selected.wake_on_pending_work,
         wakeOnPendingReview: selected.wake_on_pending_review,
         heartbeatEnabled: selected.idle_heartbeat_minutes !== null,
@@ -189,25 +191,28 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const settingsReady = detailsAgentId === selectedAgentId;
   const nameLocked =
     selected?.state === "running" || selected?.state === "awaiting_approval";
+  const instructionsLocked = nameLocked;
   useEffect(() => {
     if (selectedAgentId === null && agents[0]) onSelectAgent(agents[0].id);
   }, [agents, selectedAgentId, onSelectAgent]);
   useEffect(() => {
     if (!selected) return;
-    setSettingsDrafts((current) =>
-      current[selected.id]
-        ? current
-        : {
-            ...current,
-            [selected.id]: {
-              name: selected.name,
-              wakeOnPendingWork: selected.wake_on_pending_work,
-              wakeOnPendingReview: selected.wake_on_pending_review,
-              heartbeatEnabled: selected.idle_heartbeat_minutes !== null,
-              heartbeatMinutes: String(selected.idle_heartbeat_minutes ?? 20),
-            },
-          },
-    );
+    setSettingsDrafts((current) => {
+      const saveState = settingsSaveStates[selected.id] ?? "saved";
+      if (current[selected.id] && saveState !== "saved") return current;
+      return {
+        ...current,
+        [selected.id]: {
+          ...current[selected.id],
+          name: selected.name,
+          instructions: selected.instructions,
+          wakeOnPendingWork: selected.wake_on_pending_work,
+          wakeOnPendingReview: selected.wake_on_pending_review,
+          heartbeatEnabled: selected.idle_heartbeat_minutes !== null,
+          heartbeatMinutes: String(selected.idle_heartbeat_minutes ?? 20),
+        },
+      };
+    });
   }, [selected]);
   useEffect(() => {
     if (view !== "chat") return;
@@ -432,6 +437,12 @@ export const AgentWorkspace = memo(function AgentWorkspace({
       if (settingsDraft.name !== selected.name) {
         savedName = (await api.renameAgent(agentId, settingsDraft.name)).name;
       }
+      let savedInstructions = selected.instructions;
+      if (settingsDraft.instructions !== selected.instructions) {
+        savedInstructions = (
+          await api.setAgentInstructions(agentId, settingsDraft.instructions)
+        ).instructions;
+      }
       const nextScopes = canReview
         ? [...new Set([...currentScopes, "approve_review"])]
         : currentScopes.filter((scope) => scope !== "approve_review");
@@ -456,6 +467,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
         [agentId]: {
           ...settingsDraft,
           name: savedName,
+          instructions: savedInstructions,
           canReview: nextSavedScopes.includes("approve_review"),
           channelSubscriptions: nextChannels,
           projectSubscriptions: nextProjects,
@@ -645,6 +657,35 @@ export const AgentWorkspace = memo(function AgentWorkspace({
                 </fieldset>
                 <fieldset
                   className="capabilities"
+                  disabled={settingsSaveState === "saving"}
+                >
+                  <legend>Agent instructions</legend>
+                  <label className="settings-text-field">
+                    Role, temperament, communication style, and decision preferences
+                    <textarea
+                      rows={7}
+                      maxLength={10000}
+                      value={settingsDraft?.instructions ?? ""}
+                      disabled={instructionsLocked}
+                      onChange={(event) =>
+                        updateSettings({ instructions: event.target.value })
+                      }
+                    />
+                  </label>
+                  <small>
+                    Up to 10,000 characters, applied from the next turn. Leading and
+                    trailing whitespace is trimmed; line breaks are preserved. These
+                    preferences cannot override board workflow or permissions.
+                  </small>
+                  {instructionsLocked && (
+                    <small>
+                      Wait for the active turn to finish, or pause the agent, before
+                      changing its instructions.
+                    </small>
+                  )}
+                </fieldset>
+                <fieldset
+                  className="capabilities"
                   disabled={!settingsReady || settingsSaveState === "saving"}
                 >
                   <legend>Work preferences</legend>
@@ -798,7 +839,9 @@ export const AgentWorkspace = memo(function AgentWorkspace({
                       !settingsReady ||
                       settingsSaveState === "saved" ||
                       settingsSaveState === "saving" ||
-                      (nameLocked && settingsDraft?.name !== selected.name)
+                      (nameLocked && settingsDraft?.name !== selected.name) ||
+                      (instructionsLocked &&
+                        settingsDraft?.instructions !== selected.instructions)
                     }
                   >
                     Save settings

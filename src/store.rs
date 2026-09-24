@@ -13,6 +13,7 @@ mod settings;
 mod tickets;
 mod wakes;
 
+pub(crate) use agents::normalize_agent_instructions;
 #[cfg(test)]
 pub(crate) use events::BOARD_EVENT_RETENTION;
 pub(crate) use events::{BoardEventReplay, StoredBoardEvent};
@@ -243,6 +244,10 @@ mod tests {
             .set_agent_wake_settings(agent.id, true, false, Some(20))
             .await
             .unwrap();
+        store
+            .set_agent_instructions(agent.id, "  Be concise.\r\nVerify risky changes.  ")
+            .await
+            .unwrap();
         store.close().await;
 
         let reopened = Store::open(&path).await.unwrap();
@@ -262,6 +267,7 @@ mod tests {
         assert!(agent.wake_on_pending_work);
         assert!(!agent.wake_on_pending_review);
         assert_eq!(agent.idle_heartbeat_minutes, Some(20));
+        assert_eq!(agent.instructions, "Be concise.\nVerify risky changes.");
         reopened.close().await;
         std::fs::remove_file(path).unwrap();
     }

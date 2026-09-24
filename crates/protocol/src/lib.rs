@@ -197,6 +197,7 @@ pub enum AgentState {
 pub struct Agent {
     pub id: i64,
     pub name: String,
+    pub instructions: String,
     pub state: AgentState,
     pub thread_id: Option<String>,
     pub home_path: String,
@@ -639,6 +640,12 @@ pub struct CreateAgentRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RenameAgentRequest {
     pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentInstructionsRequest {
+    pub instructions: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

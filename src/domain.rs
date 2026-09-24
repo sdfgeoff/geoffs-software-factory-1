@@ -157,6 +157,7 @@ pub struct Message {
 pub struct Agent {
     pub id: i64,
     pub name: String,
+    pub instructions: String,
     pub state: AgentState,
     pub thread_id: Option<String>,
     pub home_path: String,
@@ -699,6 +700,7 @@ impl From<Agent> for wire::Agent {
         Self {
             id: value.id,
             name: value.name,
+            instructions: value.instructions,
             state: value.state.into(),
             thread_id: value.thread_id,
             home_path: value.home_path,
