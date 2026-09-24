@@ -1,4 +1,4 @@
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use jiff::Timestamp;
 use serde_json::{Value, json};
@@ -20,6 +20,11 @@ use super::{
 };
 
 const COORDINATION_INSTRUCTIONS: &str = "You are a persistent coding agent coordinated by Multi-agent Board. Work only in your assigned Git worktree. Use the multi_agent_board MCP tools to inspect and update tickets and to communicate through message-board channels. Claim a ticket before starting it, commit cohesive changes, and submit it for review when ready. If you have approve_review scope, claim reviews before reviewing them. For external-workflow tickets, approval does not merge Git: attach the external change URL and confirm completion only after the external merge. Keep ticket state accurate. Do not modify another agent's worktree or the primary worktree.";
+
+struct InboxInput {
+    message: String,
+    image_paths: Vec<PathBuf>,
+}
 
 impl AgentManager {
     pub async fn deliver_pending_events(&self) {
@@ -218,7 +223,7 @@ impl AgentManager {
             .ok_or_else(|| AppError::not_found("agent not found"))
     }
 
-    async fn start_inbox_turn(&self, agent: &Agent, message: &str) -> Result<(), AppError> {
+    async fn start_inbox_turn(&self, agent: &Agent, input: &InboxInput) -> Result<(), AppError> {
         let running = match self.ensure_process(agent).await {
             Ok(running) => running,
             Err(error) => {
@@ -235,10 +240,7 @@ impl AgentManager {
         let worktree = self.current_worktree(agent.id).await?;
         let result = running
             .rpc
-            .request(
-                "turn/start",
-                turn_params(&thread_id, message, &worktree.path),
-            )
+            .request("turn/start", turn_params(&thread_id, input, &worktree.path))
             .await;
         match result {
             Ok(result) => {
@@ -258,14 +260,14 @@ impl AgentManager {
         }
     }
 
-    async fn steer_inbox_turn(&self, agent: &Agent, message: &str) -> Result<(), AppError> {
+    async fn steer_inbox_turn(&self, agent: &Agent, input: &InboxInput) -> Result<(), AppError> {
         let (Some(thread_id), Some(turn_id)) = (&agent.thread_id, &agent.active_turn_id) else {
-            return self.start_inbox_turn(agent, message).await;
+            return self.start_inbox_turn(agent, input).await;
         };
         let running = self.ensure_process(agent).await?;
         if running
             .rpc
-            .request("turn/steer", steer_params(thread_id, turn_id, message))
+            .request("turn/steer", steer_params(thread_id, turn_id, input))
             .await
             .is_ok()
         {
@@ -277,7 +279,7 @@ impl AgentManager {
             .agent(agent.id)
             .await?
             .ok_or_else(|| AppError::not_found("agent not found"))?;
-        self.start_inbox_turn(&agent, message).await
+        self.start_inbox_turn(&agent, input).await
     }
 
     pub async fn deliver_pending(&self, agent_id: i64) {
@@ -296,20 +298,20 @@ impl AgentManager {
             else {
                 return;
             };
-            let message = match self
+            let input = match self
                 .wake_message_with_project_transition(&agent, &event)
                 .await
             {
-                Ok(message) => message,
+                Ok(input) => input,
                 Err(_) => {
                     let _ = self.store.retry_wake_event(event.id).await;
                     return;
                 }
             };
             let delivered = match agent.state {
-                AgentState::Idle => self.start_inbox_turn(&agent, &message).await,
+                AgentState::Idle => self.start_inbox_turn(&agent, &input).await,
                 AgentState::Running | AgentState::AwaitingApproval => {
-                    self.steer_inbox_turn(&agent, &message).await
+                    self.steer_inbox_turn(&agent, &input).await
                 }
                 AgentState::Paused | AgentState::Error => unreachable!(),
             };
@@ -326,7 +328,7 @@ impl AgentManager {
             if !matches!(event.event, WakeEventData::Message(_))
                 && let Ok(message) = self
                     .store
-                    .add_agent_message(agent_id, "system", &message)
+                    .add_agent_message(agent_id, "system", &input.message)
                     .await
             {
                 self.emit(AgentEvent::Message {
@@ -628,22 +630,39 @@ impl AgentManager {
         &self,
         agent: &Agent,
         event: &WakeEvent,
-    ) -> Result<String, AppError> {
+    ) -> Result<InboxInput, AppError> {
         let message = wake_event_message(event);
+        let image_paths = match &event.event {
+            WakeEventData::Message(payload) => {
+                self.store
+                    .attachment_paths_for_content("agent_message", payload.message_id)
+                    .await?
+            }
+            WakeEventData::ChannelMessage(payload) => {
+                self.store
+                    .attachment_paths_for_content("channel_message", payload.message_id)
+                    .await?
+            }
+            _ => Vec::new(),
+        };
         let Some(ticket_id) = ticket_transition_id(event) else {
-            return Ok(message);
+            return Ok(InboxInput {
+                message,
+                image_paths,
+            });
         };
         let ticket = self
             .store
             .ticket(ticket_id)
             .await?
             .ok_or_else(|| AppError::not_found("ticket not found"))?;
-        Ok(
-            match self.transition_to_ticket_project(agent.id, &ticket).await? {
+        Ok(InboxInput {
+            message: match self.transition_to_ticket_project(agent.id, &ticket).await? {
                 Some(transition) => format!("{}\n\n{message}", transition.message),
                 None => message,
             },
-        )
+            image_paths,
+        })
     }
 }
 
@@ -685,21 +704,35 @@ fn thread_open_request(agent: &Agent, worktree_path: &str) -> (&'static str, Val
     }
 }
 
-fn turn_params(thread_id: &str, message: &str, worktree_path: &str) -> Value {
+fn codex_input(input: &InboxInput) -> Vec<Value> {
+    let mut items = Vec::with_capacity(1 + input.image_paths.len());
+    if !input.message.is_empty() {
+        items.push(json!({"type": "text", "text": input.message}));
+    }
+    items.extend(
+        input
+            .image_paths
+            .iter()
+            .map(|path| json!({"type": "localImage", "path": path.to_string_lossy()})),
+    );
+    items
+}
+
+fn turn_params(thread_id: &str, input: &InboxInput, worktree_path: &str) -> Value {
     json!({
         "threadId": thread_id,
-        "input": [{"type": "text", "text": message}],
+        "input": codex_input(input),
         "cwd": worktree_path,
         "approvalPolicy": "never",
         "sandboxPolicy": {"type": "dangerFullAccess"}
     })
 }
 
-fn steer_params(thread_id: &str, turn_id: &str, message: &str) -> Value {
+fn steer_params(thread_id: &str, turn_id: &str, input: &InboxInput) -> Value {
     json!({
         "threadId": thread_id,
         "expectedTurnId": turn_id,
-        "input": [{"type": "text", "text": message}]
+        "input": codex_input(input)
     })
 }
 
@@ -730,17 +763,46 @@ mod tests {
 
     use crate::{
         domain::{TicketWakePayload, TicketWakeTicket},
-        store::{NewTicket, Store},
+        store::{AttachmentOwner, AttachmentUpload, NewTicket, Store},
     };
 
     use super::*;
 
     #[test]
     fn turns_run_without_approval_or_sandbox_prompts() {
-        let params = turn_params("thread-1", "Run tests", "/repo");
+        let params = turn_params(
+            "thread-1",
+            &InboxInput {
+                message: "Run tests".into(),
+                image_paths: Vec::new(),
+            },
+            "/repo",
+        );
 
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandboxPolicy"]["type"], "dangerFullAccess");
+    }
+
+    #[test]
+    fn image_attachments_are_sent_as_codex_local_images() {
+        let input = InboxInput {
+            message: "Inspect this".into(),
+            image_paths: vec![PathBuf::from("/board/attachments/photo.png")],
+        };
+        let params = turn_params("thread-1", &input, "/repo");
+
+        assert_eq!(
+            params["input"][0],
+            json!({"type": "text", "text": "Inspect this"})
+        );
+        assert_eq!(
+            params["input"][1],
+            json!({"type": "localImage", "path": "/board/attachments/photo.png"})
+        );
+        assert_eq!(
+            steer_params("thread-1", "turn-1", &input)["input"],
+            params["input"]
+        );
     }
 
     async fn manager_with_fake_agent(
@@ -828,6 +890,19 @@ mod tests {
             .set_channel_subscriptions(agent.id, &["general".into()])
             .await
             .unwrap();
+        let attachment = manager
+            .store
+            .upload_attachment(
+                AttachmentOwner::Human,
+                AttachmentUpload {
+                    filename: "status.svg".into(),
+                    declared_media_type: "image/svg+xml".into(),
+                    bytes: b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle/></svg>".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+        let attachment_id = attachment.id.clone();
         tokio::spawn(async move {
             let (reader, mut writer) = split(server);
             let mut lines = BufReader::new(reader).lines();
@@ -837,6 +912,13 @@ mod tests {
             assert_eq!(
                 request["params"]["input"][0]["text"],
                 "A message was posted in #general by human:\nStatus changed"
+            );
+            assert_eq!(request["params"]["input"][1]["type"], "localImage");
+            assert!(
+                request["params"]["input"][1]["path"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(".svg")
             );
             writer
                 .write_all(
@@ -852,7 +934,13 @@ mod tests {
 
         let (_, targets) = manager
             .store
-            .post_message_with_wakes("general", None, "human", "Status changed")
+            .post_message_with_attachments(
+                "general",
+                None,
+                "human",
+                "Status changed",
+                &[attachment_id],
+            )
             .await
             .unwrap();
         for agent_id in targets {

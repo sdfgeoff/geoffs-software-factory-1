@@ -10,6 +10,7 @@ import {
 import type { Agent, BoardMessage, Channel } from "../types";
 import { mergeMessages } from "../messagePages";
 import { MessageContent } from "./MessageContent";
+import { AttachmentGallery, ImageAttachmentPicker, type PendingImage } from "./ImageAttachments";
 
 interface Props {
   agents: Agent[];
@@ -83,6 +84,7 @@ const BoardConversation = memo(function BoardConversation({
             )}
             <time>{new Date(message.created_at * 1000).toLocaleString()}</time>
             <MessageContent source={message.body} />
+            <AttachmentGallery attachments={message.attachments ?? []} />
           </article>
         );
       })}
@@ -106,6 +108,7 @@ export const MessageBoard = memo(function MessageBoard({
   const [messages, setMessages] = useState<BoardMessage[]>([]);
   const [messagesChannel, setMessagesChannel] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [imageDrafts, setImageDrafts] = useState<Record<string, PendingImage[]>>({});
   const [loading, setLoading] = useState(true);
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -126,6 +129,7 @@ export const MessageBoard = memo(function MessageBoard({
     [...newDescription].length <= channelDescriptionMaxLength;
   const selectedChannel = channels.find((item) => item.name === channel);
   const body = drafts[channel] ?? "";
+  const images = imageDrafts[channel] ?? [];
   const visibleMessages = useMemo(
     () => mergeMessages(
       messagesChannel === channel ? messages : [],
@@ -215,14 +219,45 @@ export const MessageBoard = memo(function MessageBoard({
   }, [channel, loadingOlder, onError, visibleMessages]);
   async function post(event: FormEvent) {
     event.preventDefault();
-    if (postingChannel !== null) return;
+    if (postingChannel !== null || (!body.trim() && images.length === 0)) return;
     const targetChannel = channel;
+    const targetImages = images;
     setPostingChannel(targetChannel);
     setPostStatuses((current) => ({ ...current, [targetChannel]: "Posting…" }));
     try {
-      const created = await api.postMessage(targetChannel, body);
+      const uploaded: PendingImage[] = [];
+      for (const image of targetImages) {
+        if (image.attachment) {
+          uploaded.push(image);
+          continue;
+        }
+        setImageDrafts((current) => ({
+          ...current,
+          [targetChannel]: (current[targetChannel] ?? []).map((item) => item.key === image.key ? { ...item, state: "uploading", error: undefined } : item),
+        }));
+        try {
+          const attachment = await api.uploadAttachment(image.file);
+          const next = { ...image, attachment, state: "uploaded" as const, error: undefined };
+          uploaded.push(next);
+          setImageDrafts((current) => ({
+            ...current,
+            [targetChannel]: (current[targetChannel] ?? []).map((item) => item.key === image.key ? next : item),
+          }));
+        } catch (error) {
+          setImageDrafts((current) => ({
+            ...current,
+            [targetChannel]: (current[targetChannel] ?? []).map((item) => item.key === image.key ? { ...item, state: "error", error: error instanceof Error ? error.message : "Upload failed" } : item),
+          }));
+          throw error;
+        }
+      }
+      const attachmentIds = uploaded.map((image) => image.attachment!.id);
+      const created = attachmentIds.length
+        ? await api.postMessage(targetChannel, body, attachmentIds)
+        : await api.postMessage(targetChannel, body);
       setMessages((current) => mergeMessages(current, [created]));
       setDrafts((current) => ({ ...current, [targetChannel]: "" }));
+      setImageDrafts((current) => ({ ...current, [targetChannel]: [] }));
       setPostStatuses((current) => ({ ...current, [targetChannel]: "Posted" }));
     } catch (error) {
       setPostStatuses((current) => ({
@@ -401,10 +436,18 @@ export const MessageBoard = memo(function MessageBoard({
                   setPostStatuses((current) => ({ ...current, [channel]: "" }));
                 }
               }
-              required
             />
           </label>
-          <button type="submit" disabled={postingChannel !== null}>
+          <ImageAttachmentPicker
+            images={images}
+            disabled={postingChannel !== null}
+            onAdd={(added) => {
+              setImageDrafts((current) => ({ ...current, [channel]: [...(current[channel] ?? []), ...added] }));
+              setPostStatuses((current) => ({ ...current, [channel]: "" }));
+            }}
+            onRemove={(key) => setImageDrafts((current) => ({ ...current, [channel]: (current[channel] ?? []).filter((image) => image.key !== key) }))}
+          />
+          <button type="submit" disabled={postingChannel !== null || (!body.trim() && images.length === 0)}>
             {postingChannel === channel ? "Posting…" : `Post to #${channel}`}
           </button>
           {postStatuses[channel] && (

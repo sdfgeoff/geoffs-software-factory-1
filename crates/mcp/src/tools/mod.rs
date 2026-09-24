@@ -67,6 +67,7 @@ mod tests {
                 "list_my_reminders",
                 "list_projects",
                 "list_tickets",
+                "materialize_attachment",
                 "post_to_message_board",
                 "read_message_board_channel",
                 "register_project",
@@ -94,6 +95,15 @@ mod tests {
         assert_eq!(
             read.pointer("/inputSchema/properties/limit/minimum"),
             Some(&json!(1))
+        );
+        let post = definition(&definitions, "post_to_message_board");
+        assert_eq!(
+            post.pointer("/inputSchema/properties/image_paths/type"),
+            Some(&json!("array"))
+        );
+        assert_eq!(
+            post.pointer("/inputSchema/properties/image_paths/maxItems"),
+            Some(&json!(5))
         );
         assert_eq!(
             read.pointer("/inputSchema/properties/limit/maximum"),

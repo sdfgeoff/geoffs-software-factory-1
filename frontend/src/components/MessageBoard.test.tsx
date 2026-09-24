@@ -25,7 +25,7 @@ vi.mock("./MessageContent", () => ({
 }));
 
 vi.mock("../api", () => ({
-  api: { createChannel: vi.fn(), messages: vi.fn(), postMessage: vi.fn() },
+  api: { createChannel: vi.fn(), messages: vi.fn(), postMessage: vi.fn(), uploadAttachment: vi.fn() },
 }));
 
 const agent: Agent = {
@@ -51,6 +51,105 @@ describe("MessageBoard", () => {
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("uploads and posts an image-only message while preserving attachment metadata", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:preview"),
+      revokeObjectURL: vi.fn(),
+    });
+    const attachment = {
+      id: "a".repeat(32),
+      original_filename: "field.png",
+      media_type: "image/png",
+      byte_size: 12,
+      download_url: `/api/attachments/${"a".repeat(32)}`,
+    };
+    vi.mocked(api.messages).mockResolvedValue(page([]));
+    vi.mocked(api.uploadAttachment).mockResolvedValue(attachment);
+    vi.mocked(api.postMessage).mockResolvedValue({
+      id: 1,
+      channel_name: "general",
+      agent_id: null,
+      author: "human",
+      body: "",
+      attachments: [attachment],
+      created_at: 1,
+    });
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+
+    const file = new File(["png"], "field.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Attach images"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
+
+    await waitFor(() => expect(api.uploadAttachment).toHaveBeenCalledWith(file));
+    expect(api.postMessage).toHaveBeenCalledWith("general", "", [attachment.id]);
+    expect(await screen.findByRole("img", { name: "field.png" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Download" }).getAttribute("href")).toBe(attachment.download_url);
+  });
+
+  it("preserves text and image selections after a partial upload failure", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn((file: File) => `blob:${file.name}`),
+      revokeObjectURL: vi.fn(),
+    });
+    const firstAttachment = {
+      id: "1".repeat(32), original_filename: "first.png", media_type: "image/png",
+      byte_size: 5, download_url: `/api/attachments/${"1".repeat(32)}`,
+    };
+    const secondAttachment = {
+      id: "2".repeat(32), original_filename: "second.png", media_type: "image/png",
+      byte_size: 6, download_url: `/api/attachments/${"2".repeat(32)}`,
+    };
+    vi.mocked(api.messages).mockResolvedValue(page([]));
+    vi.mocked(api.uploadAttachment)
+      .mockResolvedValueOnce(firstAttachment)
+      .mockRejectedValueOnce(new Error("network lost"))
+      .mockResolvedValueOnce(secondAttachment);
+    vi.mocked(api.postMessage).mockResolvedValue({
+      id: 2, channel_name: "general", agent_id: null, author: "human", body: "Field notes",
+      attachments: [firstAttachment, secondAttachment], created_at: 2,
+    });
+    render(
+      <MessageBoard
+        agents={[]}
+        channels={[{ name: "general", description: "", most_recent_message_at: 0 }]}
+        refresh={0}
+        onSelectAgent={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    const draft = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(draft, { target: { value: "Field notes" } });
+    fireEvent.change(screen.getByLabelText("Attach images"), {
+      target: { files: [
+        new File(["one"], "first.png", { type: "image/png" }),
+        new File(["two"], "second.png", { type: "image/png" }),
+      ] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
+
+    expect(await screen.findByText("Could not post: network lost")).toBeTruthy();
+    expect((draft as HTMLTextAreaElement).value).toBe("Field notes");
+    expect(screen.getByText("first.png")).toBeTruthy();
+    expect(screen.getByText("second.png")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Post to #general" }));
+    await waitFor(() => expect(api.postMessage).toHaveBeenCalledWith(
+      "general", "Field notes", [firstAttachment.id, secondAttachment.id],
+    ));
+    expect(api.uploadAttachment).toHaveBeenCalledTimes(3);
   });
 
   it("does not rerender a 500-message history while typing", async () => {

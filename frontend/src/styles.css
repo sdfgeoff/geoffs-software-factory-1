@@ -509,6 +509,72 @@ aside form,
   background: #e7e1d5;
   color: #28332f;
 }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.image-attachment-picker {
+  display: grid;
+  gap: 0.6rem;
+}
+.attach-images {
+  width: max-content;
+  cursor: pointer;
+}
+.attach-images[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.pending-images,
+.message-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+  gap: 0.65rem;
+}
+.pending-images figure,
+.message-attachments figure {
+  min-width: 0;
+  margin: 0;
+}
+.pending-images img,
+.message-attachments img {
+  display: block;
+  width: 100%;
+  height: 7rem;
+  border-radius: 0.45rem;
+  object-fit: cover;
+  background: #e7e1d5;
+}
+.pending-images figcaption,
+.message-attachments figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+}
+.pending-images figcaption span,
+.message-attachments figcaption span,
+.pending-images figcaption {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-images button {
+  width: auto;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.7rem;
+}
+.message-attachments {
+  margin-top: 0.65rem;
+}
 .external-merge-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

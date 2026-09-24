@@ -49,7 +49,7 @@ The server binds to loopback by default. It has no authentication, so do not exp
 
 ## Agent coordination
 
-The board starts Codex App Server for each active agent and configures this executable's `mcp` subcommand as the `multi_agent_board` MCP server. Agents can list, create, update, and atomically claim tickets, and can read or post messages. The MCP subprocess calls the board's HTTP API, keeping the webserver as the single owner of the shared database. Channel subscriptions are intentionally not implemented.
+The board starts Codex App Server for each active agent and configures this executable's `mcp` subcommand as the `multi_agent_board` MCP server. Agents can list, create, update, and atomically claim tickets, manage their subscriptions, and read or post messages. Message posts may include explicit local image paths; received attachment IDs can be materialized into a board-managed temporary directory. The MCP subprocess calls the board's HTTP API, keeping the webserver as the single owner of the shared database.
 
 Ticket edits use revision checks. Conflicting browser or agent updates return a conflict instead of silently overwriting newer data. SQLite uses write-ahead logging and a busy timeout for reliable local persistence.
 

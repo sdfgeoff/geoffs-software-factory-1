@@ -84,6 +84,67 @@ fn initialize_repository(path: &std::path::Path) -> String {
 }
 
 #[tokio::test]
+async fn mcp_posts_local_images_and_materializes_received_attachments() {
+    let store = Store::memory().await.unwrap();
+    let agent = store
+        .create_agent("image-worker", "/tmp/image-worker")
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store, agents);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+    let source = std::env::temp_dir().join(format!("mab-mcp-{}.svg", uuid::Uuid::new_v4()));
+    let contents =
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"2\" cy=\"2\" r=\"2\"/></svg>";
+    tokio::fs::write(&source, contents).await.unwrap();
+
+    let posted = mcp_tool(
+        &base_url,
+        agent.id,
+        1,
+        "post_to_message_board",
+        json!({
+            "channel_name": "general",
+            "author": agent.name,
+            "message": "See image",
+            "image_paths": [source]
+        }),
+    )
+    .await;
+    assert_eq!(posted.pointer("/result/isError"), None);
+    let message = tool_content(&posted);
+    assert_eq!(
+        message["attachments"][0]["original_filename"],
+        source.file_name().unwrap().to_str().unwrap()
+    );
+
+    let materialized = mcp_tool(
+        &base_url,
+        agent.id,
+        2,
+        "materialize_attachment",
+        json!({"attachment_id": message["attachments"][0]["id"]}),
+    )
+    .await;
+    assert_eq!(materialized.pointer("/result/isError"), None);
+    let path = tool_content(&materialized)["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), contents);
+    tokio::fs::remove_file(source).await.unwrap();
+    tokio::fs::remove_file(path).await.unwrap();
+}
+
+#[tokio::test]
 async fn mcp_registers_lists_and_archives_projects_through_http() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

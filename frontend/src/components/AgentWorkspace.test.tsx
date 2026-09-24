@@ -30,6 +30,7 @@ vi.mock("../api", () => ({
     setAgentChannelSubscriptions: vi.fn(),
     setAgentProjectSubscriptions: vi.fn(),
     setAgentWakeSettings: vi.fn(),
+    uploadAttachment: vi.fn(),
   },
 }));
 
@@ -751,6 +752,75 @@ describe("AgentWorkspace", () => {
         "Check the failing test",
       ),
     );
+  });
+
+  it("sends an image-only prompt and keeps the selection scoped to its agent", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:preview"),
+      revokeObjectURL: vi.fn(),
+    });
+    const second = { ...agent, id: 2, name: "builder" };
+    const attachment = {
+      id: "b".repeat(32),
+      original_filename: "screen.png",
+      media_type: "image/png",
+      byte_size: 10,
+      download_url: `/api/attachments/${"b".repeat(32)}`,
+    };
+    vi.mocked(api.uploadAttachment).mockResolvedValue(attachment);
+    const { rerender } = render(
+      <AgentWorkspace
+        agents={[agent, second]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    const file = new File(["png"], "screen.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Attach images"), { target: { files: [file] } });
+
+    rerender(
+      <AgentWorkspace
+        agents={[agent, second]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={second.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    expect(screen.queryByText("screen.png")).toBeNull();
+    rerender(
+      <AgentWorkspace
+        agents={[agent, second]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="chat"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    expect(screen.getByText("screen.png")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.sendAgentMessage).toHaveBeenCalledWith(agent.id, "", [attachment.id]));
   });
 
   it("prevents duplicate sends and preserves a failed message for retry", async () => {

@@ -1,18 +1,18 @@
-use reqwest::Method;
+use reqwest::{Method, multipart};
 use serde::{Serialize, de::DeserializeOwned};
 
 use multi_agent_board_protocol::{
-    AGENT_ID_HEADER, Agent, AgentMessagePage, AgentProjectWorktree, BoardSettings, Channel,
-    CompleteExternalMergeRequest, CreateAgentRequest, CreateChannelRequest, CreateTicketRequest,
-    CreateWakeEventRequest, ErrorResponse, Message, MessagePage, MessagePageQuery,
-    PostMessageRequest, PostTicketCommentRequest, Project, RegisterProjectRequest, Reminder,
-    RenameAgentRequest, RequestChangesRequest, ReserveTicketsRequest, ReturnExternalMergeRequest,
-    ReviewRevisionRequest, ScheduleSelfReminderRequest, SendAgentMessageRequest,
-    SetAgentChannelSubscriptionsRequest, SetAgentProjectSubscriptionsRequest,
-    SetAgentScopesRequest, SetAgentWakeSettingsRequest, SetBoardSettingsRequest,
-    SetExternalChangeRequest, SetProjectCompletionWorkflowRequest, Ticket, TicketActivity,
-    TicketActivityPage, TicketClaimResponse, TicketSummary, TicketSummaryPage, UpdateTicketRequest,
-    WakeEvent,
+    AGENT_ID_HEADER, Agent, AgentMessagePage, AgentProjectWorktree, Attachment, BoardSettings,
+    Channel, CompleteExternalMergeRequest, CreateAgentRequest, CreateChannelRequest,
+    CreateTicketRequest, CreateWakeEventRequest, ErrorResponse, Message, MessagePage,
+    MessagePageQuery, PostMessageRequest, PostTicketCommentRequest, Project,
+    RegisterProjectRequest, Reminder, RenameAgentRequest, RequestChangesRequest,
+    ReserveTicketsRequest, ReturnExternalMergeRequest, ReviewRevisionRequest,
+    ScheduleSelfReminderRequest, SendAgentMessageRequest, SetAgentChannelSubscriptionsRequest,
+    SetAgentProjectSubscriptionsRequest, SetAgentScopesRequest, SetAgentWakeSettingsRequest,
+    SetBoardSettingsRequest, SetExternalChangeRequest, SetProjectCompletionWorkflowRequest, Ticket,
+    TicketActivity, TicketActivityPage, TicketClaimResponse, TicketSummary, TicketSummaryPage,
+    UpdateTicketRequest, WakeEvent,
 };
 
 #[derive(Debug)]
@@ -44,6 +44,125 @@ pub struct BoardClient {
 }
 
 impl BoardClient {
+    pub async fn upload_attachment(&self, path: &str) -> Result<Attachment, McpError> {
+        let path = std::path::Path::new(path);
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| McpError::bad_request("image path must have a valid filename"))?;
+        let media_type = match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("svg") => "image/svg+xml",
+            _ => {
+                return Err(McpError::bad_request(
+                    "image path must use png, jpg, jpeg, gif, webp, or svg",
+                ));
+            }
+        };
+        let bytes = tokio::fs::read(path).await.map_err(|error| {
+            McpError::bad_request(format!("could not read image path: {error}"))
+        })?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(filename.to_owned())
+            .mime_str(media_type)
+            .map_err(|error| McpError::bad_request(format!("invalid image media type: {error}")))?;
+        let response = self
+            .client
+            .post(format!("{}/attachments", self.base_url))
+            .header(AGENT_ID_HEADER, self.agent_id)
+            .multipart(multipart::Form::new().part("file", part))
+            .send()
+            .await
+            .map_err(|error| McpError::internal(format!("board upload failed: {error}")))?;
+        self.decode_response(response).await
+    }
+
+    pub async fn materialize_attachment(&self, id: &str) -> Result<String, McpError> {
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(McpError::bad_request("attachment_id is invalid"));
+        }
+        let response = self
+            .client
+            .get(format!("{}/attachments/{id}", self.base_url))
+            .header(AGENT_ID_HEADER, self.agent_id)
+            .send()
+            .await
+            .map_err(|error| McpError::internal(format!("board download failed: {error}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let error = response
+                .json::<ErrorResponse>()
+                .await
+                .map(|body| body.error)
+                .unwrap_or_else(|_| "board download failed".into());
+            return Err(McpError::internal(error));
+        }
+        let extension = match response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+        {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/svg+xml" => "svg",
+            _ => {
+                return Err(McpError::internal(
+                    "attachment has an unsupported media type",
+                ));
+            }
+        };
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| McpError::internal(format!("invalid attachment response: {error}")))?;
+        let directory = std::env::temp_dir()
+            .join("multi-agent-board-attachments")
+            .join(self.agent_id.to_string());
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(|error| {
+                McpError::internal(format!("could not create attachment directory: {error}"))
+            })?;
+        let path = directory.join(format!("{id}.{extension}"));
+        tokio::fs::write(&path, bytes).await.map_err(|error| {
+            McpError::internal(format!("could not materialize attachment: {error}"))
+        })?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    async fn decode_response<R: DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<R, McpError> {
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| McpError::internal(format!("invalid board response: {error}")))?;
+        if !status.is_success() {
+            let error = serde_json::from_slice::<ErrorResponse>(&body)
+                .map(|body| body.error)
+                .unwrap_or_else(|_| "board request failed".into());
+            return Err(McpError::internal(error));
+        }
+        serde_json::from_slice(&body)
+            .map_err(|error| McpError::internal(format!("invalid board response: {error}")))
+    }
+
     pub fn new(base_url: String, agent_id: i64) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').into(),
@@ -72,19 +191,7 @@ impl BoardClient {
             .send()
             .await
             .map_err(|error| McpError::internal(format!("board request failed: {error}")))?;
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| McpError::internal(format!("invalid board response: {error}")))?;
-        if !status.is_success() {
-            let error = serde_json::from_slice::<ErrorResponse>(&body)
-                .map(|body| body.error)
-                .unwrap_or_else(|_| "board request failed".into());
-            return Err(McpError::internal(error));
-        }
-        serde_json::from_slice(&body)
-            .map_err(|error| McpError::internal(format!("invalid board response: {error}")))
+        self.decode_response(response).await
     }
 
     async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, McpError> {

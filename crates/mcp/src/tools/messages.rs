@@ -43,6 +43,20 @@ struct PostMessageArguments {
     channel_name: String,
     author: String,
     message: String,
+    #[serde(default)]
+    #[schemars(length(max = 5))]
+    image_paths: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MaterializeAttachmentArguments {
+    attachment_id: String,
+}
+
+#[derive(Serialize)]
+struct MaterializedAttachment {
+    path: String,
 }
 
 fn valid_page(arguments: &ReadChannelArguments) -> Result<(), McpError> {
@@ -111,16 +125,41 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
         "Post a message to an existing channel",
         |board, arguments| {
             Box::pin(async move {
+                if arguments.image_paths.len() > 5 {
+                    return Err(McpError::bad_request(
+                        "a message may contain at most 5 images",
+                    ));
+                }
+                let mut attachment_ids = Vec::with_capacity(arguments.image_paths.len());
+                for path in arguments.image_paths {
+                    attachment_ids.push(board.upload_attachment(&path).await?.id);
+                }
                 board
                     .post_message(
                         &arguments.channel_name,
                         &PostMessageRequest {
                             author: arguments.author,
                             body: arguments.message,
-                            attachment_ids: Vec::new(),
+                            attachment_ids,
                         },
                     )
                     .await
+            })
+        },
+    ))?;
+    registry.register(ToolDefinition::<
+        MaterializeAttachmentArguments,
+        MaterializedAttachment,
+    >::new(
+        "materialize_attachment",
+        "Download a received image attachment by its opaque ID to a board-managed temporary path",
+        |board, arguments| {
+            Box::pin(async move {
+                Ok(MaterializedAttachment {
+                    path: board
+                        .materialize_attachment(&arguments.attachment_id)
+                        .await?,
+                })
             })
         },
     ))

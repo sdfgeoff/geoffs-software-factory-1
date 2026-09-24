@@ -1,5 +1,6 @@
 import type {
   Agent,
+  Attachment,
   AgentMessagePage,
   AgentProjectWorktree,
   BoardMessage,
@@ -69,6 +70,16 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  uploadAttachment: async (file: File) => {
+    const body = new FormData();
+    body.append("file", file, file.name);
+    const response = await fetch("/api/attachments", { method: "POST", body });
+    if (!response.ok) {
+      const error = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new ApiError(error?.error ?? `${response.status} ${response.statusText}`, response.status);
+    }
+    return (await response.json()) as Attachment;
+  },
   settings: () => request<BoardSettings>("/settings"),
   setSettings: (mergeNotificationChannel: string | null) =>
     request<BoardSettings>("/settings", {
@@ -188,10 +199,10 @@ export const api = {
     request<MessagePage>(
       `/channels/${encodeURIComponent(channel)}/messages${pageQuery(query)}`,
     ),
-  postMessage: (channel: string, body: string) =>
+  postMessage: (channel: string, body: string, attachmentIds: string[] = []) =>
     request<BoardMessage>(`/channels/${encodeURIComponent(channel)}/messages`, {
       method: "POST",
-      body: JSON.stringify({ author: "human", body }),
+      body: JSON.stringify({ author: "human", body, attachment_ids: attachmentIds }),
     }),
   agents: () => request<Agent[]>("/agents"),
   createAgent: (name: string, projectId: number) =>
@@ -251,9 +262,9 @@ export const api = {
     request<AgentMessagePage>(`/agents/${id}/messages${pageQuery(query)}`),
   agentProjectWorktrees: (id: number) =>
     request<AgentProjectWorktree[]>(`/agents/${id}/project-worktrees`),
-  sendAgentMessage: (id: number, message: string) =>
+  sendAgentMessage: (id: number, message: string, attachmentIds: string[] = []) =>
     request<Agent>(`/agents/${id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, attachment_ids: attachmentIds }),
     }),
 };

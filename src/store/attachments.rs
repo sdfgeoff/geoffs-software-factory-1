@@ -52,6 +52,25 @@ struct ClaimedAttachment {
 }
 
 impl Store {
+    pub(crate) async fn attachment_paths_for_content(
+        &self,
+        content_kind: &str,
+        content_id: i64,
+    ) -> Result<Vec<PathBuf>, AppError> {
+        let storage_names: Vec<String> = sqlx::query_scalar(
+            "SELECT storage_name FROM attachments WHERE content_kind = ? AND content_id = ? \
+             ORDER BY created_at, id",
+        )
+        .bind(content_kind)
+        .bind(content_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(storage_names
+            .into_iter()
+            .map(|name| self.attachment_root.join(name))
+            .collect())
+    }
+
     pub async fn upload_attachment(
         &self,
         owner: AttachmentOwner,

@@ -11,6 +11,7 @@ import type {
   TicketSummary,
 } from "../types";
 import { MessageContent } from "./MessageContent";
+import { AttachmentGallery, ImageAttachmentPicker, type PendingImage } from "./ImageAttachments";
 
 export type AgentView = "chat" | "settings";
 
@@ -82,6 +83,7 @@ const AgentConversation = memo(function AgentConversation({
         <article className={message.role} key={message.id}>
           <strong>{message.role}</strong>
           <MessageContent source={message.body} />
+          <AttachmentGallery attachments={message.attachments ?? []} />
         </article>
       ))}
       {delta && (
@@ -126,6 +128,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const [name, setName] = useState("");
   const [initialProjectId, setInitialProjectId] = useState("");
   const [prompts, setPrompts] = useState<Record<number, string>>({});
+  const [imageDrafts, setImageDrafts] = useState<Record<number, PendingImage[]>>({});
   const [settingsDrafts, setSettingsDrafts] = useState<
     Record<number, AgentSettingsDraft>
   >({});
@@ -148,6 +151,7 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   const selected =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const prompt = selected ? prompts[selected.id] ?? "" : "";
+  const promptImages = selected ? imageDrafts[selected.id] ?? [] : [];
   const visibleMessages = useMemo(
     () => mergeMessages(
       messagesAgentId === selectedAgentId ? messages : [],
@@ -378,13 +382,44 @@ export const AgentWorkspace = memo(function AgentWorkspace({
   }
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!selected || sendingAgentId !== null) return;
+    if (!selected || sendingAgentId !== null || (!prompt.trim() && promptImages.length === 0)) return;
     const agentId = selected.id;
+    const targetImages = promptImages;
     setSendingAgentId(agentId);
     setSendStatuses((current) => ({ ...current, [agentId]: "Sending…" }));
     try {
-      const updated = await api.sendAgentMessage(agentId, prompt);
+      const uploaded: PendingImage[] = [];
+      for (const image of targetImages) {
+        if (image.attachment) {
+          uploaded.push(image);
+          continue;
+        }
+        setImageDrafts((current) => ({
+          ...current,
+          [agentId]: (current[agentId] ?? []).map((item) => item.key === image.key ? { ...item, state: "uploading", error: undefined } : item),
+        }));
+        try {
+          const attachment = await api.uploadAttachment(image.file);
+          const next = { ...image, attachment, state: "uploaded" as const, error: undefined };
+          uploaded.push(next);
+          setImageDrafts((current) => ({
+            ...current,
+            [agentId]: (current[agentId] ?? []).map((item) => item.key === image.key ? next : item),
+          }));
+        } catch (error) {
+          setImageDrafts((current) => ({
+            ...current,
+            [agentId]: (current[agentId] ?? []).map((item) => item.key === image.key ? { ...item, state: "error", error: error instanceof Error ? error.message : "Upload failed" } : item),
+          }));
+          throw error;
+        }
+      }
+      const attachmentIds = uploaded.map((image) => image.attachment!.id);
+      const updated = attachmentIds.length
+        ? await api.sendAgentMessage(agentId, prompt, attachmentIds)
+        : await api.sendAgentMessage(agentId, prompt);
       setPrompts((current) => ({ ...current, [agentId]: "" }));
+      setImageDrafts((current) => ({ ...current, [agentId]: [] }));
       await onChanged(updated);
       setSendStatuses((current) => ({ ...current, [agentId]: "Sent" }));
     } catch (error) {
@@ -879,12 +914,20 @@ export const AgentWorkspace = memo(function AgentWorkspace({
                         }));
                       }
                     }
-                    required
                   />
                 </label>
+                <ImageAttachmentPicker
+                  images={promptImages}
+                  disabled={sendingAgentId !== null}
+                  onAdd={(added) => {
+                    setImageDrafts((current) => ({ ...current, [selected.id]: [...(current[selected.id] ?? []), ...added] }));
+                    setSendStatuses((current) => ({ ...current, [selected.id]: "" }));
+                  }}
+                  onRemove={(key) => setImageDrafts((current) => ({ ...current, [selected.id]: (current[selected.id] ?? []).filter((image) => image.key !== key) }))}
+                />
                 <button
                   type="submit"
-                  disabled={sendingAgentId !== null}
+                  disabled={sendingAgentId !== null || (!prompt.trim() && promptImages.length === 0)}
                 >
                   {sendingAgentId === selected.id ? "Sending…" : "Send"}
                 </button>
