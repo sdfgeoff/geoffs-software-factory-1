@@ -9,7 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { App } from "./App";
-import type { Agent, Project, Ticket } from "./types";
+import type { Agent, Project, Ticket, TicketActivity } from "./types";
 
 vi.mock("./api", () => ({
   api: {
@@ -84,6 +84,23 @@ const ticket: Ticket = {
   created_at: 0,
   updated_at: 0,
 };
+
+function ticketActivity(id: number): TicketActivity {
+  return {
+    id,
+    ticket_id: ticket.id,
+    action: "comment",
+    detail: "New activity",
+    author: "human",
+    actor_agent_id: null,
+    previous_reserved_for_agent_id: null,
+    reserved_for_agent_id: null,
+    implementation_branch: null,
+    review_commit: null,
+    review_target_branch: null,
+    created_at: id,
+  };
+}
 
 class MockEventSource {
   onopen: (() => void) | null = null;
@@ -189,7 +206,7 @@ describe("App agent routes", () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
-      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false }] : [],
+      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false, activity_count: 0, latest_activity_id: null }] : [],
       has_more: false,
     }));
 
@@ -226,7 +243,7 @@ describe("App agent routes", () => {
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
       tickets:
         state === "awaiting_external_merge"
-          ? [{ ...externalTicket, has_review_feedback: false }]
+          ? [{ ...externalTicket, has_review_feedback: false, activity_count: 0, latest_activity_id: null }]
           : [],
       has_more: false,
     }));
@@ -316,13 +333,165 @@ describe("App agent routes", () => {
     });
     await act(async () => {
       resolveDetail(ticket);
-      resolveSummary({ tickets: [{ ...ticket, has_review_feedback: false }], has_more: false });
+      resolveSummary({ tickets: [{ ...ticket, has_review_feedback: false, activity_count: 0, latest_activity_id: null }], has_more: false });
       await Promise.resolve();
     });
 
     expect(await screen.findByDisplayValue(newer.title)).toBeTruthy();
     expect(screen.queryByDisplayValue(ticket.title)).toBeNull();
   });
+
+  it("does not double-count activity when SSE arrives before its summary response", async () => {
+    window.history.replaceState(null, "", "#board?project=2");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    let resolveRepair!: (value: Awaited<ReturnType<typeof api.tickets>>) => void;
+    let repair: Promise<Awaited<ReturnType<typeof api.tickets>>> | null = null;
+    vi.mocked(api.tickets).mockImplementation(({ state } = {}) => {
+      if (state !== ticket.state) return Promise.resolve({ tickets: [], has_more: false });
+      if (repair) return repair;
+      return Promise.resolve({
+        tickets: [{
+          ...ticket,
+          has_review_feedback: false,
+          activity_count: 0,
+          latest_activity_id: null,
+        }],
+        has_more: false,
+      });
+    });
+    render(<App />);
+    await screen.findByText(ticket.title);
+    repair = new Promise((resolve) => { resolveRepair = resolve; });
+
+    act(() => {
+      latestEventSource.onmessage?.({ data: JSON.stringify({ kind: "refresh" }) } as MessageEvent);
+    });
+    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(8));
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 0,
+          kind: "ticket_activity_created",
+          data: ticketActivity(40),
+        }),
+      } as MessageEvent);
+    });
+    expect(screen.getByText("1 timeline item")).toBeTruthy();
+
+    await act(async () => {
+      resolveRepair({
+        tickets: [{
+          ...ticket,
+          has_review_feedback: false,
+          activity_count: 1,
+          latest_activity_id: 40,
+        }],
+        has_more: false,
+      });
+      await repair;
+    });
+    expect(screen.getByText("1 timeline item")).toBeTruthy();
+  });
+
+  it("does not double-count activity when its summary response arrives before SSE", async () => {
+    window.history.replaceState(null, "", "#board?project=2");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    let resolveRepair!: (value: Awaited<ReturnType<typeof api.tickets>>) => void;
+    let repair: Promise<Awaited<ReturnType<typeof api.tickets>>> | null = null;
+    vi.mocked(api.tickets).mockImplementation(({ state } = {}) => {
+      if (state !== ticket.state) return Promise.resolve({ tickets: [], has_more: false });
+      if (repair) return repair;
+      return Promise.resolve({
+        tickets: [{
+          ...ticket,
+          has_review_feedback: false,
+          activity_count: 0,
+          latest_activity_id: null,
+        }],
+        has_more: false,
+      });
+    });
+    render(<App />);
+    await screen.findByText(ticket.title);
+    repair = new Promise((resolve) => { resolveRepair = resolve; });
+
+    act(() => {
+      latestEventSource.onmessage?.({ data: JSON.stringify({ kind: "refresh" }) } as MessageEvent);
+    });
+    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(8));
+    await act(async () => {
+      resolveRepair({
+        tickets: [{
+          ...ticket,
+          has_review_feedback: false,
+          activity_count: 1,
+          latest_activity_id: 41,
+        }],
+        has_more: false,
+      });
+      await repair;
+    });
+    expect(screen.getByText("1 timeline item")).toBeTruthy();
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          agent_id: 0,
+          kind: "ticket_activity_created",
+          data: ticketActivity(41),
+        }),
+      } as MessageEvent);
+    });
+    expect(screen.getByText("1 timeline item")).toBeTruthy();
+  });
+
+  it.each([
+    ["older summary", 0, null],
+    ["summary containing the event", 1, 50],
+  ] as const)(
+    "reconciles activity received before an initial %s",
+    async (_label, activityCount, latestActivityId) => {
+      window.history.replaceState(null, "", "#board?project=2");
+      vi.mocked(api.projects).mockResolvedValue([project]);
+      let resolveSummary!: (value: Awaited<ReturnType<typeof api.tickets>>) => void;
+      const summary = new Promise<Awaited<ReturnType<typeof api.tickets>>>((resolve) => {
+        resolveSummary = resolve;
+      });
+      vi.mocked(api.tickets).mockImplementation(({ state } = {}) =>
+        state === ticket.state
+          ? summary
+          : Promise.resolve({ tickets: [], has_more: false }),
+      );
+      render(<App />);
+      await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(4));
+
+      act(() => {
+        latestEventSource.onmessage?.({
+          data: JSON.stringify({
+            agent_id: 0,
+            kind: "ticket_activity_created",
+            data: ticketActivity(50),
+          }),
+        } as MessageEvent);
+      });
+      await act(async () => {
+        resolveSummary({
+          tickets: [{
+            ...ticket,
+            has_review_feedback: false,
+            activity_count: activityCount,
+            latest_activity_id: latestActivityId,
+          }],
+          has_more: false,
+        });
+        await summary;
+      });
+
+      expect(await screen.findByText(ticket.title)).toBeTruthy();
+      expect(screen.getByText("1 timeline item")).toBeTruthy();
+      expect(screen.queryByText("2 timeline items")).toBeNull();
+    },
+  );
 
   it("shows remotely created tickets and moves them between columns without reloading", async () => {
     window.history.replaceState(null, "", "#board?project=2");
@@ -369,7 +538,7 @@ describe("App agent routes", () => {
     const completed = { ...ticket, id: 80, title: "Historical work", state: "done" as const };
     vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
-      tickets: state === "done" ? [{ ...completed, has_review_feedback: false }] : [],
+      tickets: state === "done" ? [{ ...completed, has_review_feedback: false, activity_count: 0, latest_activity_id: null }] : [],
       has_more: false,
     }));
     vi.mocked(api.ticket).mockResolvedValue(completed);
@@ -873,7 +1042,7 @@ describe("App agent routes", () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
-      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false }] : [],
+      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false, activity_count: 0, latest_activity_id: null }] : [],
       has_more: false,
     }));
     render(<App />);

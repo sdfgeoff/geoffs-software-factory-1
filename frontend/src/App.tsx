@@ -29,7 +29,13 @@ const activeTicketStates: TicketState[] = [
   "awaiting_external_merge",
 ];
 
-function summarizeTicket(ticket: Ticket): TicketSummary {
+function summarizeTicket(
+  ticket: Ticket,
+  activity: Pick<TicketSummary, "activity_count" | "latest_activity_id"> = {
+    activity_count: 0,
+    latest_activity_id: null,
+  },
+): TicketSummary {
   return {
     id: ticket.id,
     project_id: ticket.project_id,
@@ -41,6 +47,7 @@ function summarizeTicket(ticket: Ticket): TicketSummary {
     reviewer_id: ticket.reviewer_id,
     review_completion_workflow: ticket.review_completion_workflow,
     has_review_feedback: ticket.review_feedback !== null,
+    ...activity,
     unresolved_blockers: ticket.unresolved_blockers,
     revision: ticket.revision,
     created_at: ticket.created_at,
@@ -48,15 +55,48 @@ function summarizeTicket(ticket: Ticket): TicketSummary {
   };
 }
 
-function mergeByRevision<T extends { id: number; revision: number }>(
-  current: T[],
-  updates: T[],
-) {
+function mergeTicketSummaries(current: TicketSummary[], updates: TicketSummary[]) {
   const byId = new Map(current.map((item) => [item.id, item]));
   updates.forEach((item) => {
-    if ((byId.get(item.id)?.revision ?? -1) <= item.revision) byId.set(item.id, item);
+    const previous = byId.get(item.id);
+    if (!previous) {
+      byId.set(item.id, item);
+      return;
+    }
+    const fields = previous.revision <= item.revision ? item : previous;
+    const previousActivityId = previous.latest_activity_id ?? 0;
+    const itemActivityId = item.latest_activity_id ?? 0;
+    const activity = itemActivityId > previousActivityId
+      ? item
+      : itemActivityId < previousActivityId
+        ? previous
+        : item.activity_count >= previous.activity_count
+          ? item
+          : previous;
+    byId.set(item.id, {
+      ...fields,
+      activity_count: activity.activity_count,
+      latest_activity_id: activity.latest_activity_id,
+    });
   });
   return [...byId.values()];
+}
+
+function reconcileBufferedActivity(
+  summary: TicketSummary,
+  activity: Record<number, TicketActivity>,
+) {
+  const newer = Object.values(activity).filter(
+    (entry) =>
+      entry.ticket_id === summary.id &&
+      entry.id > (summary.latest_activity_id ?? 0),
+  );
+  if (newer.length === 0) return summary;
+  return {
+    ...summary,
+    activity_count: summary.activity_count + newer.length,
+    latest_activity_id: Math.max(...newer.map((entry) => entry.id)),
+  };
 }
 
 async function loadTicketState(state: TicketState) {
@@ -154,6 +194,8 @@ export function App() {
   const [liveTicketActivity, setLiveTicketActivity] = useState<
     Record<number, TicketActivity>
   >({});
+  const liveTicketActivityRef = useRef<Record<number, TicketActivity>>({});
+  const seenTicketActivityIds = useRef(new Set<number>());
   const [missingTicketIds, setMissingTicketIds] = useState<Set<number>>(() => new Set());
   const [ticketDetailRepair, setTicketDetailRepair] = useState(0);
   const [historyHasMore, setHistoryHasMore] = useState({ done: true, cancelled: true });
@@ -200,6 +242,17 @@ export function App() {
       : { view: "agents", agentId: null, agentView: "chat" } as const,
   );
 
+  const mergeSummaries = useCallback(
+    (current: TicketSummary[], updates: TicketSummary[]) =>
+      mergeTicketSummaries(
+        current,
+        updates.map((summary) =>
+          reconcileBufferedActivity(summary, liveTicketActivityRef.current),
+        ),
+      ),
+    [],
+  );
+
   const reload = useCallback(async (repair = false) => {
     const startingRevisions = new Map(
       ticketsRef.current.map((ticket) => [ticket.id, ticket.revision]),
@@ -232,7 +285,7 @@ export function App() {
             activeIds.has(ticket.id) ||
             ticket.revision !== startingRevisions.get(ticket.id),
         );
-        return mergeByRevision(unchanged, active);
+        return mergeSummaries(unchanged, active);
       });
       setChannels(nextChannels);
       setAgents(nextAgents);
@@ -241,7 +294,7 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [mergeSummaries]);
 
   useEffect(() => {
     if (
@@ -261,7 +314,15 @@ export function App() {
           ? { ...details, [ticket.id]: ticket }
           : details,
       );
-      setTickets((summaries) => mergeByRevision(summaries, [summarizeTicket(ticket)]));
+      setTickets((summaries) => {
+        const existing = summaries.find((summary) => summary.id === ticket.id);
+        return mergeSummaries(summaries, [
+          summarizeTicket(ticket, {
+            activity_count: existing?.activity_count ?? 0,
+            latest_activity_id: existing?.latest_activity_id ?? null,
+          }),
+        ]);
+      });
     };
     const load = async () => {
       try {
@@ -287,7 +348,7 @@ export function App() {
     };
     void load();
     return () => { current = false; };
-  }, [activeTicketId, missingTicketIds, route.view, ticketDetailRepair]);
+  }, [activeTicketId, mergeSummaries, missingTicketIds, route.view, ticketDetailRepair]);
 
   const reloadProjects = useCallback(async () => {
     try {
@@ -307,7 +368,19 @@ export function App() {
 
   const mergeTickets = useCallback((updates: Ticket | Ticket[]) => {
     const next = Array.isArray(updates) ? updates : [updates];
-    setTickets((current) => mergeByRevision(current, next.map(summarizeTicket)));
+    setTickets((current) =>
+      mergeSummaries(
+        current,
+        next.map((ticket) =>
+          summarizeTicket(ticket, {
+            activity_count:
+              current.find((summary) => summary.id === ticket.id)?.activity_count ?? 0,
+            latest_activity_id:
+              current.find((summary) => summary.id === ticket.id)?.latest_activity_id ?? null,
+          }),
+        ),
+      ),
+    );
     setTicketDetails((current) => {
       const updated = { ...current };
       next.forEach((ticket) => {
@@ -315,12 +388,12 @@ export function App() {
       });
       return updated;
     });
-  }, []);
+  }, [mergeSummaries]);
 
   const loadHistory = useCallback(async (state: "done" | "cancelled") => {
     try {
       const page = await api.tickets({ state, before_id: historyBefore[state], limit: 50 });
-      setTickets((current) => mergeByRevision(current, page.tickets));
+      setTickets((current) => mergeSummaries(current, page.tickets));
       if (page.tickets.length) {
         setHistoryBefore((current) => ({
           ...current,
@@ -331,7 +404,7 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [historyBefore]);
+  }, [historyBefore, mergeSummaries]);
   const mergeAgent = useCallback((updated: Agent) => {
     setAgents((current) => {
       const index = current.findIndex((agent) => agent.id === updated.id);
@@ -399,10 +472,29 @@ export function App() {
           mergeTickets(event.data);
           break;
         case "ticket_activity_created":
+          if (seenTicketActivityIds.current.has(event.data.id)) break;
+          seenTicketActivityIds.current.add(event.data.id);
+          liveTicketActivityRef.current = {
+            ...liveTicketActivityRef.current,
+            [event.data.id]: event.data,
+          };
           setLiveTicketActivity((current) => ({
             ...current,
             [event.data.id]: event.data,
           }));
+          setTickets((current) =>
+            current.map((ticket) =>
+              ticket.id === event.data.ticket_id
+                ? event.data.id > (ticket.latest_activity_id ?? 0)
+                  ? {
+                      ...ticket,
+                      activity_count: ticket.activity_count + 1,
+                      latest_activity_id: event.data.id,
+                    }
+                  : ticket
+                : ticket,
+            ),
+          );
           break;
         case "settings_updated":
           setSettings(event.data);

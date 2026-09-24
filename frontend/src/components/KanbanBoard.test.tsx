@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { Agent, Project, Ticket, TicketSummary } from "../types";
@@ -129,12 +129,25 @@ describe("KanbanBoard", () => {
       target: { value: "2" },
     });
     expect(screen.queryByText("Build the board")).toBeNull();
-    fireEvent.change(screen.getByLabelText("New ticket title"), {
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    const panel = screen.getByRole("heading", { name: "Create ticket" }).closest("aside")!;
+    fireEvent.change(within(panel).getByLabelText("Title"), {
       target: { value: "Scoped work" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    fireEvent.change(within(panel).getByLabelText("Description"), {
+      target: { value: "A detailed ticket" },
+    });
+    fireEvent.click(
+      within(panel).getByRole("checkbox", { name: /#7 Build the board/ }),
+    );
+    fireEvent.click(within(panel).getByRole("button", { name: "Create ticket" }));
     await waitFor(() =>
-      expect(api.createTicket).toHaveBeenCalledWith("Scoped work", 2),
+      expect(api.createTicket).toHaveBeenCalledWith({
+        title: "Scoped work",
+        description: "A detailed ticket",
+        blocker_ids: [7],
+        project_id: 2,
+      }),
     );
   });
 
@@ -142,9 +155,11 @@ describe("KanbanBoard", () => {
     const { rerender } = render(
       <KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />,
     );
-    const project = screen.getByLabelText("Ticket project") as HTMLSelectElement;
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    const panel = screen.getByRole("heading", { name: "Create ticket" }).closest("aside")!;
+    const project = within(panel).getByLabelText("Project") as HTMLSelectElement;
     expect(project.value).toBe("1");
-    fireEvent.change(screen.getByLabelText("New ticket title"), {
+    fireEvent.change(within(panel).getByLabelText("Title"), {
       target: { value: "Keep this scoped" },
     });
     rerender(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={2} />);
@@ -152,8 +167,10 @@ describe("KanbanBoard", () => {
 
     cleanup();
     render(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={null} />);
-    expect((screen.getByLabelText("Ticket project") as HTMLSelectElement).value).toBe("");
-    expect(screen.getByRole("button", { name: "Create ticket" }).closest("form")?.checkValidity()).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    const blankPanel = screen.getByRole("heading", { name: "Create ticket" }).closest("aside")!;
+    expect((within(blankPanel).getByLabelText("Project") as HTMLSelectElement).value).toBe("");
+    expect(within(blankPanel).getByRole("button", { name: "Create ticket" }).closest("form")?.checkValidity()).toBe(false);
   });
 
   it("opens and closes the complete ticket editor outside the card", () => {
@@ -170,6 +187,27 @@ describe("KanbanBoard", () => {
     expect(
       screen.queryByRole("heading", { name: ticket.title }),
     ).toBeNull();
+  });
+
+  it("shows only the create editor while a selected ticket route remains open", () => {
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+        selectedTicket={ticket}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: ticket.title })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+
+    expect(document.querySelectorAll(".ticket-detail-panel")).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Create ticket" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: ticket.title })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByRole("heading", { name: ticket.title })).toBeTruthy();
   });
 
   it("shows ownership and review details in the panel", () => {
@@ -404,16 +442,18 @@ describe("KanbanBoard", () => {
       }),
     );
     render(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />);
-    fireEvent.change(screen.getByLabelText("New ticket title"), {
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    const panel = screen.getByRole("heading", { name: "Create ticket" }).closest("aside")!;
+    fireEvent.change(within(panel).getByLabelText("Title"), {
       target: { value: "Draft ticket" },
     });
-    const create = screen.getByRole("button", { name: "Create ticket" });
+    const create = within(panel).getByRole("button", { name: "Create ticket" });
     fireEvent.click(create);
     fireEvent.click(create);
 
     expect(api.createTicket).toHaveBeenCalledTimes(1);
-    expect((screen.getByLabelText("New ticket title") as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByLabelText("Ticket project") as HTMLSelectElement).disabled).toBe(true);
+    expect((within(panel).getByLabelText("Title") as HTMLInputElement).disabled).toBe(true);
+    expect((within(panel).getByLabelText("Project") as HTMLSelectElement).disabled).toBe(true);
     reject(new Error("Could not create"));
     await waitFor(() => expect(screen.getByText("Could not create")).toBeTruthy());
     expect(screen.getByDisplayValue("Draft ticket")).toBeTruthy();
@@ -427,14 +467,16 @@ describe("KanbanBoard", () => {
       }),
     );
     render(<KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />);
-    const title = screen.getByLabelText("New ticket title") as HTMLInputElement;
-    fireEvent.change(title, { target: { value: "Submitted title" } });
     fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    const panel = screen.getByRole("heading", { name: "Create ticket" }).closest("aside")!;
+    const title = within(panel).getByLabelText("Title") as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "Submitted title" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Create ticket" }));
 
     expect(title.disabled).toBe(true);
     resolveCreate({ ...ticket, title: "Submitted title" });
     expect(await screen.findByText("Ticket created.")).toBeTruthy();
-    expect(title.value).toBe("");
+    expect(screen.queryByRole("heading", { name: "Create ticket" })).toBeNull();
   });
 
   it("offers only valid state-specific actions", async () => {
@@ -524,6 +566,8 @@ describe("KanbanBoard", () => {
       reviewer_id: null,
       review_completion_workflow: workflow,
       has_review_feedback: false,
+      activity_count: 0,
+      latest_activity_id: null,
       unresolved_blockers: [],
       revision: 1,
       created_at: 0,
@@ -551,6 +595,32 @@ describe("KanbanBoard", () => {
       screen.getByText("External snapshot").closest("button")?.querySelector(".workflow-badge")
         ?.textContent,
     ).toBe("External merge");
+  });
+
+  it("shows timeline item counts instead of a changes-requested label", () => {
+    const summary: TicketSummary = {
+      id: ticket.id,
+      project_id: ticket.project_id,
+      title: ticket.title,
+      state: ticket.state,
+      created_by_agent_id: null,
+      reserved_for_agent_id: null,
+      assignee_id: null,
+      reviewer_id: null,
+      review_completion_workflow: null,
+      has_review_feedback: true,
+      activity_count: 3,
+      latest_activity_id: 12,
+      unresolved_blockers: [],
+      revision: ticket.revision,
+      created_at: ticket.created_at,
+      updated_at: ticket.updated_at,
+    };
+    render(<KanbanBoard {...baseProps} tickets={[summary]} />);
+
+    const card = screen.getByText(ticket.title).closest("button")!;
+    expect(card.textContent).toContain("3 timeline items");
+    expect(card.textContent).not.toContain("Changes requested");
   });
 
   it("explains an external review and exposes safe reviewed values", async () => {

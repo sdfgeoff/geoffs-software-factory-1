@@ -88,6 +88,8 @@ pub struct TicketSummary {
     pub reviewer_id: Option<i64>,
     pub review_completion_workflow: Option<ProjectCompletionWorkflow>,
     pub has_review_feedback: bool,
+    pub activity_count: i64,
+    pub latest_activity_id: Option<i64>,
     pub unresolved_blockers: Vec<TicketBlocker>,
     pub revision: i64,
     pub created_at: i64,
@@ -820,6 +822,8 @@ mod tests {
                 reviewer_id: Some(3),
                 review_completion_workflow: Some(ProjectCompletionWorkflow::External),
                 has_review_feedback: true,
+                activity_count: 3,
+                latest_activity_id: Some(12),
                 unresolved_blockers: Vec::new(),
                 revision: 4,
                 created_at: 10,
@@ -829,6 +833,8 @@ mod tests {
         };
         let encoded = serde_json::to_value(&page).unwrap();
         assert_eq!(encoded["tickets"][0]["has_review_feedback"], true);
+        assert_eq!(encoded["tickets"][0]["activity_count"], 3);
+        assert_eq!(encoded["tickets"][0]["latest_activity_id"], 12);
         assert_eq!(
             encoded["tickets"][0]["review_completion_workflow"],
             "external"

@@ -15,6 +15,7 @@ import type {
   TicketSummary,
 } from "../types";
 import { MessageContent } from "./MessageContent";
+import { TicketEditorFields } from "./TicketEditorFields";
 
 interface Props {
   ticket: Ticket;
@@ -127,16 +128,6 @@ export function TicketDetailPanel({
   const externalWorkflow = ticket.review_completion_workflow === "external";
   const externalUrl = safeExternalUrl(draft.externalUrl.trim());
   const ticketBusy = saving || externalBusy;
-  const matchingBlockers = tickets.filter((candidate) => {
-    if (candidate.id === ticket.id) return false;
-    const query = draft.blockerQuery.trim().toLowerCase();
-    return (
-      draft.blockerIds.includes(candidate.id) ||
-      !query ||
-      `#${candidate.id} ${candidate.title}`.toLowerCase().includes(query)
-    );
-  });
-
   useEffect(() => {
     if (!savedDraft || (!draft.dirty && draft.baseRevision < ticket.revision)) {
       onDraftChange(ticketDraft(ticket));
@@ -731,85 +722,14 @@ export function TicketDetailPanel({
             review the latest changes before saving.
           </p>
         )}
-        <label>
-          Title
-          <input
-            value={draft.title}
-            disabled={ticketBusy}
-            onChange={(event) => {
-              updateDraft({ title: event.target.value });
-            }}
-            maxLength={200}
-            required
-          />
-        </label>
-        <label>
-          Description
-          <textarea
-            value={draft.description}
-            disabled={ticketBusy}
-            onChange={(event) => {
-              updateDraft({ description: event.target.value });
-            }}
-            rows={7}
-          />
-        </label>
-        <label>
-          Active assignee
-          <select
-            value={draft.assignee}
-            disabled={ticketBusy}
-            onChange={(event) => {
-              updateDraft({ assignee: event.target.value });
-            }}
-          >
-            <option value="">Unassigned</option>
-            {agents.map((agent) => (
-              <option value={agent.id} key={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <fieldset className="blocker-selector" disabled={ticketBusy}>
-          <legend>Blockers</legend>
-          <label>
-            Search tickets
-            <input
-              type="search"
-              value={draft.blockerQuery}
-              onChange={(event) => updateDraft({ blockerQuery: event.target.value }, false)}
-              placeholder="Search by ID or title"
-            />
-          </label>
-          <div className="blocker-options">
-            {matchingBlockers.length === 0 && (
-              <p className="empty">No matching tickets.</p>
-            )}
-            {matchingBlockers.map((candidate) => (
-              <label key={candidate.id}>
-                <input
-                  type="checkbox"
-                  checked={draft.blockerIds.includes(candidate.id)}
-                  onChange={(event) => {
-                    updateDraft({
-                      blockerIds:
-                      event.target.checked
-                        ? [...draft.blockerIds, candidate.id]
-                        : draft.blockerIds.filter((id) => id !== candidate.id),
-                    });
-                  }}
-                />
-                <span>
-                  <strong>
-                    #{candidate.id} {candidate.title}
-                  </strong>
-                  <small>{stateLabels[candidate.state]}</small>
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+        <TicketEditorFields
+          value={draft}
+          tickets={tickets}
+          agents={agents}
+          disabled={ticketBusy}
+          currentTicketId={ticket.id}
+          onChange={updateDraft}
+        />
         <button type="submit" disabled={ticketBusy}>
           {saving ? "Saving…" : "Save changes"}
         </button>
