@@ -29,7 +29,7 @@ const activeTicketStates: TicketState[] = [
   "awaiting_external_merge",
 ];
 
-function summarizeTicket(ticket: Ticket): TicketSummary {
+function summarizeTicket(ticket: Ticket, activityCount = 0): TicketSummary {
   return {
     id: ticket.id,
     project_id: ticket.project_id,
@@ -41,6 +41,7 @@ function summarizeTicket(ticket: Ticket): TicketSummary {
     reviewer_id: ticket.reviewer_id,
     review_completion_workflow: ticket.review_completion_workflow,
     has_review_feedback: ticket.review_feedback !== null,
+    activity_count: activityCount,
     unresolved_blockers: ticket.unresolved_blockers,
     revision: ticket.revision,
     created_at: ticket.created_at,
@@ -154,6 +155,7 @@ export function App() {
   const [liveTicketActivity, setLiveTicketActivity] = useState<
     Record<number, TicketActivity>
   >({});
+  const seenTicketActivityIds = useRef(new Set<number>());
   const [missingTicketIds, setMissingTicketIds] = useState<Set<number>>(() => new Set());
   const [ticketDetailRepair, setTicketDetailRepair] = useState(0);
   const [historyHasMore, setHistoryHasMore] = useState({ done: true, cancelled: true });
@@ -261,7 +263,12 @@ export function App() {
           ? { ...details, [ticket.id]: ticket }
           : details,
       );
-      setTickets((summaries) => mergeByRevision(summaries, [summarizeTicket(ticket)]));
+      setTickets((summaries) => {
+        const existing = summaries.find((summary) => summary.id === ticket.id);
+        return mergeByRevision(summaries, [
+          summarizeTicket(ticket, existing?.activity_count ?? 0),
+        ]);
+      });
     };
     const load = async () => {
       try {
@@ -307,7 +314,17 @@ export function App() {
 
   const mergeTickets = useCallback((updates: Ticket | Ticket[]) => {
     const next = Array.isArray(updates) ? updates : [updates];
-    setTickets((current) => mergeByRevision(current, next.map(summarizeTicket)));
+    setTickets((current) =>
+      mergeByRevision(
+        current,
+        next.map((ticket) =>
+          summarizeTicket(
+            ticket,
+            current.find((summary) => summary.id === ticket.id)?.activity_count ?? 0,
+          ),
+        ),
+      ),
+    );
     setTicketDetails((current) => {
       const updated = { ...current };
       next.forEach((ticket) => {
@@ -399,10 +416,19 @@ export function App() {
           mergeTickets(event.data);
           break;
         case "ticket_activity_created":
+          if (seenTicketActivityIds.current.has(event.data.id)) break;
+          seenTicketActivityIds.current.add(event.data.id);
           setLiveTicketActivity((current) => ({
             ...current,
             [event.data.id]: event.data,
           }));
+          setTickets((current) =>
+            current.map((ticket) =>
+              ticket.id === event.data.ticket_id
+                ? { ...ticket, activity_count: ticket.activity_count + 1 }
+                : ticket,
+            ),
+          );
           break;
         case "settings_updated":
           setSettings(event.data);

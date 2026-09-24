@@ -188,7 +188,7 @@ describe("App agent routes", () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
-      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false }] : [],
+      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false, activity_count: 0 }] : [],
       has_more: false,
     }));
 
@@ -225,7 +225,7 @@ describe("App agent routes", () => {
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
       tickets:
         state === "awaiting_external_merge"
-          ? [{ ...externalTicket, has_review_feedback: false }]
+          ? [{ ...externalTicket, has_review_feedback: false, activity_count: 0 }]
           : [],
       has_more: false,
     }));
@@ -315,7 +315,7 @@ describe("App agent routes", () => {
     });
     await act(async () => {
       resolveDetail(ticket);
-      resolveSummary({ tickets: [{ ...ticket, has_review_feedback: false }], has_more: false });
+      resolveSummary({ tickets: [{ ...ticket, has_review_feedback: false, activity_count: 0 }], has_more: false });
       await Promise.resolve();
     });
 
@@ -368,7 +368,7 @@ describe("App agent routes", () => {
     const completed = { ...ticket, id: 80, title: "Historical work", state: "done" as const };
     vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
-      tickets: state === "done" ? [{ ...completed, has_review_feedback: false }] : [],
+      tickets: state === "done" ? [{ ...completed, has_review_feedback: false, activity_count: 0 }] : [],
       has_more: false,
     }));
     vi.mocked(api.ticket).mockResolvedValue(completed);
@@ -872,7 +872,7 @@ describe("App agent routes", () => {
     window.history.replaceState(null, "", "#board?project=2&ticket=7");
     vi.mocked(api.projects).mockResolvedValue([project]);
     vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
-      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false }] : [],
+      tickets: state === ticket.state ? [{ ...ticket, has_review_feedback: false, activity_count: 0 }] : [],
       has_more: false,
     }));
     render(<App />);

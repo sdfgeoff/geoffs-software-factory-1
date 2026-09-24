@@ -670,6 +670,7 @@ mod tests {
                 reviewer_id: None,
                 review_completion_workflow: None,
                 has_review_feedback: false,
+                activity_count: 0,
                 unresolved_blockers: Vec::new(),
                 revision: 1,
                 created_at: 10,

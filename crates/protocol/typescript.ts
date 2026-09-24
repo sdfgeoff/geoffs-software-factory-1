@@ -64,6 +64,7 @@ export interface TicketSummary {
   reviewer_id: number | null;
   review_completion_workflow: ProjectCompletionWorkflow | null;
   has_review_feedback: boolean;
+  activity_count: number;
   unresolved_blockers: TicketBlocker[];
   revision: number;
   created_at: number;

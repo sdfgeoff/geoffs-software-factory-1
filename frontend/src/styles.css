@@ -342,6 +342,11 @@ nav a.active {
   font-size: 0.75rem;
   font-weight: 700;
 }
+.ticket-card-activity {
+  color: #6c6256;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
 .ticket-blockers {
   margin: 0.75rem 0;
   padding: 0.65rem;

@@ -12,6 +12,10 @@ import {
   TicketDetailPanel,
   type TicketDraft,
 } from "./TicketDetailPanel";
+import {
+  TicketEditorFields,
+  type TicketEditorValue,
+} from "./TicketEditorFields";
 
 const columns: { state: TicketState; label: string }[] = [
   { state: "todo", label: "To do" },
@@ -54,7 +58,14 @@ export function KanbanBoard({
   historyHasMore = {},
   onLoadHistory,
 }: Props) {
-  const [title, setTitle] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [createDraft, setCreateDraft] = useState<TicketEditorValue>({
+    title: "",
+    description: "",
+    assignee: "",
+    blockerIds: [],
+    blockerQuery: "",
+  });
   const [creating, setCreating] = useState(false);
   const [createStatus, setCreateStatus] = useState("");
   const [projectId, setProjectId] = useState(routedProjectId?.toString() ?? "");
@@ -108,12 +119,24 @@ export function KanbanBoard({
     setCreating(true);
     setCreateStatus("Creating ticket…");
     try {
-      const created = await api.createTicket(title, Number(projectId));
-      setTitle("");
+      const created = await api.createTicket({
+        title: createDraft.title,
+        description: createDraft.description,
+        blocker_ids: createDraft.blockerIds,
+        project_id: Number(projectId),
+      });
+      setCreateDraft({
+        title: "",
+        description: "",
+        assignee: "",
+        blockerIds: [],
+        blockerQuery: "",
+      });
       setCreateDraftEdited(false);
       setProjectId(filterProjectId === "all" ? "" : filterProjectId);
       await onChanged(created);
       setCreateStatus("Ticket created.");
+      setShowCreate(false);
     } catch (error) {
       setCreateStatus(error instanceof Error ? error.message : "Could not create ticket");
     } finally {
@@ -122,43 +145,17 @@ export function KanbanBoard({
   }
   return (
     <section>
-      <form className="create-row" onSubmit={create}>
-        <label className="sr-only" htmlFor="ticket-title">
-          New ticket title
-        </label>
-        <input
-          id="ticket-title"
-          value={title}
-          onChange={(event) => {
-            setTitle(event.target.value);
-            setCreateDraftEdited(true);
-          }}
-          disabled={creating}
-          placeholder="Add a ticket"
-          required
-          maxLength={200}
-        />
-        <label className="sr-only" htmlFor="ticket-project">Ticket project</label>
-        <select
-          id="ticket-project"
-          value={projectId}
-          onChange={(event) => {
-            setProjectId(event.target.value);
-            setCreateDraftEdited(true);
-          }}
-          disabled={creating}
-          required
-        >
-          <option value="" disabled>Select project</option>
-          {projects.filter((project) => !project.archived_at).map((project) => (
-            <option key={project.id} value={project.id}>{project.name}</option>
-          ))}
-        </select>
-        <button type="submit" disabled={creating}>
-          {creating ? "Creating…" : "Create ticket"}
+      <div className="create-row">
+        <button type="button" onClick={() => {
+          setCreateStatus("");
+          setShowCreate(true);
+        }}>
+          Create ticket
         </button>
-        {createStatus && <p role="status" aria-live="polite">{createStatus}</p>}
-      </form>
+        {!showCreate && createStatus && (
+          <p role="status" aria-live="polite">{createStatus}</p>
+        )}
+      </div>
       <label>
         Filter projects
         <select
@@ -273,6 +270,69 @@ export function KanbanBoard({
           activityRefresh={activityRefresh}
         />
       )}
+      {showCreate && (
+        <aside className="ticket-detail-panel" aria-labelledby="create-ticket-title">
+          <div className="ticket-detail-header">
+            <div>
+              <span className="ticket-number">New ticket</span>
+              <h2 id="create-ticket-title">Create ticket</h2>
+            </div>
+            <button
+              type="button"
+              className="ghost"
+              disabled={creating}
+              onClick={() => setShowCreate(false)}
+            >
+              Close
+            </button>
+          </div>
+          <form className="ticket-detail-form" onSubmit={create}>
+            <label>
+              Project
+              <select
+                value={projectId}
+                onChange={(event) => {
+                  setProjectId(event.target.value);
+                  setCreateDraftEdited(true);
+                }}
+                disabled={creating}
+                required
+              >
+                <option value="" disabled>Select project</option>
+                {projects.filter((project) => !project.archived_at).map((project) => (
+                  <option key={project.id} value={project.id}>{project.name}</option>
+                ))}
+              </select>
+            </label>
+            <TicketEditorFields
+              value={createDraft}
+              tickets={tickets}
+              agents={agents}
+              disabled={creating}
+              showAssignee={false}
+              autoFocusTitle
+              onChange={(changes, markDirty = true) => {
+                setCreateDraft((current) => ({ ...current, ...changes }));
+                if (markDirty) setCreateDraftEdited(true);
+              }}
+            />
+            <div className="ticket-actions">
+              <button type="submit" disabled={creating}>
+                {creating ? "Creating…" : "Create ticket"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={creating}
+                onClick={() => setShowCreate(false)}
+              >
+                Cancel
+              </button>
+            </div>
+            {createStatus && <p role="status" aria-live="polite">{createStatus}</p>}
+          </form>
+        </aside>
+      )}
     </section>
   );
 }
@@ -334,8 +394,10 @@ function TicketCard({
             .join(", ")}
         </span>
       )}
-      {("has_review_feedback" in ticket ? ticket.has_review_feedback : ticket.review_feedback !== null) && (
-        <span className="ticket-card-review">Changes requested</span>
+      {"activity_count" in ticket && ticket.activity_count > 0 && (
+        <span className="ticket-card-activity">
+          {ticket.activity_count} timeline {ticket.activity_count === 1 ? "item" : "items"}
+        </span>
       )}
     </button>
   );

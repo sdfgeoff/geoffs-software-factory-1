@@ -77,6 +77,7 @@ pub struct TicketSummary {
     pub reviewer_id: Option<i64>,
     pub review_completion_workflow: Option<ProjectCompletionWorkflow>,
     pub has_review_feedback: bool,
+    pub activity_count: i64,
     #[sqlx(skip)]
     pub unresolved_blockers: Vec<TicketBlocker>,
     pub revision: i64,
@@ -605,6 +606,7 @@ impl From<TicketSummary> for wire::TicketSummary {
             reviewer_id: value.reviewer_id,
             review_completion_workflow: value.review_completion_workflow.map(Into::into),
             has_review_feedback: value.has_review_feedback,
+            activity_count: value.activity_count,
             unresolved_blockers: value
                 .unresolved_blockers
                 .into_iter()

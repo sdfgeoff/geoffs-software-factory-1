@@ -116,10 +116,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ body }),
     }),
-  createTicket: (title: string, projectId: number) =>
+  createTicket: (ticket: {
+    title: string;
+    description: string;
+    blocker_ids: number[];
+    project_id: number;
+  }) =>
     request<Ticket>("/tickets", {
       method: "POST",
-      body: JSON.stringify({ title, project_id: projectId }),
+      body: JSON.stringify(ticket),
     }),
   updateTicket: (ticket: Ticket, changes: Partial<Ticket>) =>
     request<Ticket>(`/tickets/${ticket.id}`, {
