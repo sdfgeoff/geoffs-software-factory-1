@@ -409,17 +409,20 @@ fn validate_svg(svg: &str) -> Result<(), AppError> {
     }
     let document = roxmltree::Document::parse(svg)
         .map_err(|_| AppError::bad_request("file is not a valid SVG image"))?;
+    if document.descendants().any(|node| node.is_pi()) {
+        return Err(AppError::bad_request(
+            "SVG processing instructions are not allowed",
+        ));
+    }
     if document.root_element().tag_name().name() != "svg" {
         return Err(AppError::bad_request("file is not a valid SVG image"));
     }
     for node in document.descendants().filter(|node| node.is_element()) {
         let name = node.tag_name().name().to_ascii_lowercase();
-        if matches!(
-            name.as_str(),
-            "script" | "style" | "foreignobject" | "iframe" | "object" | "embed" | "use"
-        ) {
+        let namespace = node.tag_name().namespace().unwrap_or("");
+        if !matches!(namespace, "" | "http://www.w3.org/2000/svg") || !is_inert_svg_element(&name) {
             return Err(AppError::bad_request(
-                "SVG contains executable or external content",
+                "SVG contains an unsupported active element",
             ));
         }
         for attribute in node.attributes() {
@@ -446,6 +449,60 @@ fn validate_svg(svg: &str) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+fn is_inert_svg_element(name: &str) -> bool {
+    matches!(
+        name,
+        "svg"
+            | "g"
+            | "defs"
+            | "symbol"
+            | "title"
+            | "desc"
+            | "metadata"
+            | "path"
+            | "circle"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "rect"
+            | "text"
+            | "tspan"
+            | "lineargradient"
+            | "radialgradient"
+            | "stop"
+            | "clippath"
+            | "mask"
+            | "pattern"
+            | "marker"
+            | "filter"
+            | "feblend"
+            | "fecolormatrix"
+            | "fecomponenttransfer"
+            | "fecomposite"
+            | "feconvolvematrix"
+            | "fediffuselighting"
+            | "fedisplacementmap"
+            | "fedistantlight"
+            | "fedropshadow"
+            | "feflood"
+            | "fefunca"
+            | "fefuncb"
+            | "fefuncg"
+            | "fefuncr"
+            | "fegaussianblur"
+            | "femerge"
+            | "femergenode"
+            | "femorphology"
+            | "feoffset"
+            | "fepointlight"
+            | "fespecularlighting"
+            | "fespotlight"
+            | "fetile"
+            | "feturbulence"
+    )
 }
 
 fn has_unsafe_url_reference(value: &str) -> bool {
@@ -513,6 +570,19 @@ mod tests {
                 .is_err()
         );
         assert!(validate_svg("<svg><circle fill=\"url( #safe-gradient )\"/></svg>").is_ok());
+        assert!(
+            validate_svg(
+                "<?xml-stylesheet href=\"https://example.test/x.css\" type=\"text/css\"?><svg/>"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_svg(
+                "<svg><image><set attributeName=\"href\" to=\"https://example.test/x.png\"/></image></svg>"
+            )
+            .is_err()
+        );
+        assert!(validate_svg("<svg><animate attributeName=\"opacity\"/></svg>").is_err());
     }
 
     #[tokio::test]
