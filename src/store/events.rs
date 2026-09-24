@@ -127,7 +127,13 @@ mod tests {
                 implementation_branch: None,
                 review_commit: None,
                 review_target_branch: None,
-                attachments: Vec::new(),
+                attachments: vec![multi_agent_board_protocol::Attachment {
+                    id: "a".repeat(32),
+                    original_filename: "evidence.png".into(),
+                    media_type: "image/png".into(),
+                    byte_size: 42,
+                    download_url: format!("/api/attachments/{}", "a".repeat(32)),
+                }],
                 created_at: 1,
             },
         };

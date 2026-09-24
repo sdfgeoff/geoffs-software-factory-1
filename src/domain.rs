@@ -325,6 +325,8 @@ impl WakeEventData {
 #[serde(deny_unknown_fields)]
 pub struct NotificationWakePayload {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -366,6 +368,8 @@ pub struct ReminderWakePayload {
 pub struct TicketWakePayload {
     pub message: String,
     pub ticket_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -826,6 +830,7 @@ impl From<NotificationWakePayload> for wire::NotificationWakePayload {
     fn from(value: NotificationWakePayload) -> Self {
         Self {
             message: value.message,
+            activity_id: value.activity_id,
         }
     }
 }
@@ -902,6 +907,7 @@ impl From<TicketWakePayload> for wire::TicketWakePayload {
         Self {
             message: value.message,
             ticket_id: value.ticket_id,
+            activity_id: value.activity_id,
             revision: value.revision,
             changed_fields: value.changed_fields,
             ticket: value.ticket.into(),
@@ -942,6 +948,7 @@ impl From<wire::WakeEventData> for WakeEventData {
             wire::WakeEventData::Notification(payload) => {
                 Self::Notification(NotificationWakePayload {
                     message: payload.message,
+                    activity_id: payload.activity_id,
                 })
             }
             wire::WakeEventData::Message(payload) => Self::Message(AgentMessageWakePayload {
@@ -994,6 +1001,7 @@ impl From<wire::TicketWakePayload> for TicketWakePayload {
         Self {
             message: value.message,
             ticket_id: value.ticket_id,
+            activity_id: value.activity_id,
             revision: value.revision,
             changed_fields: value.changed_fields,
             ticket: value.ticket.into(),
@@ -1053,6 +1061,7 @@ mod tests {
         let ticket = TicketWakePayload {
             message: "Ticket changed".into(),
             ticket_id: 7,
+            activity_id: None,
             revision: Some(2),
             changed_fields: vec!["state".into()],
             ticket: TicketWakeTicket::project(3),
@@ -1060,6 +1069,7 @@ mod tests {
         let events = vec![
             WakeEventData::Notification(NotificationWakePayload {
                 message: "Notice".into(),
+                activity_id: None,
             }),
             WakeEventData::Message(AgentMessageWakePayload {
                 message: "Hello".into(),
@@ -1092,6 +1102,7 @@ mod tests {
             WakeEventData::TicketExternalMergeReady(TicketWakePayload {
                 message: "External follow-up".into(),
                 ticket_id: 1,
+                activity_id: None,
                 revision: Some(2),
                 changed_fields: vec!["state".into()],
                 ticket: TicketWakeTicket::project(1),

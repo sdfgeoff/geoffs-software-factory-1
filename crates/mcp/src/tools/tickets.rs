@@ -45,6 +45,10 @@ struct TicketActivityArguments {
 #[serde(deny_unknown_fields)]
 struct AddTicketCommentArguments {
     ticket_id: i64,
+    #[serde(default)]
+    #[schemars(length(max = 5))]
+    image_paths: Vec<String>,
+    #[serde(default)]
     body: String,
 }
 
@@ -121,6 +125,9 @@ struct TicketChangesArguments {
     ticket_id: i64,
     feedback: String,
     expected_revision: Option<i64>,
+    #[serde(default)]
+    #[schemars(length(max = 5))]
+    image_paths: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -201,11 +208,20 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
     registry.register(
         ToolDefinition::<AddTicketCommentArguments, TicketActivity>::new(
             "add_ticket_comment",
-            "Append a Markdown comment to a ticket without changing ticket state or revision",
+            "Append a Markdown and/or local-image comment to a ticket without changing ticket state or revision",
             |board, arguments| {
                 Box::pin(async move {
+                    if arguments.image_paths.len() > 5 {
+                        return Err(McpError::bad_request(
+                            "a comment may contain at most 5 images",
+                        ));
+                    }
+                    let mut attachment_ids = Vec::with_capacity(arguments.image_paths.len());
+                    for path in arguments.image_paths {
+                        attachment_ids.push(board.upload_attachment(&path).await?.id);
+                    }
                     board
-                        .add_ticket_comment(arguments.ticket_id, arguments.body)
+                        .add_ticket_comment(arguments.ticket_id, arguments.body, attachment_ids)
                         .await
                 })
             },
@@ -304,15 +320,25 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
     )?;
     registry.register(ToolDefinition::<TicketChangesArguments, Ticket>::new(
         "request_ticket_changes",
-        "Return a claimed review to its worker with feedback; requires approve_review scope",
+        "Return a claimed review to its worker with text and/or local-image feedback; requires approve_review scope",
         |board, arguments| {
             Box::pin(async move {
+                if arguments.image_paths.len() > 5 {
+                    return Err(McpError::bad_request(
+                        "review feedback may contain at most 5 images",
+                    ));
+                }
+                let mut attachment_ids = Vec::with_capacity(arguments.image_paths.len());
+                for path in arguments.image_paths {
+                    attachment_ids.push(board.upload_attachment(&path).await?.id);
+                }
                 board
                     .request_changes(
                         arguments.ticket_id,
                         &RequestChangesRequest {
                             feedback: arguments.feedback,
                             expected_revision: arguments.expected_revision,
+                            attachment_ids,
                         },
                     )
                     .await

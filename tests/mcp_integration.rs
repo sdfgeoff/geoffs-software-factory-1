@@ -145,6 +145,147 @@ async fn mcp_posts_local_images_and_materializes_received_attachments() {
 }
 
 #[tokio::test]
+async fn mcp_attaches_images_to_comments_and_review_feedback() {
+    let store = Store::memory().await.unwrap();
+    let project = store.project().await.unwrap().unwrap();
+    let worker = store
+        .create_agent("timeline-worker", "/tmp/timeline-worker")
+        .await
+        .unwrap();
+    let reviewer = store
+        .create_agent("timeline-reviewer", "/tmp/timeline-reviewer")
+        .await
+        .unwrap();
+    store
+        .set_agent_scopes(reviewer.id, &["approve_review".into()])
+        .await
+        .unwrap();
+    let ticket = store
+        .create_ticket(NewTicket {
+            title: "Review images".into(),
+            description: String::new(),
+            blocker_ids: Vec::new(),
+            created_by_agent_id: None,
+        })
+        .await
+        .unwrap();
+    let ticket = store
+        .claim_ticket(ticket.id, worker.id, Some(ticket.revision))
+        .await
+        .unwrap();
+    let ticket = store
+        .submit_review(
+            ticket.id,
+            worker.id,
+            ReviewSubmission {
+                implementation_branch: Some("tickets/images"),
+                commit: "image-commit",
+                target_branch: "main",
+                project_id: project.id,
+                project_path: &project.path,
+            },
+            Some(ticket.revision),
+        )
+        .await
+        .unwrap();
+    let ticket = store
+        .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
+        .await
+        .unwrap();
+    store
+        .update_agent_runtime(worker.id, AgentState::Paused, None, None, None)
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let agents = AgentManager::new(
+        store.clone(),
+        "codex".into(),
+        "multi-agent-board".into(),
+        format!("http://{address}"),
+    );
+    let app = multi_agent_board::api::router(store.clone(), agents.clone())
+        .merge(multi_agent_board::agent_api::router(agents));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{address}");
+    let source = std::env::temp_dir().join(format!("mab-timeline-{}.svg", uuid::Uuid::new_v4()));
+    tokio::fs::write(
+        &source,
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"2\" height=\"2\"/></svg>",
+    )
+    .await
+    .unwrap();
+
+    let changed = mcp_tool(
+        &base_url,
+        reviewer.id,
+        1,
+        "request_ticket_changes",
+        json!({
+            "ticket_id": ticket.id,
+            "feedback": "See annotated screenshot",
+            "expected_revision": ticket.revision,
+            "image_paths": [source]
+        }),
+    )
+    .await;
+    assert_eq!(changed.pointer("/result/isError"), None, "{changed}");
+    let comment = mcp_tool(
+        &base_url,
+        reviewer.id,
+        2,
+        "add_ticket_comment",
+        json!({"ticket_id": ticket.id, "body": "", "image_paths": [source]}),
+    )
+    .await;
+    assert_eq!(comment.pointer("/result/isError"), None);
+    assert_eq!(
+        tool_content(&comment)["attachments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let activity = mcp_tool(
+        &base_url,
+        reviewer.id,
+        3,
+        "get_ticket_activity",
+        json!({"ticket_id": ticket.id}),
+    )
+    .await;
+    let entries = tool_content(&activity)["entries"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let feedback = entries
+        .iter()
+        .find(|entry| entry["action"] == "changes_requested")
+        .unwrap();
+    assert_eq!(feedback["attachments"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        feedback["attachments"][0]["id"],
+        tool_content(&comment)["attachments"][0]["id"]
+    );
+    let feedback_id = feedback["id"].as_i64().unwrap();
+    assert!(
+        store
+            .wake_events(worker.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|wake| {
+                matches!(
+                    &wake.event,
+                    multi_agent_board::domain::WakeEventData::TicketChangesRequested(payload)
+                        if payload.activity_id == Some(feedback_id)
+                )
+            })
+    );
+    tokio::fs::remove_file(source).await.unwrap();
+}
+
+#[tokio::test]
 async fn mcp_registers_lists_and_archives_projects_through_http() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

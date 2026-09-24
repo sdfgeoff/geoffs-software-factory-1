@@ -362,6 +362,8 @@ pub enum WakeEventData {
 #[serde(deny_unknown_fields)]
 pub struct NotificationWakePayload {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -403,6 +405,8 @@ pub struct ReminderWakePayload {
 pub struct TicketWakePayload {
     pub message: String,
     pub ticket_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -721,6 +725,8 @@ pub struct ReviewRevisionRequest {
 pub struct RequestChangesRequest {
     pub feedback: String,
     pub expected_revision: Option<i64>,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

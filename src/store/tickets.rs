@@ -839,7 +839,8 @@ impl Store {
             recipients.remove(&author_id);
         }
         let payload = serde_json::to_string(&serde_json::json!({
-            "message": format!("A comment was added to ticket #{} '{}':\n{}", ticket.id, ticket.title, body)
+            "message": format!("A comment was added to ticket #{} '{}':\n{}", ticket.id, ticket.title, body),
+            "activity_id": activity.id
         }))
         .map_err(|error| AppError::internal(format!("failed to encode comment wake: {error}")))?;
         let mut recipients = recipients.into_iter().collect::<Vec<_>>();
@@ -1093,7 +1094,7 @@ impl Store {
         expected_revision: Option<i64>,
     ) -> Result<Ticket, AppError> {
         Ok(self
-            .request_changes_with_activity(id, reviewer_id, feedback, expected_revision)
+            .request_changes_with_activity(id, reviewer_id, feedback, expected_revision, &[])
             .await?
             .0)
     }
@@ -1104,11 +1105,14 @@ impl Store {
         reviewer_id: i64,
         feedback: &str,
         expected_revision: Option<i64>,
+        attachment_ids: &[String],
     ) -> Result<(Ticket, TicketActivity), AppError> {
         if !self.has_agent_scope(reviewer_id, "approve_review").await? {
             return Err(AppError::forbidden("agent lacks approve_review scope"));
         }
-        if feedback.trim().is_empty() || feedback.chars().count() > 10_000 {
+        if (feedback.trim().is_empty() && attachment_ids.is_empty())
+            || feedback.chars().count() > 10_000
+        {
             return Err(AppError::bad_request(
                 "review feedback must contain between 1 and 10000 characters",
             ));
@@ -1138,7 +1142,7 @@ impl Store {
             AppError::conflict("review is not assigned to this agent or has changed")
         })?;
         load_ticket_dependencies(&mut transaction, &mut ticket).await?;
-        let activity = sqlx::query_as(
+        let mut activity: TicketActivity = sqlx::query_as(
             "INSERT INTO ticket_activity (ticket_id, action, detail, actor_agent_id, implementation_branch, review_commit, review_target_branch) \
              VALUES (?, 'changes_requested', ?, ?, ?, ?, ?) \
              RETURNING id, ticket_id, action, detail, author, actor_agent_id, \
@@ -1152,6 +1156,14 @@ impl Store {
         .bind(&ticket.review_commit)
         .bind(&ticket.review_target_branch)
         .fetch_one(&mut *transaction)
+        .await?;
+        activity.attachments = link_attachments(
+            &mut transaction,
+            attachment_ids,
+            AttachmentOwner::Agent(reviewer_id),
+            "ticket_activity",
+            activity.id,
+        )
         .await?;
         transaction.commit().await?;
         Ok((ticket, activity))
@@ -1995,6 +2007,7 @@ async fn insert_pending_ticket_wakes(
     let payload = TicketWakePayload {
         message,
         ticket_id: ticket.id,
+        activity_id: None,
         revision: Some(ticket.revision),
         changed_fields: ticket_changed_fields(previous, ticket)
             .into_iter()
@@ -2054,6 +2067,7 @@ fn mentions_agent(body: &str, name: &str) -> bool {
 mod tests {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+    use crate::store::AttachmentUpload;
     use sqlx::SqlitePool;
 
     use super::*;
@@ -2138,6 +2152,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attachment_only_comment_links_atomically_and_survives_pagination() {
+        let store = Store::memory().await.unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Image discussion".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let uploaded = store
+            .upload_attachment(
+                AttachmentOwner::Human,
+                AttachmentUpload {
+                    filename: "evidence.svg".into(),
+                    declared_media_type: "image/svg+xml".into(),
+                    bytes: b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle/></svg>".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let (comment, _) = store
+            .add_ticket_comment_with_attachments(
+                ticket.id,
+                None,
+                "",
+                std::slice::from_ref(&uploaded.id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(comment.detail.as_deref(), Some(""));
+        assert_eq!(comment.attachments, vec![uploaded]);
+        let (page, _) = store
+            .ticket_activity_page(ticket.id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(page[0].attachments, comment.attachments);
+    }
+
+    #[tokio::test]
+    async fn ticket_comment_attachments_survive_store_restart() {
+        let directory = std::env::temp_dir().join(format!(
+            "multi-agent-board-ticket-attachments-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("board.sqlite3");
+        let store = Store::open(&database).await.unwrap();
+        store.set_project(directory.to_str().unwrap()).await.unwrap();
+        let ticket = store
+            .create_ticket(NewTicket {
+                title: "Persistent evidence".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let uploaded = store
+            .upload_attachment(
+                AttachmentOwner::Human,
+                AttachmentUpload {
+                    filename: "persistent.svg".into(),
+                    declared_media_type: "image/svg+xml".into(),
+                    bytes: b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle/></svg>".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .add_ticket_comment_with_attachments(ticket.id, None, "", &[uploaded.id])
+            .await
+            .unwrap();
+        store.close().await;
+
+        let reopened = Store::open(&database).await.unwrap();
+        let activity = reopened.ticket_activity(ticket.id).await.unwrap();
+        assert_eq!(
+            activity[0].attachments[0].original_filename,
+            "persistent.svg"
+        );
+        assert!(
+            reopened
+                .attachment_download(&activity[0].attachments[0].id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        reopened.close().await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn review_rounds_keep_each_feedback_and_submission_snapshot() {
         let store = Store::memory().await.unwrap();
         let project = store.project().await.unwrap().unwrap();
@@ -2183,10 +2292,31 @@ mod tests {
                 .claim_review(ticket.id, reviewer.id, Some(ticket.revision))
                 .await
                 .unwrap();
-            ticket = store
-                .request_changes(ticket.id, reviewer.id, feedback, Some(ticket.revision))
+            let uploaded = store
+                .upload_attachment(
+                    AttachmentOwner::Agent(reviewer.id),
+                    AttachmentUpload {
+                        filename: format!("{commit}.svg"),
+                        declared_media_type: "image/svg+xml".into(),
+                        bytes: format!(
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>{commit}</text></svg>"
+                        )
+                        .into_bytes(),
+                    },
+                )
                 .await
                 .unwrap();
+            ticket = store
+                .request_changes_with_activity(
+                    ticket.id,
+                    reviewer.id,
+                    feedback,
+                    Some(ticket.revision),
+                    &[uploaded.id],
+                )
+                .await
+                .unwrap()
+                .0;
         }
 
         assert_eq!(ticket.review_feedback.as_deref(), Some("Second feedback"));
@@ -2197,6 +2327,12 @@ mod tests {
             .map(|entry| entry.detail.as_deref().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(feedback, ["First feedback", "Second feedback"]);
+        let feedback_images = activity
+            .iter()
+            .filter(|entry| entry.action == "changes_requested")
+            .map(|entry| entry.attachments[0].original_filename.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(feedback_images, ["first.svg", "second.svg"]);
         let commits = activity
             .iter()
             .filter(|entry| entry.action == "review_submitted")
@@ -2696,6 +2832,7 @@ mod tests {
                 WakeEventData::TicketChangesRequested(TicketWakePayload {
                     message: "Changes requested".into(),
                     ticket_id: blocker.id,
+                    activity_id: None,
                     revision: None,
                     changed_fields: Vec::new(),
                     ticket: TicketWakeTicket::project(blocker.project_id),

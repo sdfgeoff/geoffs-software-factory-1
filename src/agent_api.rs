@@ -270,11 +270,12 @@ async fn request_changes(
 ) -> Result<Json<protocol::Ticket>, AppError> {
     Ok(Json(
         manager
-            .request_changes(
+            .request_changes_with_attachments(
                 id,
                 caller_agent(&headers)?,
                 &input.feedback,
                 input.expected_revision,
+                &input.attachment_ids,
             )
             .await?
             .into(),

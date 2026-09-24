@@ -156,7 +156,10 @@ impl BoardClient {
         if !status.is_success() {
             let error = serde_json::from_slice::<ErrorResponse>(&body)
                 .map(|body| body.error)
-                .unwrap_or_else(|_| "board request failed".into());
+                .unwrap_or_else(|_| {
+                    let detail = String::from_utf8_lossy(&body);
+                    format!("board request failed ({status}): {detail}")
+                });
             return Err(McpError::internal(error));
         }
         serde_json::from_slice(&body)
@@ -295,13 +298,14 @@ impl BoardClient {
         &self,
         ticket_id: i64,
         body: String,
+        attachment_ids: Vec<String>,
     ) -> Result<TicketActivity, McpError> {
         self.request(
             Method::POST,
             &format!("/tickets/{ticket_id}/activity"),
             Some(&PostTicketCommentRequest {
                 body,
-                attachment_ids: Vec::new(),
+                attachment_ids,
             }),
         )
         .await

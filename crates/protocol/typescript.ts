@@ -252,6 +252,7 @@ export type WakeEventData =
 
 export interface NotificationWakePayload {
   message: string;
+  activity_id?: number | null;
 }
 
 export interface AgentMessageWakePayload {
@@ -283,6 +284,7 @@ export interface ReminderWakePayload {
 export interface TicketWakePayload {
   message: string;
   ticket_id: number;
+  activity_id?: number | null;
   revision?: number | null;
   changed_fields?: string[];
   ticket: TicketWakeTicket;
@@ -446,6 +448,7 @@ export interface ReviewRevisionRequest {
 export interface RequestChangesRequest {
   feedback: string;
   expected_revision?: number | null;
+  attachment_ids?: string[];
 }
 
 export interface SetExternalChangeRequest {

@@ -15,6 +15,7 @@ vi.mock("../api", () => ({
     updateTicket: vi.fn(),
     ticketActivity: vi.fn(async () => ({ entries: [], has_more: false })),
     addTicketComment: vi.fn(),
+    uploadAttachment: vi.fn(),
   },
 }));
 
@@ -850,6 +851,79 @@ describe("KanbanBoard", () => {
     expect((screen.getByLabelText("Add comment") as HTMLTextAreaElement).value).toBe(
       "Unsent draft",
     );
+  });
+
+  it("posts an image-only comment and preserves its selection across live activity", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:evidence"),
+      revokeObjectURL: vi.fn(),
+    });
+    const attachment = {
+      id: "c".repeat(32),
+      original_filename: "evidence.png",
+      media_type: "image/png",
+      byte_size: 8,
+      download_url: `/api/attachments/${"c".repeat(32)}`,
+    };
+    const entry = {
+      id: 14,
+      ticket_id: ticket.id,
+      action: "comment",
+      detail: "",
+      author: "human",
+      actor_agent_id: null,
+      previous_reserved_for_agent_id: null,
+      reserved_for_agent_id: null,
+      implementation_branch: null,
+      review_commit: null,
+      review_target_branch: null,
+      attachments: [attachment],
+      created_at: 14,
+    };
+    vi.mocked(api.ticketActivity).mockResolvedValue({ entries: [], has_more: false });
+    vi.mocked(api.uploadAttachment).mockResolvedValue(attachment);
+    vi.mocked(api.addTicketComment).mockResolvedValue(entry);
+    const { rerender } = render(
+      <KanbanBoard {...baseProps} tickets={[ticket]} selectedTicketId={ticket.id} />,
+    );
+    const file = new File(["image"], "evidence.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Attach images"), { target: { files: [file] } });
+    rerender(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+        liveTicketActivity={{ 13: { ...entry, id: 13, detail: "Remote update", attachments: [] } }}
+      />,
+    );
+    expect(screen.getByText("evidence.png")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Post comment" }));
+    await waitFor(() => expect(api.addTicketComment).toHaveBeenCalledWith(ticket.id, "", [attachment.id]));
+    expect(await screen.findByRole("img", { name: "evidence.png" })).toBeTruthy();
+    expect(screen.queryByText("Ready")).toBeNull();
+  });
+
+  it("preserves a ticket comment draft and image when upload fails", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:failed"),
+      revokeObjectURL: vi.fn(),
+    });
+    vi.mocked(api.ticketActivity).mockResolvedValue({ entries: [], has_more: false });
+    vi.mocked(api.uploadAttachment).mockRejectedValue(new Error("Upload unavailable"));
+    render(<KanbanBoard {...baseProps} tickets={[ticket]} selectedTicketId={ticket.id} />);
+    const draft = screen.getByLabelText("Add comment");
+    fireEvent.change(draft, { target: { value: "Keep this draft" } });
+    fireEvent.change(screen.getByLabelText("Attach images"), {
+      target: { files: [new File(["image"], "failed.png", { type: "image/png" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Post comment" }));
+
+    expect((await screen.findAllByText("Upload unavailable")).length).toBeGreaterThan(0);
+    expect((draft as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(screen.getByText("failed.png")).toBeTruthy();
+    expect(api.addTicketComment).not.toHaveBeenCalled();
   });
 
   it("hides cancelled tickets unless requested or directly selected", () => {

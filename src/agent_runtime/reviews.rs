@@ -113,10 +113,29 @@ impl AgentManager {
         feedback: &str,
         expected_revision: Option<i64>,
     ) -> Result<crate::domain::Ticket, AppError> {
+        self.request_changes_with_attachments(ticket_id, agent_id, feedback, expected_revision, &[])
+            .await
+    }
+
+    pub async fn request_changes_with_attachments(
+        &self,
+        ticket_id: i64,
+        agent_id: i64,
+        feedback: &str,
+        expected_revision: Option<i64>,
+        attachment_ids: &[String],
+    ) -> Result<crate::domain::Ticket, AppError> {
         let (ticket, activity) = self
             .store
-            .request_changes_with_activity(ticket_id, agent_id, feedback, expected_revision)
+            .request_changes_with_activity(
+                ticket_id,
+                agent_id,
+                feedback,
+                expected_revision,
+                attachment_ids,
+            )
             .await?;
+        let activity_id = activity.id;
         self.emit_ticket_activity(agent_id, activity).await;
         self.emit(AgentEvent::TicketUpdated {
             agent_id,
@@ -138,6 +157,7 @@ impl AgentManager {
                             ticket.id, ticket.title, branch_instruction, feedback
                         ),
                         ticket_id: ticket.id,
+                        activity_id: Some(activity_id),
                         revision: None,
                         changed_fields: Vec::new(),
                         ticket: TicketWakeTicket::project(ticket.project_id),

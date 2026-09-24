@@ -15,6 +15,7 @@ import type {
   TicketSummary,
 } from "../types";
 import { MessageContent } from "./MessageContent";
+import { AttachmentGallery, ImageAttachmentPicker, type PendingImage } from "./ImageAttachments";
 import { TicketEditorFields } from "./TicketEditorFields";
 
 interface Props {
@@ -30,6 +31,8 @@ interface Props {
   liveActivity?: TicketActivity[];
   commentDraft?: string;
   onCommentDraftChange?: (draft: string) => void;
+  commentImages?: PendingImage[];
+  onCommentImagesChange?: (images: PendingImage[]) => void;
   activityRefresh?: number;
 }
 
@@ -98,6 +101,8 @@ export function TicketDetailPanel({
   liveActivity = [],
   commentDraft = "",
   onCommentDraftChange = () => {},
+  commentImages = [],
+  onCommentImagesChange = () => {},
   activityRefresh = 0,
 }: Props) {
   const draft = savedDraft ?? ticketDraft(ticket);
@@ -205,12 +210,40 @@ export function TicketDetailPanel({
   async function addComment(event: FormEvent) {
     event.preventDefault();
     const body = commentDraft.trim();
-    if (!body || commenting) return;
+    if ((!body && commentImages.length === 0) || commenting) return;
     const ticketId = ticket.id;
+    const targetImages = commentImages;
     setCommenting(true);
     setCommentStatus("Posting comment…");
     try {
-      const entry = await api.addTicketComment(ticketId, body);
+      const uploaded: PendingImage[] = [];
+      for (const image of targetImages) {
+        if (image.attachment) {
+          uploaded.push(image);
+          continue;
+        }
+        onCommentImagesChange(targetImages.map((item) => {
+          const completed = uploaded.find((candidate) => candidate.key === item.key);
+          if (completed) return completed;
+          return item.key === image.key ? { ...item, state: "uploading", error: undefined } : item;
+        }));
+        try {
+          const attachment = await api.uploadAttachment(image.file);
+          const next = { ...image, attachment, state: "uploaded" as const, error: undefined };
+          uploaded.push(next);
+          onCommentImagesChange(targetImages.map((item) => {
+            const uploadedItem = uploaded.find((candidate) => candidate.key === item.key);
+            return uploadedItem ?? item;
+          }));
+        } catch (error) {
+          onCommentImagesChange(targetImages.map((item) => item.key === image.key ? { ...item, state: "error", error: error instanceof Error ? error.message : "Upload failed" } : uploaded.find((candidate) => candidate.key === item.key) ?? item));
+          throw error;
+        }
+      }
+      const attachmentIds = uploaded.map((image) => image.attachment!.id);
+      const entry = attachmentIds.length
+        ? await api.addTicketComment(ticketId, body, attachmentIds)
+        : await api.addTicketComment(ticketId, body);
       if (activityTicketRef.current !== ticketId) return;
       setActivity((current) =>
         current.some((item) => item.id === entry.id)
@@ -218,6 +251,7 @@ export function TicketDetailPanel({
           : [...current, entry],
       );
       onCommentDraftChange("");
+      onCommentImagesChange([]);
       setCommentStatus("Comment posted.");
     } catch (error) {
       setCommentStatus(
@@ -690,6 +724,7 @@ export function TicketDetailPanel({
                     {entry.review_target_branch && ` → ${entry.review_target_branch}`}
                   </p>
                 )}
+                <AttachmentGallery attachments={entry.attachments ?? []} />
               </article>
             );
           })}
@@ -708,7 +743,16 @@ export function TicketDetailPanel({
               onChange={(event) => onCommentDraftChange(event.target.value)}
             />
           </label>
-          <button type="submit" disabled={commenting || !commentDraft.trim()}>
+          <ImageAttachmentPicker
+            images={commentImages}
+            disabled={commenting}
+            onAdd={(added) => {
+              onCommentImagesChange([...commentImages, ...added]);
+              setCommentStatus("");
+            }}
+            onRemove={(key) => onCommentImagesChange(commentImages.filter((image) => image.key !== key))}
+          />
+          <button type="submit" disabled={commenting || (!commentDraft.trim() && commentImages.length === 0)}>
             {commenting ? "Posting…" : "Post comment"}
           </button>
           {commentStatus && <p role="status">{commentStatus}</p>}

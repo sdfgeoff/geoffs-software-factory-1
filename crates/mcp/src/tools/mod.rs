@@ -105,6 +105,13 @@ mod tests {
             post.pointer("/inputSchema/properties/image_paths/maxItems"),
             Some(&json!(5))
         );
+        for name in ["add_ticket_comment", "request_ticket_changes"] {
+            assert_eq!(
+                definition(&definitions, name)
+                    .pointer("/inputSchema/properties/image_paths/maxItems"),
+                Some(&json!(5))
+            );
+        }
         assert_eq!(
             read.pointer("/inputSchema/properties/limit/maximum"),
             Some(&json!(100))

@@ -188,6 +188,7 @@ impl Store {
             agent_id,
             WakeEventData::Notification(NotificationWakePayload {
                 message: body.trim().to_owned(),
+                activity_id: None,
             }),
             None,
             WakeDeliveryPolicy::Immediate,
@@ -374,6 +375,7 @@ mod tests {
                 agent.id,
                 WakeEventData::Notification(NotificationWakePayload {
                     message: "first".into(),
+                    activity_id: None,
                 }),
                 Some("ticket:3:available"),
                 WakeDeliveryPolicy::IdleOnly,
@@ -385,6 +387,7 @@ mod tests {
                 agent.id,
                 WakeEventData::Notification(NotificationWakePayload {
                     message: "ignored".into(),
+                    activity_id: None,
                 }),
                 Some("ticket:3:available"),
                 WakeDeliveryPolicy::IdleOnly,
@@ -447,7 +450,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event.event,
-            WakeEventData::Notification(NotificationWakePayload { ref message })
+            WakeEventData::Notification(NotificationWakePayload { ref message, .. })
                 if message == "Survive restart"
         ));
         reopened.complete_wake_event(event.id).await.unwrap();

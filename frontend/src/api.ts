@@ -122,10 +122,10 @@ export const api = {
     if (beforeId != null) query.set("before_id", String(beforeId));
     return request<TicketActivityPage>(`/tickets/${id}/activity?${query}`);
   },
-  addTicketComment: (id: number, body: string) =>
+  addTicketComment: (id: number, body: string, attachmentIds: string[] = []) =>
     request<TicketActivity>(`/tickets/${id}/activity`, {
       method: "POST",
-      body: JSON.stringify({ body }),
+      body: JSON.stringify({ body, attachment_ids: attachmentIds }),
     }),
   createTicket: (ticket: {
     title: string;

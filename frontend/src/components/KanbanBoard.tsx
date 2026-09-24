@@ -12,6 +12,7 @@ import {
   TicketDetailPanel,
   type TicketDraft,
 } from "./TicketDetailPanel";
+import type { PendingImage } from "./ImageAttachments";
 import {
   TicketEditorFields,
   type TicketEditorValue,
@@ -78,6 +79,7 @@ export function KanbanBoard({
   const [localTicketId, setLocalTicketId] = useState<number | null>(null);
   const [ticketDrafts, setTicketDrafts] = useState<Record<number, TicketDraft>>({});
   const [commentDrafts, setCommentDrafts] = useState<Record<number, string>>({});
+  const [commentImageDrafts, setCommentImageDrafts] = useState<Record<number, PendingImage[]>>({});
   const selectedTicketId =
     routedTicketId === undefined ? localTicketId : routedTicketId;
   const selectTicket = onSelectTicket ?? setLocalTicketId;
@@ -266,6 +268,13 @@ export function KanbanBoard({
             setCommentDrafts((current) => ({
               ...current,
               [selectedTicket.id]: commentDraft,
+            }))
+          }
+          commentImages={commentImageDrafts[selectedTicket.id] ?? []}
+          onCommentImagesChange={(images) =>
+            setCommentImageDrafts((current) => ({
+              ...current,
+              [selectedTicket.id]: images,
             }))
           }
           activityRefresh={activityRefresh}

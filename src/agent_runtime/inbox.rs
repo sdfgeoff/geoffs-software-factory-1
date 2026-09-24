@@ -643,6 +643,22 @@ impl AgentManager {
                     .attachment_paths_for_content("channel_message", payload.message_id)
                     .await?
             }
+            WakeEventData::Notification(payload) => match payload.activity_id {
+                Some(activity_id) => {
+                    self.store
+                        .attachment_paths_for_content("ticket_activity", activity_id)
+                        .await?
+                }
+                None => Vec::new(),
+            },
+            WakeEventData::TicketChangesRequested(payload) => match payload.activity_id {
+                Some(activity_id) => {
+                    self.store
+                        .attachment_paths_for_content("ticket_activity", activity_id)
+                        .await?
+                }
+                None => Vec::new(),
+            },
             _ => Vec::new(),
         };
         let Some(ticket_id) = ticket_transition_id(event) else {
@@ -954,6 +970,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ticket_comment_images_are_delivered_to_notified_agents() {
+        let (manager, agent, _rpc, server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        let ticket = manager
+            .store
+            .create_ticket(NewTicket {
+                title: "Inspect evidence".into(),
+                description: String::new(),
+                blocker_ids: Vec::new(),
+                created_by_agent_id: None,
+            })
+            .await
+            .unwrap();
+        let ticket = manager
+            .store
+            .claim_ticket(ticket.id, agent.id, Some(ticket.revision))
+            .await
+            .unwrap();
+        let attachment = manager
+            .store
+            .upload_attachment(
+                AttachmentOwner::Human,
+                AttachmentUpload {
+                    filename: "evidence.svg".into(),
+                    declared_media_type: "image/svg+xml".into(),
+                    bytes: b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle/></svg>".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+        let server_task = tokio::spawn(async move {
+            let (reader, mut writer) = split(server);
+            let mut lines = BufReader::new(reader).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/steer");
+            assert!(
+                request["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("A comment was added to ticket")
+            );
+            assert_eq!(request["params"]["input"][1]["type"], "localImage");
+            writer
+                .write_all(
+                    format!(
+                        "{{\"id\":{},\"result\":{{\"turnId\":\"turn-1\"}}}}\n",
+                        request["id"]
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        manager
+            .add_ticket_comment_with_attachments(ticket.id, None, "", &[attachment.id])
+            .await
+            .unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn ticket_events_change_project_but_channel_messages_keep_it() {
         let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
         let project = manager
@@ -990,6 +1069,7 @@ mod tests {
                 WakeEventData::TicketAssigned(TicketWakePayload {
                     message: format!("Ticket #{} was assigned to you.", ticket.id),
                     ticket_id: ticket.id,
+                    activity_id: None,
                     revision: None,
                     changed_fields: Vec::new(),
                     ticket: TicketWakeTicket::project(project.id),
@@ -1071,6 +1151,7 @@ mod tests {
             WakeEventData::TicketAvailable(TicketWakePayload {
                 message: "Pending implementation work".into(),
                 ticket_id: 1,
+                activity_id: None,
                 revision: None,
                 changed_fields: Vec::new(),
                 ticket: TicketWakeTicket::project(1),
@@ -1078,6 +1159,7 @@ mod tests {
             WakeEventData::TicketReviewRequested(TicketWakePayload {
                 message: "Pending review".into(),
                 ticket_id: 1,
+                activity_id: None,
                 revision: None,
                 changed_fields: Vec::new(),
                 ticket: TicketWakeTicket::project(1),
