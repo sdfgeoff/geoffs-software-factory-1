@@ -9,6 +9,22 @@ use crate::{
 use super::attachments::{AttachmentOwner, attachments_for, link_attachments};
 use super::{Store, message_page_size};
 
+pub const MAX_AGENT_INSTRUCTIONS_CHARS: usize = 10_000;
+
+pub(crate) fn normalize_agent_instructions(instructions: &str) -> Result<String, AppError> {
+    let instructions = instructions
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_owned();
+    if instructions.chars().count() > MAX_AGENT_INSTRUCTIONS_CHARS {
+        return Err(AppError::bad_request(format!(
+            "agent instructions cannot exceed {MAX_AGENT_INSTRUCTIONS_CHARS} characters"
+        )));
+    }
+    Ok(instructions)
+}
+
 impl Store {
     pub async fn agent_scopes(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
         if self.agent(agent_id).await?.is_none() {
@@ -65,7 +81,7 @@ impl Store {
         exclude_agent_id: i64,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT a.id, a.name, a.state, a.thread_id, a.home_path, a.active_project_id, a.active_turn_id, \
+            "SELECT a.id, a.name, a.instructions, a.state, a.thread_id, a.home_path, a.active_project_id, a.active_turn_id, \
              a.last_error, a.wake_on_pending_work, a.wake_on_pending_review, a.idle_heartbeat_minutes, \
              a.idle_since, a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
@@ -80,7 +96,7 @@ impl Store {
 
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
+            "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents ORDER BY id",
         )
@@ -90,7 +106,7 @@ impl Store {
 
     pub async fn agents_due_for_idle_heartbeat(&self, now: i64) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
+            "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE state = 'idle' AND idle_heartbeat_minutes IS NOT NULL \
              AND idle_since IS NOT NULL AND idle_since + idle_heartbeat_minutes * 60 <= ? \
@@ -103,7 +119,7 @@ impl Store {
 
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
+            "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE id = ?",
         )
@@ -114,7 +130,7 @@ impl Store {
 
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT id, name, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
+            "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
              wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
              FROM agents WHERE name = ?",
         )
@@ -409,6 +425,25 @@ impl Store {
         Ok(self.agent(id).await?.unwrap())
     }
 
+    pub async fn set_agent_instructions(
+        &self,
+        id: i64,
+        instructions: &str,
+    ) -> Result<Agent, AppError> {
+        let instructions = normalize_agent_instructions(instructions)?;
+        let result = sqlx::query(
+            "UPDATE agents SET instructions = ?, updated_at = unixepoch() WHERE id = ?",
+        )
+        .bind(instructions)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("agent not found"));
+        }
+        Ok(self.agent(id).await?.unwrap())
+    }
+
     pub async fn set_agent_wake_settings(
         &self,
         id: i64,
@@ -680,6 +715,32 @@ mod tests {
     use sqlx::SqlitePool;
 
     use super::*;
+
+    #[tokio::test]
+    async fn agent_instruction_migration_preserves_existing_agents() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|migration| migration.version < 29) {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO agents (name, home_path) VALUES ('legacy', '/legacy')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 29)
+            .unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+
+        let instructions: String =
+            sqlx::query_scalar("SELECT instructions FROM agents WHERE name = 'legacy'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(instructions.is_empty());
+    }
 
     #[tokio::test]
     async fn agent_message_pages_are_cursor_ordered() {

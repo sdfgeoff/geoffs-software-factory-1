@@ -163,6 +163,7 @@ export type AgentState = "paused" | "idle" | "running" | "awaiting_approval" | "
 export interface Agent {
   id: number;
   name: string;
+  instructions: string;
   state: AgentState;
   thread_id: string | null;
   home_path: string;
@@ -397,6 +398,10 @@ export interface CreateAgentRequest {
 
 export interface RenameAgentRequest {
   name: string;
+}
+
+export interface SetAgentInstructionsRequest {
+  instructions: string;
 }
 
 export interface SendAgentMessageRequest {

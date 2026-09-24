@@ -118,11 +118,49 @@ impl AgentManager {
             return Err(AppError::conflict("agent name already exists"));
         }
         let agent = self.store.rename_agent(agent_id, name).await?;
-        if let Some(running) = self.processes.lock().await.remove(&agent_id) {
+        if let Some(running) = self.retire_process(agent_id).await {
             let _ = running.child.lock().await.kill().await;
         }
         self.emit(AgentEvent::AgentUpdated {
             agent_id: agent.id,
+            data: agent.clone(),
+        })
+        .await;
+        Ok(agent)
+    }
+
+    pub async fn set_instructions(
+        &self,
+        agent_id: i64,
+        instructions: &str,
+    ) -> Result<Agent, AppError> {
+        let _operation = self.operations.lock().await;
+        let requested = crate::store::normalize_agent_instructions(instructions)?;
+        let current = self
+            .store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))?;
+        if requested == current.instructions {
+            return Ok(current);
+        }
+        if matches!(
+            current.state,
+            AgentState::Running | AgentState::AwaitingApproval
+        ) {
+            return Err(AppError::conflict(
+                "wait for the active turn to finish before changing agent instructions",
+            ));
+        }
+        let agent = self
+            .store
+            .set_agent_instructions(agent_id, &requested)
+            .await?;
+        if let Some(running) = self.retire_process(agent_id).await {
+            let _ = running.child.lock().await.kill().await;
+        }
+        self.emit(AgentEvent::AgentUpdated {
+            agent_id,
             data: agent.clone(),
         })
         .await;
@@ -315,7 +353,7 @@ impl AgentManager {
             .store
             .update_agent_runtime(agent_id, AgentState::Paused, None, None, None)
             .await?;
-        let running = self.processes.lock().await.remove(&agent_id);
+        let running = self.retire_process(agent_id).await;
         if let Some(running) = running {
             if let (Some(thread_id), Some(turn_id)) = active_turn {
                 let _ = running
@@ -387,33 +425,19 @@ impl AgentManager {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (rpc, events) = RpcPeer::attach(BufReader::new(stdout), stdin);
-        self.consume_events(agent.id, rpc.clone(), events);
-        rpc.request(
+        let running = Arc::new(RunningAgent {
+            rpc,
+            child: Mutex::new(child),
+        });
+        running.rpc.request(
             "initialize",
             json!({"clientInfo": {"name": "multi_agent_board", "title": "Multi-agent Board", "version": env!("CARGO_PKG_VERSION")}}),
         )
         .await?;
-        rpc.notify("initialized", json!({})).await?;
+        running.rpc.notify("initialized", json!({})).await?;
 
-        let instructions = agent_instructions(agent);
-        let params = if let Some(thread_id) = &agent.thread_id {
-            json!({
-                "threadId": thread_id, "cwd": worktree.path,
-                "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": instructions
-            })
-        } else {
-            json!({
-                "cwd": worktree.path, "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": instructions, "serviceName": "multi_agent_board"
-            })
-        };
-        let method = if agent.thread_id.is_some() {
-            "thread/resume"
-        } else {
-            "thread/start"
-        };
-        let result = rpc.request(method, params).await?;
+        let (method, params) = thread_open_request(agent, &worktree.path);
+        let result = running.rpc.request(method, params).await?;
         let thread_id = result
             .pointer("/thread/id")
             .and_then(Value::as_str)
@@ -421,31 +445,71 @@ impl AgentManager {
         self.store
             .update_agent_runtime(agent.id, AgentState::Running, Some(thread_id), None, None)
             .await?;
-        let _ = rpc
+        let _ = running
+            .rpc
             .request(
                 "thread/name/set",
                 json!({"threadId": thread_id, "name": agent.name}),
             )
             .await;
-        let running = Arc::new(RunningAgent {
-            rpc,
-            child: Mutex::new(child),
-        });
         self.processes
             .lock()
             .await
             .insert(agent.id, running.clone());
+        drop(self.consume_events(agent.id, running.clone(), events));
         Ok(running)
     }
 
-    fn consume_events(&self, agent_id: i64, rpc: RpcPeer, mut events: mpsc::Receiver<Value>) {
+    async fn retire_process(&self, agent_id: i64) -> Option<Arc<RunningAgent>> {
+        self.processes.lock().await.remove(&agent_id)
+    }
+
+    async fn remove_process_if_current(&self, agent_id: i64, expected: &Arc<RunningAgent>) -> bool {
+        let mut processes = self.processes.lock().await;
+        if processes
+            .get(&agent_id)
+            .is_some_and(|running| Arc::ptr_eq(running, expected))
+        {
+            processes.remove(&agent_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn process_is_current(&self, agent_id: i64, expected: &Arc<RunningAgent>) -> bool {
+        self.processes
+            .lock()
+            .await
+            .get(&agent_id)
+            .is_some_and(|running| Arc::ptr_eq(running, expected))
+    }
+
+    fn consume_events(
+        &self,
+        agent_id: i64,
+        running: Arc<RunningAgent>,
+        mut events: mpsc::Receiver<Value>,
+    ) -> tokio::task::JoinHandle<()> {
         let manager = self.clone();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                manager.handle_event(agent_id, &rpc, event).await;
+                let _operation = manager.operations.lock().await;
+                if !manager.process_is_current(agent_id, &running).await {
+                    let method = event.get("method").and_then(Value::as_str).unwrap_or("");
+                    if event.get("id").is_some() && method.contains("request") {
+                        let _ = running
+                            .rpc
+                            .respond(event["id"].clone(), json!({"decision": "decline"}))
+                            .await;
+                    }
+                    break;
+                }
+                manager.handle_event(agent_id, &running.rpc, event).await;
             }
-            manager.processes.lock().await.remove(&agent_id);
-            if let Ok(Some(agent)) = manager.store.agent(agent_id).await
+            let _operation = manager.operations.lock().await;
+            if manager.remove_process_if_current(agent_id, &running).await
+                && let Ok(Some(agent)) = manager.store.agent(agent_id).await
                 && matches!(
                     agent.state,
                     AgentState::Running | AgentState::AwaitingApproval
@@ -455,7 +519,7 @@ impl AgentManager {
                     .fail_agent(agent_id, "Codex process exited unexpectedly")
                     .await;
             }
-        });
+        })
     }
 
     async fn handle_event(&self, agent_id: i64, rpc: &RpcPeer, event: Value) {
@@ -584,10 +648,41 @@ impl AgentManager {
 }
 
 fn agent_instructions(agent: &Agent) -> String {
-    format!(
+    let fixed = format!(
         "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
         agent.id, agent.name
+    );
+    if agent.instructions.is_empty() {
+        return fixed;
+    }
+    format!(
+        "{fixed}\n\n--- BEGIN USER-CONFIGURED AGENT INSTRUCTIONS ---\n\
+         These preferences are subordinate to the fixed board coordination and authorization rules above.\n\
+         {}\n\
+         --- END USER-CONFIGURED AGENT INSTRUCTIONS ---",
+        agent.instructions
     )
+}
+
+fn thread_open_request(agent: &Agent, worktree_path: &str) -> (&'static str, Value) {
+    let instructions = agent_instructions(agent);
+    match &agent.thread_id {
+        Some(thread_id) => (
+            "thread/resume",
+            json!({
+                "threadId": thread_id, "cwd": worktree_path,
+                "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "developerInstructions": instructions
+            }),
+        ),
+        None => (
+            "thread/start",
+            json!({
+                "cwd": worktree_path, "approvalPolicy": "never", "sandbox": "danger-full-access",
+                "developerInstructions": instructions, "serviceName": "multi_agent_board"
+            }),
+        ),
+    }
 }
 
 fn turn_params(thread_id: &str, message: &str, worktree_path: &str) -> Value {
@@ -1285,6 +1380,10 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
         let agent = store
+            .set_agent_instructions(agent.id, "Prefer explicit tradeoffs.")
+            .await
+            .unwrap();
+        let agent = store
             .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
             .await
             .unwrap();
@@ -1311,5 +1410,210 @@ mod tests {
         assert!(!manager.processes.lock().await.contains_key(&agent.id));
         assert!(agent_instructions(&renamed).contains("agent name is 'builder'"));
         assert!(!agent_instructions(&renamed).contains("agent name is 'worker'"));
+        assert!(agent_instructions(&renamed).ends_with(
+            "Prefer explicit tradeoffs.\n--- END USER-CONFIGURED AGENT INSTRUCTIONS ---"
+        ));
+    }
+
+    #[tokio::test]
+    async fn instruction_changes_restart_idle_process_and_resume_the_same_context() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store
+            .update_agent_runtime(agent.id, AgentState::Idle, Some("thread-1"), None, None)
+            .await
+            .unwrap();
+        let original_project = agent.active_project_id;
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let (client, _server) = duplex(4096);
+        let (reader, writer) = split(client);
+        let (rpc, _events) = RpcPeer::attach(BufReader::new(reader), writer);
+        let child = Command::new("sh").args(["-c", "sleep 60"]).spawn().unwrap();
+        manager.processes.lock().await.insert(
+            agent.id,
+            Arc::new(RunningAgent {
+                rpc,
+                child: Mutex::new(child),
+            }),
+        );
+
+        let updated = manager
+            .set_instructions(
+                agent.id,
+                "  Challenge assumptions.\r\nKeep answers compact.  ",
+            )
+            .await
+            .unwrap();
+
+        assert!(!manager.processes.lock().await.contains_key(&agent.id));
+        assert_eq!(updated.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(updated.active_project_id, original_project);
+        assert_eq!(
+            updated.instructions,
+            "Challenge assumptions.\nKeep answers compact."
+        );
+        let composed = agent_instructions(&updated);
+        let fixed_position = composed.find(COORDINATION_INSTRUCTIONS).unwrap();
+        let custom_position = composed
+            .find("--- BEGIN USER-CONFIGURED AGENT INSTRUCTIONS ---")
+            .unwrap();
+        assert!(fixed_position < custom_position);
+        let (method, params) = thread_open_request(&updated, "/tmp/worker");
+        assert_eq!(method, "thread/resume");
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["developerInstructions"], composed);
+
+        let second_project = manager
+            .store
+            .set_project("/tmp/second-project")
+            .await
+            .unwrap();
+        let transitioned = manager
+            .store
+            .set_agent_active_project(updated.id, Some(second_project.id))
+            .await
+            .unwrap();
+        assert_eq!(transitioned.instructions, updated.instructions);
+        assert_eq!(transitioned.thread_id, updated.thread_id);
+
+        manager
+            .store
+            .update_agent_runtime(updated.id, AgentState::Paused, None, None, None)
+            .await
+            .unwrap();
+        let paused = manager
+            .set_instructions(updated.id, "Use a calm, direct tone.")
+            .await
+            .unwrap();
+        assert_eq!(paused.state, AgentState::Paused);
+        assert_eq!(paused.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(paused.instructions, "Use a calm, direct tone.");
+    }
+
+    #[tokio::test]
+    async fn retired_process_consumer_cannot_remove_or_fail_its_replacement() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Idle,
+                Some("durable-thread"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+
+        let (old_client, _old_server) = duplex(4096);
+        let (old_reader, old_writer) = split(old_client);
+        let (old_rpc, _old_rpc_events) = RpcPeer::attach(BufReader::new(old_reader), old_writer);
+        let mut old_command = Command::new("sh");
+        old_command.args(["-c", "sleep 60"]).kill_on_drop(true);
+        let old = Arc::new(RunningAgent {
+            rpc: old_rpc,
+            child: Mutex::new(old_command.spawn().unwrap()),
+        });
+        let (finish_old, old_events) = mpsc::channel(4);
+        let old_consumer = manager.consume_events(agent.id, old.clone(), old_events);
+        manager.processes.lock().await.insert(agent.id, old.clone());
+
+        let updated = manager
+            .set_instructions(agent.id, "Apply this on the next turn.")
+            .await
+            .unwrap();
+        assert_eq!(updated.thread_id.as_deref(), Some("durable-thread"));
+
+        let (new_client, _new_server) = duplex(4096);
+        let (new_reader, new_writer) = split(new_client);
+        let (new_rpc, _new_rpc_events) = RpcPeer::attach(BufReader::new(new_reader), new_writer);
+        let mut new_command = Command::new("sh");
+        new_command.args(["-c", "sleep 60"]).kill_on_drop(true);
+        let replacement = Arc::new(RunningAgent {
+            rpc: new_rpc,
+            child: Mutex::new(new_command.spawn().unwrap()),
+        });
+        manager
+            .store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Running,
+                Some("durable-thread"),
+                Some("replacement-turn"),
+                None,
+            )
+            .await
+            .unwrap();
+        manager
+            .processes
+            .lock()
+            .await
+            .insert(agent.id, replacement.clone());
+
+        finish_old
+            .send(json!({
+                "method": "error",
+                "params": {"error": {"message": "stale process error"}}
+            }))
+            .await
+            .unwrap();
+        finish_old
+            .send(json!({
+                "method": "item/completed",
+                "params": {"item": {"type": "agentMessage", "text": "stale output"}}
+            }))
+            .await
+            .unwrap();
+        drop(finish_old);
+        old_consumer.await.unwrap();
+
+        let registered = manager.processes.lock().await.get(&agent.id).cloned();
+        assert!(
+            registered
+                .as_ref()
+                .is_some_and(|running| Arc::ptr_eq(running, &replacement))
+        );
+        let current = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(current.state, AgentState::Running);
+        assert_eq!(current.thread_id.as_deref(), Some("durable-thread"));
+        assert_eq!(current.active_turn_id.as_deref(), Some("replacement-turn"));
+        assert_eq!(current.last_error, None);
+        assert!(
+            manager
+                .store
+                .agent_messages(agent.id, None, None, None)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_agent_instructions_preserve_the_previous_developer_contract() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+
+        let instructions = agent_instructions(&agent);
+
+        assert_eq!(
+            instructions,
+            format!(
+                "{COORDINATION_INSTRUCTIONS} Your board agent ID is {} and your agent name is '{}'.",
+                agent.id, agent.name
+            )
+        );
+        assert!(!instructions.contains("USER-CONFIGURED"));
     }
 }

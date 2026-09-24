@@ -23,6 +23,7 @@ vi.mock("../api", () => ({
     createAgent: vi.fn(),
     pauseAgent: vi.fn(),
     renameAgent: vi.fn(),
+    setAgentInstructions: vi.fn(),
     resumeAgent: vi.fn(),
     sendAgentMessage: vi.fn(),
     setAgentScopes: vi.fn(),
@@ -35,6 +36,7 @@ vi.mock("../api", () => ({
 const agent: Agent = {
   id: 1,
   name: "reviewer",
+  instructions: "",
   state: "idle",
   thread_id: null,
   home_path: "/repo/reviewer-home",
@@ -100,6 +102,7 @@ describe("AgentWorkspace", () => {
     vi.mocked(api.createAgent).mockResolvedValue(agent);
     vi.mocked(api.pauseAgent).mockResolvedValue(agent);
     vi.mocked(api.renameAgent).mockResolvedValue(agent);
+    vi.mocked(api.setAgentInstructions).mockResolvedValue(agent);
     vi.mocked(api.resumeAgent).mockResolvedValue(agent);
     vi.mocked(api.sendAgentMessage).mockResolvedValue(agent);
     vi.mocked(api.setAgentScopes).mockResolvedValue(["approve_review"]);
@@ -524,6 +527,127 @@ describe("AgentWorkspace", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("saves agent instructions and preserves the draft when saving fails", async () => {
+    vi.mocked(api.setAgentInstructions).mockRejectedValueOnce(
+      new Error("Could not restart Codex"),
+    );
+    render(
+      <AgentWorkspace
+        agents={[agent]}
+        channels={[]}
+        tickets={[]}
+        selectedAgentId={agent.id}
+        view="settings"
+        refresh={0}
+        deltas={{}}
+        onSelectAgent={() => {}}
+        onViewChange={() => {}}
+        onChanged={async () => {}}
+        onError={() => {}}
+      />,
+    );
+    const instructions = screen.getByRole("textbox", {
+      name: /role, temperament/i,
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("checkbox", {
+          name: /pending work/i,
+        }) as HTMLInputElement).disabled,
+      ).toBe(false),
+    );
+    fireEvent.change(instructions, {
+      target: { value: "Challenge assumptions and explain tradeoffs." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(api.setAgentInstructions).toHaveBeenCalledWith(
+        agent.id,
+        "Challenge assumptions and explain tradeoffs.",
+      ),
+    );
+    expect(await screen.findByText(/Could not save: Could not restart Codex/)).toBeTruthy();
+    expect((instructions as HTMLTextAreaElement).value).toBe(
+      "Challenge assumptions and explain tradeoffs.",
+    );
+  });
+
+  it("keeps dirty instructions through remote updates and locks them during a turn", () => {
+    const props = {
+      channels: [],
+      tickets: [],
+      selectedAgentId: agent.id,
+      view: "settings" as const,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { rerender } = render(
+      <AgentWorkspace {...props} agents={[agent]} />,
+    );
+    const instructions = screen.getByRole("textbox", {
+      name: /role, temperament/i,
+    }) as HTMLTextAreaElement;
+    fireEvent.change(instructions, { target: { value: "My unsaved persona" } });
+
+    rerender(
+      <AgentWorkspace
+        {...props}
+        agents={[{
+          ...agent,
+          state: "running",
+          instructions: "Remote persona",
+          updated_at: 1,
+        }]}
+      />,
+    );
+
+    expect(instructions.value).toBe("My unsaved persona");
+    expect(instructions.disabled).toBe(true);
+    expect(screen.getByText(/Wait for the active turn to finish/)).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Save settings" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("adopts remote instructions when the local form is clean", async () => {
+    const props = {
+      channels: [],
+      tickets: [],
+      selectedAgentId: agent.id,
+      view: "settings" as const,
+      refresh: 0,
+      deltas: {},
+      onSelectAgent: () => {},
+      onViewChange: () => {},
+      onChanged: async () => {},
+      onError: () => {},
+    };
+    const { rerender } = render(
+      <AgentWorkspace {...props} agents={[agent]} />,
+    );
+
+    rerender(
+      <AgentWorkspace
+        {...props}
+        agents={[{ ...agent, instructions: "Remote persona", updated_at: 1 }]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("textbox", {
+          name: /role, temperament/i,
+        }) as HTMLTextAreaElement).value,
+      ).toBe("Remote persona"),
+    );
+  });
+
   it("groups settings and keeps implementation paths in Advanced", async () => {
     render(
       <AgentWorkspace
@@ -543,6 +667,7 @@ describe("AgentWorkspace", () => {
     );
 
     expect(screen.getByRole("group", { name: "Identity" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Agent instructions" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Work preferences" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Notifications" })).toBeTruthy();
     expect(screen.queryByText("approve_review")).toBeNull();
