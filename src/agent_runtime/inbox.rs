@@ -118,7 +118,7 @@ impl AgentManager {
             return Err(AppError::conflict("agent name already exists"));
         }
         let agent = self.store.rename_agent(agent_id, name).await?;
-        if let Some(running) = self.processes.lock().await.remove(&agent_id) {
+        if let Some(running) = self.retire_process(agent_id).await {
             let _ = running.child.lock().await.kill().await;
         }
         self.emit(AgentEvent::AgentUpdated {
@@ -156,7 +156,7 @@ impl AgentManager {
             .store
             .set_agent_instructions(agent_id, &requested)
             .await?;
-        if let Some(running) = self.processes.lock().await.remove(&agent_id) {
+        if let Some(running) = self.retire_process(agent_id).await {
             let _ = running.child.lock().await.kill().await;
         }
         self.emit(AgentEvent::AgentUpdated {
@@ -334,7 +334,7 @@ impl AgentManager {
             .store
             .update_agent_runtime(agent_id, AgentState::Paused, None, None, None)
             .await?;
-        let running = self.processes.lock().await.remove(&agent_id);
+        let running = self.retire_process(agent_id).await;
         if let Some(running) = running {
             if let (Some(thread_id), Some(turn_id)) = active_turn {
                 let _ = running
@@ -406,16 +406,19 @@ impl AgentManager {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (rpc, events) = RpcPeer::attach(BufReader::new(stdout), stdin);
-        self.consume_events(agent.id, rpc.clone(), events);
-        rpc.request(
+        let running = Arc::new(RunningAgent {
+            rpc,
+            child: Mutex::new(child),
+        });
+        running.rpc.request(
             "initialize",
             json!({"clientInfo": {"name": "multi_agent_board", "title": "Multi-agent Board", "version": env!("CARGO_PKG_VERSION")}}),
         )
         .await?;
-        rpc.notify("initialized", json!({})).await?;
+        running.rpc.notify("initialized", json!({})).await?;
 
         let (method, params) = thread_open_request(agent, &worktree.path);
-        let result = rpc.request(method, params).await?;
+        let result = running.rpc.request(method, params).await?;
         let thread_id = result
             .pointer("/thread/id")
             .and_then(Value::as_str)
@@ -423,31 +426,51 @@ impl AgentManager {
         self.store
             .update_agent_runtime(agent.id, AgentState::Running, Some(thread_id), None, None)
             .await?;
-        let _ = rpc
+        let _ = running
+            .rpc
             .request(
                 "thread/name/set",
                 json!({"threadId": thread_id, "name": agent.name}),
             )
             .await;
-        let running = Arc::new(RunningAgent {
-            rpc,
-            child: Mutex::new(child),
-        });
         self.processes
             .lock()
             .await
             .insert(agent.id, running.clone());
+        drop(self.consume_events(agent.id, running.clone(), events));
         Ok(running)
     }
 
-    fn consume_events(&self, agent_id: i64, rpc: RpcPeer, mut events: mpsc::Receiver<Value>) {
+    async fn retire_process(&self, agent_id: i64) -> Option<Arc<RunningAgent>> {
+        self.processes.lock().await.remove(&agent_id)
+    }
+
+    async fn remove_process_if_current(&self, agent_id: i64, expected: &Arc<RunningAgent>) -> bool {
+        let mut processes = self.processes.lock().await;
+        if processes
+            .get(&agent_id)
+            .is_some_and(|running| Arc::ptr_eq(running, expected))
+        {
+            processes.remove(&agent_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_events(
+        &self,
+        agent_id: i64,
+        running: Arc<RunningAgent>,
+        mut events: mpsc::Receiver<Value>,
+    ) -> tokio::task::JoinHandle<()> {
         let manager = self.clone();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                manager.handle_event(agent_id, &rpc, event).await;
+                manager.handle_event(agent_id, &running.rpc, event).await;
             }
-            manager.processes.lock().await.remove(&agent_id);
-            if let Ok(Some(agent)) = manager.store.agent(agent_id).await
+            if manager.remove_process_if_current(agent_id, &running).await
+                && let Ok(Some(agent)) = manager.store.agent(agent_id).await
                 && matches!(
                     agent.state,
                     AgentState::Running | AgentState::AwaitingApproval
@@ -457,7 +480,7 @@ impl AgentManager {
                     .fail_agent(agent_id, "Codex process exited unexpectedly")
                     .await;
             }
-        });
+        })
     }
 
     async fn handle_event(&self, agent_id: i64, rpc: &RpcPeer, event: Value) {
@@ -1431,6 +1454,88 @@ mod tests {
         assert_eq!(paused.state, AgentState::Paused);
         assert_eq!(paused.thread_id.as_deref(), Some("thread-1"));
         assert_eq!(paused.instructions, "Use a calm, direct tone.");
+    }
+
+    #[tokio::test]
+    async fn retired_process_consumer_cannot_remove_or_fail_its_replacement() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let agent = store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Idle,
+                Some("durable-thread"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let manager = AgentManager::new(
+            store,
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+
+        let (old_client, _old_server) = duplex(4096);
+        let (old_reader, old_writer) = split(old_client);
+        let (old_rpc, _old_rpc_events) = RpcPeer::attach(BufReader::new(old_reader), old_writer);
+        let mut old_command = Command::new("sh");
+        old_command.args(["-c", "sleep 60"]).kill_on_drop(true);
+        let old = Arc::new(RunningAgent {
+            rpc: old_rpc,
+            child: Mutex::new(old_command.spawn().unwrap()),
+        });
+        let (finish_old, old_events) = mpsc::channel(1);
+        let old_consumer = manager.consume_events(agent.id, old.clone(), old_events);
+        manager.processes.lock().await.insert(agent.id, old.clone());
+
+        let updated = manager
+            .set_instructions(agent.id, "Apply this on the next turn.")
+            .await
+            .unwrap();
+        assert_eq!(updated.thread_id.as_deref(), Some("durable-thread"));
+
+        let (new_client, _new_server) = duplex(4096);
+        let (new_reader, new_writer) = split(new_client);
+        let (new_rpc, _new_rpc_events) = RpcPeer::attach(BufReader::new(new_reader), new_writer);
+        let mut new_command = Command::new("sh");
+        new_command.args(["-c", "sleep 60"]).kill_on_drop(true);
+        let replacement = Arc::new(RunningAgent {
+            rpc: new_rpc,
+            child: Mutex::new(new_command.spawn().unwrap()),
+        });
+        manager
+            .store
+            .update_agent_runtime(
+                agent.id,
+                AgentState::Running,
+                Some("durable-thread"),
+                Some("replacement-turn"),
+                None,
+            )
+            .await
+            .unwrap();
+        manager
+            .processes
+            .lock()
+            .await
+            .insert(agent.id, replacement.clone());
+
+        drop(finish_old);
+        old_consumer.await.unwrap();
+
+        let registered = manager.processes.lock().await.get(&agent.id).cloned();
+        assert!(
+            registered
+                .as_ref()
+                .is_some_and(|running| Arc::ptr_eq(running, &replacement))
+        );
+        let current = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(current.state, AgentState::Running);
+        assert_eq!(current.thread_id.as_deref(), Some("durable-thread"));
+        assert_eq!(current.active_turn_id.as_deref(), Some("replacement-turn"));
+        assert_eq!(current.last_error, None);
     }
 
     #[tokio::test]
