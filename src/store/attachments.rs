@@ -11,6 +11,8 @@ pub const MAX_ATTACHMENTS_PER_CONTENT: usize = 5;
 pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_ATTACHMENTS_TOTAL_BYTES: i64 = 25 * 1024 * 1024;
 pub const ORPHAN_MAX_AGE_SECONDS: i64 = 24 * 60 * 60;
+const CLEANUP_CLAIM_MAX_AGE_SECONDS: i64 = 60 * 60;
+const CLEANUP_BATCH_SIZE: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachmentOwner {
@@ -40,6 +42,13 @@ pub struct AttachmentUpload {
 pub struct AttachmentDownload {
     pub attachment: Attachment,
     pub path: PathBuf,
+}
+
+#[derive(Debug)]
+struct ClaimedAttachment {
+    id: String,
+    storage_name: String,
+    claimed_at: i64,
 }
 
 impl Store {
@@ -123,39 +132,107 @@ impl Store {
     }
 
     pub async fn cleanup_orphaned_attachments(&self, now: i64) -> Result<usize, AppError> {
+        let rows = self.claim_orphaned_attachment_batch(now).await?;
+        self.remove_claimed_attachment_files(rows).await
+    }
+
+    pub async fn cleanup_expired_attachment_batches(&self, now: i64) -> Result<usize, AppError> {
+        let mut total = 0;
+        loop {
+            let removed = self.cleanup_orphaned_attachments(now).await?;
+            total += removed;
+            if removed < CLEANUP_BATCH_SIZE {
+                return Ok(total);
+            }
+        }
+    }
+
+    pub async fn run_attachment_cleanup(self, interval: std::time::Duration) {
+        loop {
+            if let Err(error) = self
+                .cleanup_expired_attachment_batches(jiff::Timestamp::now().as_second())
+                .await
+            {
+                eprintln!("Attachment cleanup failed: {error}");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    async fn claim_orphaned_attachment_batch(
+        &self,
+        now: i64,
+    ) -> Result<Vec<ClaimedAttachment>, AppError> {
         let cutoff = now - ORPHAN_MAX_AGE_SECONDS;
+        let abandoned_claim_cutoff = now - CLEANUP_CLAIM_MAX_AGE_SECONDS;
+        let mut transaction = self.pool.begin().await?;
         let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, storage_name FROM attachments WHERE content_kind IS NULL AND created_at < ? LIMIT 100",
+            "UPDATE attachments SET cleanup_claimed_at = ? WHERE id IN (\
+                 SELECT id FROM attachments WHERE content_kind IS NULL AND created_at < ? \
+                 AND (cleanup_claimed_at IS NULL OR cleanup_claimed_at < ?) \
+                 ORDER BY created_at, id LIMIT ?\
+             ) AND content_kind IS NULL \
+             AND (cleanup_claimed_at IS NULL OR cleanup_claimed_at < ?) \
+             RETURNING id, storage_name",
         )
+        .bind(now)
         .bind(cutoff)
-        .fetch_all(&self.pool)
+        .bind(abandoned_claim_cutoff)
+        .bind(CLEANUP_BATCH_SIZE as i64)
+        .bind(abandoned_claim_cutoff)
+        .fetch_all(&mut *transaction)
         .await?;
+        transaction.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, storage_name)| ClaimedAttachment {
+                id,
+                storage_name,
+                claimed_at: now,
+            })
+            .collect())
+    }
+
+    async fn remove_claimed_attachment_files(
+        &self,
+        rows: Vec<ClaimedAttachment>,
+    ) -> Result<usize, AppError> {
         let mut removed = 0;
-        for (id, storage_name) in rows {
-            let path = self.attachment_root.join(storage_name);
+        for row in rows {
+            let path = self.attachment_root.join(row.storage_name);
             match tokio::fs::remove_file(path).await {
-                Ok(())
-                    if sqlx::query(
-                        "DELETE FROM attachments WHERE id = ? AND content_kind IS NULL",
-                    )
-                    .bind(&id)
-                    .execute(&self.pool)
-                    .await?
-                    .rows_affected()
-                        == 1 =>
-                {
-                    removed += 1
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(()) => {
                     removed += sqlx::query(
-                        "DELETE FROM attachments WHERE id = ? AND content_kind IS NULL",
+                        "DELETE FROM attachments WHERE id = ? AND content_kind IS NULL \
+                         AND cleanup_claimed_at = ?",
                     )
-                    .bind(&id)
+                    .bind(&row.id)
+                    .bind(row.claimed_at)
                     .execute(&self.pool)
                     .await?
                     .rows_affected() as usize;
                 }
-                _ => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    removed += sqlx::query(
+                        "DELETE FROM attachments WHERE id = ? AND content_kind IS NULL \
+                         AND cleanup_claimed_at = ?",
+                    )
+                    .bind(&row.id)
+                    .bind(row.claimed_at)
+                    .execute(&self.pool)
+                    .await?
+                    .rows_affected() as usize;
+                }
+                Err(_) => {
+                    sqlx::query(
+                        "UPDATE attachments SET cleanup_claimed_at = NULL WHERE id = ? \
+                         AND content_kind IS NULL AND cleanup_claimed_at = ?",
+                    )
+                    .bind(&row.id)
+                    .bind(row.claimed_at)
+                    .execute(&self.pool)
+                    .await?;
+                }
             }
         }
         Ok(removed)
@@ -189,6 +266,7 @@ pub(super) async fn link_attachments(
         let attachment: Attachment = sqlx::query_as(
             "SELECT id, original_filename, media_type, byte_size FROM attachments \
              WHERE id = ? AND content_kind IS NULL AND owner_is_human = ? \
+             AND cleanup_claimed_at IS NULL \
              AND ((? IS NULL AND owner_agent_id IS NULL) OR owner_agent_id = ?)",
         )
         .bind(id)
@@ -208,7 +286,7 @@ pub(super) async fn link_attachments(
         }
         let updated = sqlx::query(
             "UPDATE attachments SET content_kind = ?, content_id = ?, linked_at = unixepoch() \
-             WHERE id = ? AND content_kind IS NULL",
+             WHERE id = ? AND content_kind IS NULL AND cleanup_claimed_at IS NULL",
         )
         .bind(content_kind)
         .bind(content_id)
@@ -338,7 +416,7 @@ fn validate_svg(svg: &str) -> Result<(), AppError> {
         let name = node.tag_name().name().to_ascii_lowercase();
         if matches!(
             name.as_str(),
-            "script" | "foreignobject" | "iframe" | "object" | "embed" | "use"
+            "script" | "style" | "foreignobject" | "iframe" | "object" | "embed" | "use"
         ) {
             return Err(AppError::bad_request(
                 "SVG contains executable or external content",
@@ -347,16 +425,19 @@ fn validate_svg(svg: &str) -> Result<(), AppError> {
         for attribute in node.attributes() {
             let name = attribute.name().to_ascii_lowercase();
             let value = attribute.value().trim().to_ascii_lowercase();
+            let compact_value = value
+                .chars()
+                .filter(|character| !character.is_ascii_whitespace())
+                .collect::<String>();
             let external_reference = matches!(name.as_str(), "href" | "xlink:href" | "src")
                 && !value.is_empty()
                 && !value.starts_with('#');
             if name.starts_with("on")
+                || name == "style"
                 || external_reference
                 || value.contains("javascript:")
                 || value.contains("@import")
-                || value.contains("url(http:")
-                || value.contains("url(https:")
-                || value.contains("url(//")
+                || has_unsafe_url_reference(&compact_value)
             {
                 return Err(AppError::bad_request(
                     "SVG contains executable or external content",
@@ -365,6 +446,22 @@ fn validate_svg(svg: &str) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+fn has_unsafe_url_reference(value: &str) -> bool {
+    let mut rest = value;
+    while let Some(start) = rest.find("url(") {
+        let after = &rest[start + 4..];
+        let Some(end) = after.find(')') else {
+            return true;
+        };
+        let target = after[..end].trim_matches(['\'', '"']);
+        if !target.starts_with('#') || target.len() == 1 {
+            return true;
+        }
+        rest = &after[end + 1..];
+    }
+    false
 }
 
 #[cfg(test)]
@@ -407,6 +504,15 @@ mod tests {
         assert!(validate_svg("<svg><image href=\"https://example.test/x.png\"/></svg>").is_err());
         assert!(validate_svg("<svg><circle cx=\"2\" cy=\"2\" r=\"2\"/></svg>").is_ok());
         assert!(validate_svg("<svg xmlns=\"http://www.w3.org/2000/svg\"><circle/></svg>").is_ok());
+        assert!(
+            validate_svg("<svg><style>@import url(https://example.test/x.css);</style></svg>")
+                .is_err()
+        );
+        assert!(
+            validate_svg("<svg><circle style=\"fill:url( https://example.test/x.svg)\"/></svg>")
+                .is_err()
+        );
+        assert!(validate_svg("<svg><circle fill=\"url( #safe-gradient )\"/></svg>").is_ok());
     }
 
     #[tokio::test]
@@ -532,6 +638,139 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn cleanup_claim_and_link_are_mutually_exclusive() {
+        let store = Store::memory().await.unwrap();
+        let uploaded = store
+            .upload_attachment(AttachmentOwner::Human, png("racing.png"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE attachments SET created_at = 1 WHERE id = ?")
+            .bind(&uploaded.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let claimed = store
+            .claim_orphaned_attachment_batch(ORPHAN_MAX_AGE_SECONDS + 2)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        let path = store.attachment_root.join(&claimed[0].storage_name);
+        assert!(path.exists());
+
+        let error = store
+            .post_message_with_attachments(
+                "general",
+                None,
+                "human",
+                "link lost race",
+                std::slice::from_ref(&uploaded.id),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unavailable"));
+        assert_eq!(
+            store
+                .remove_claimed_attachment_files(claimed)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!path.exists());
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE id = ? AND content_kind IS NOT NULL)",
+        )
+        .bind(&uploaded.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(!linked);
+
+        let linked_first = store
+            .upload_attachment(AttachmentOwner::Human, png("linked-first.png"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE attachments SET created_at = 1 WHERE id = ?")
+            .bind(&linked_first.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .post_message_with_attachments(
+                "general",
+                None,
+                "human",
+                "link won",
+                std::slice::from_ref(&linked_first.id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .cleanup_orphaned_attachments(ORPHAN_MAX_AGE_SECONDS + 2)
+                .await
+                .unwrap(),
+            0
+        );
+        let download = store
+            .attachment_download(&linked_first.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(download.path.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_runs_after_restart_without_another_upload() {
+        let path = std::env::temp_dir().join(format!(
+            "multi-agent-board-idle-cleanup-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        let uploaded = store
+            .upload_attachment(AttachmentOwner::Human, png("abandoned.png"))
+            .await
+            .unwrap();
+        let storage_name: String =
+            sqlx::query_scalar("SELECT storage_name FROM attachments WHERE id = ?")
+                .bind(&uploaded.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        let stored_path = store.attachment_root.join(storage_name);
+        sqlx::query("UPDATE attachments SET created_at = 1 WHERE id = ?")
+            .bind(&uploaded.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.close().await;
+
+        let reopened = Store::open(&path).await.unwrap();
+        let cleanup = tokio::spawn(
+            reopened
+                .clone()
+                .run_attachment_cleanup(std::time::Duration::from_millis(10)),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attachments WHERE id = ?)")
+                        .bind(&uploaded.id)
+                        .fetch_one(&reopened.pool)
+                        .await
+                        .unwrap();
+                if !exists {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cleanup.abort();
+        assert!(!stored_path.exists());
     }
 
     #[tokio::test]

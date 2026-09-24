@@ -144,9 +144,6 @@ async fn upload_attachment(
     {
         return Err(AppError::bad_request("upload one image at a time"));
     }
-    let _ = store
-        .cleanup_orphaned_attachments(jiff::Timestamp::now().as_second())
-        .await;
     Ok(Json(
         store
             .upload_attachment(

@@ -34,6 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?);
     }
     let store = Store::open(&data_path).await?;
+    tokio::spawn(
+        store
+            .clone()
+            .run_attachment_cleanup(std::time::Duration::from_secs(60 * 60)),
+    );
     let recovered_events = store.recover_wake_events_after_restart().await?;
     if recovered_events > 0 {
         eprintln!("Recovered {recovered_events} interrupted wake event(s)");

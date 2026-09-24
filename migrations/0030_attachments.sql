@@ -42,10 +42,12 @@ CREATE TABLE attachments (
     content_id INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     linked_at INTEGER,
+    cleanup_claimed_at INTEGER,
     CHECK ((owner_is_human = 1 AND owner_agent_id IS NULL) OR
            (owner_is_human = 0 AND owner_agent_id IS NOT NULL)),
     CHECK ((content_kind IS NULL AND content_id IS NULL AND linked_at IS NULL) OR
-           (content_kind IS NOT NULL AND content_id IS NOT NULL AND linked_at IS NOT NULL))
+           (content_kind IS NOT NULL AND content_id IS NOT NULL AND linked_at IS NOT NULL)),
+    CHECK (content_kind IS NULL OR cleanup_claimed_at IS NULL)
 );
 
 CREATE INDEX attachments_content_idx ON attachments(content_kind, content_id);
