@@ -135,6 +135,7 @@ export function KanbanBoard({
       setCreateDraftEdited(false);
       setProjectId(filterProjectId === "all" ? "" : filterProjectId);
       await onChanged(created);
+      selectTicket(created.id);
       setCreateStatus("Ticket created.");
       setShowCreate(false);
     } catch (error) {
@@ -239,7 +240,7 @@ export function KanbanBoard({
           </section>
         ))}
       </div>
-      {selectedTicket && (
+      {selectedTicket && !showCreate && (
         <TicketDetailPanel
           ticket={selectedTicket}
           tickets={tickets}

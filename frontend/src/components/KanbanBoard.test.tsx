@@ -189,6 +189,27 @@ describe("KanbanBoard", () => {
     ).toBeNull();
   });
 
+  it("shows only the create editor while a selected ticket route remains open", () => {
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[ticket]}
+        selectedTicketId={ticket.id}
+        selectedTicket={ticket}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: ticket.title })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+
+    expect(document.querySelectorAll(".ticket-detail-panel")).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Create ticket" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: ticket.title })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByRole("heading", { name: ticket.title })).toBeTruthy();
+  });
+
   it("shows ownership and review details in the panel", () => {
     const reviewTicket: Ticket = {
       ...ticket,
@@ -546,6 +567,7 @@ describe("KanbanBoard", () => {
       review_completion_workflow: workflow,
       has_review_feedback: false,
       activity_count: 0,
+      latest_activity_id: null,
       unresolved_blockers: [],
       revision: 1,
       created_at: 0,
@@ -588,6 +610,7 @@ describe("KanbanBoard", () => {
       review_completion_workflow: null,
       has_review_feedback: true,
       activity_count: 3,
+      latest_activity_id: 12,
       unresolved_blockers: [],
       revision: ticket.revision,
       created_at: ticket.created_at,

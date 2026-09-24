@@ -295,7 +295,7 @@ impl Store {
             .unwrap_or(DEFAULT_TICKET_PAGE_SIZE)
             .min(MAX_TICKET_PAGE_SIZE);
         let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT id, project_id, title, state, created_by_agent_id, reserved_for_agent_id, assignee_id, reviewer_id, review_completion_workflow, review_feedback IS NOT NULL AS has_review_feedback, (SELECT COUNT(*) FROM ticket_activity WHERE ticket_id = tickets.id) AS activity_count, revision, created_at, updated_at FROM tickets WHERE 1 = 1",
+            "SELECT id, project_id, title, state, created_by_agent_id, reserved_for_agent_id, assignee_id, reviewer_id, review_completion_workflow, review_feedback IS NOT NULL AS has_review_feedback, (SELECT COUNT(*) FROM ticket_activity WHERE ticket_id = tickets.id) AS activity_count, (SELECT MAX(id) FROM ticket_activity WHERE ticket_id = tickets.id) AS latest_activity_id, revision, created_at, updated_at FROM tickets WHERE 1 = 1",
         );
         if let Some(project_id) = filter.project_id {
             query.push(" AND project_id = ").push_bind(project_id);
@@ -2211,6 +2211,7 @@ mod tests {
         assert_eq!((first[0].id, first[24].id), (1000, 976));
         assert_eq!(first[0].unresolved_blockers[0].id, 1);
         assert_eq!(first[0].activity_count, 2);
+        assert!(first[0].latest_activity_id.is_some());
 
         sqlx::query("UPDATE tickets SET review_completion_workflow = 'external' WHERE id = 1000")
             .execute(&store.pool)
