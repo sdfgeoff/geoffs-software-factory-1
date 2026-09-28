@@ -179,15 +179,59 @@ describe("KanbanBoard", () => {
 
     openTicket();
     expect(
-      screen.getByRole("heading", { name: ticket.title }),
+      screen.getByRole("heading", { name: "Ticket details" }),
     ).toBeTruthy();
     expect(screen.getByDisplayValue(ticket.title)).toBeTruthy();
     expect(screen.queryByRole("combobox", { name: "Status" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(
-      screen.queryByRole("heading", { name: ticket.title }),
+      screen.queryByRole("heading", { name: "Ticket details" }),
     ).toBeNull();
+  });
+
+  it("shows each editable ticket field once at the top of the detail panel", () => {
+    const blocker = { ...ticket, id: 8, title: "Prerequisite" };
+    const editableTicket: Ticket = {
+      ...ticket,
+      state: "todo",
+      description: "The only description",
+      reserved_for_agent_id: 2,
+      assignee_id: 3,
+      blocker_ids: [blocker.id],
+      unresolved_blockers: [{ id: blocker.id, title: blocker.title }],
+    };
+    render(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[editableTicket, blocker]}
+        agents={[
+          { id: 2, name: "reserved" },
+          { id: 3, name: "assigned" },
+        ] as Agent[]}
+      />,
+    );
+
+    openTicket();
+    const panel = screen
+      .getByRole("heading", { name: "Ticket details" })
+      .closest(".ticket-detail-panel") as HTMLElement;
+    expect(within(panel).queryByText(editableTicket.title)).toBeNull();
+    expect(within(panel).getAllByDisplayValue(editableTicket.title)).toHaveLength(1);
+    expect(
+      within(panel).getAllByDisplayValue(editableTicket.description),
+    ).toHaveLength(1);
+    expect(within(panel).getAllByLabelText("Active assignee")).toHaveLength(1);
+    expect(within(panel).getAllByLabelText("Reservation")).toHaveLength(1);
+    expect(within(panel).queryByText(/Blocked by/)).toBeNull();
+    expect(
+      within(panel).getAllByRole("checkbox", { name: /#8 Prerequisite/ }),
+    ).toHaveLength(1);
+    const editor = panel.querySelector(".ticket-detail-form")!;
+    const timeline = panel.querySelector(".ticket-timeline")!;
+    expect(
+      editor.compareDocumentPosition(timeline) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("shows only the create editor while a selected ticket route remains open", () => {
@@ -199,16 +243,16 @@ describe("KanbanBoard", () => {
         selectedTicket={ticket}
       />,
     );
-    expect(screen.getByRole("heading", { name: ticket.title })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Ticket details" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
 
     expect(document.querySelectorAll(".ticket-detail-panel")).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "Create ticket" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: ticket.title })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Ticket details" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.getByRole("heading", { name: ticket.title })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Ticket details" })).toBeTruthy();
   });
 
   it("shows ownership and review details in the panel", () => {
@@ -238,12 +282,14 @@ describe("KanbanBoard", () => {
       />,
     );
 
-    const panel = screen.getByRole("heading", { name: ticket.title }).closest(
-      ".ticket-detail-panel",
-    )!;
+    const panel = screen
+      .getByRole("heading", { name: "Ticket details" })
+      .closest(".ticket-detail-panel") as HTMLElement;
     expect(panel.textContent).toContain("Created bycreator");
     expect(panel.textContent).toContain("Reserved forreserved");
-    expect(panel.textContent).toContain("Active assigneeassigned");
+    expect(
+      (within(panel).getByLabelText("Active assignee") as HTMLSelectElement).value,
+    ).toBe("3");
     expect(panel.textContent).toContain("tickets/7-board");
     expect(panel.textContent).toContain("reviewer");
     expect(panel.textContent).toContain("Tighten tests");
@@ -646,7 +692,9 @@ describe("KanbanBoard", () => {
 
     expect(screen.getByText(/Reviewer action: Approve for external merge/)).toBeTruthy();
     expect(screen.getByText(/does not merge or change the project branch/)).toBeTruthy();
-    expect(screen.getByText("javascript:alert(1) (invalid URL)")).toBeTruthy();
+    expect(screen.getByDisplayValue("javascript:alert(1)")).toBeTruthy();
+    expect(screen.getByText("Enter a valid http or https URL.")).toBeTruthy();
+    expect(screen.queryByText("javascript:alert(1) (invalid URL)")).toBeNull();
     expect(screen.queryByRole("link", { name: "javascript:alert(1)" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Copy branch" }));
     await waitFor(() =>
@@ -952,7 +1000,7 @@ describe("KanbanBoard", () => {
       />,
     );
     expect(
-      screen.getByRole("heading", { name: "Duplicate work" }),
+      screen.getByRole("heading", { name: "Ticket details" }),
     ).toBeTruthy();
   });
 });

@@ -128,7 +128,6 @@ export function TicketDetailPanel({
   const reservedFor = agents.find(
     (agent) => agent.id === ticket.reserved_for_agent_id,
   );
-  const assignedTo = agents.find((agent) => agent.id === ticket.assignee_id);
   const reviewer = agents.find((agent) => agent.id === ticket.reviewer_id);
   const externalWorkflow = ticket.review_completion_workflow === "external";
   const externalUrl = safeExternalUrl(draft.externalUrl.trim());
@@ -491,7 +490,7 @@ export function TicketDetailPanel({
       <div className="ticket-detail-header">
         <div>
           <span className="ticket-number">Ticket #{ticket.id}</span>
-          <h2 id={`ticket-detail-title-${ticket.id}`}>{ticket.title}</h2>
+          <h2 id={`ticket-detail-title-${ticket.id}`}>Ticket details</h2>
         </div>
         <button ref={closeButtonRef} type="button" className="ghost" onClick={onClose}>
           Close
@@ -511,19 +510,81 @@ export function TicketDetailPanel({
         </dd>
         <dt>Created by</dt>
         <dd>{creator?.name ?? "User/system"}</dd>
-        <dt>Reserved for</dt>
-        <dd>{reservedFor?.name ?? "Nobody"}</dd>
-        <dt>Active assignee</dt>
-        <dd>{assignedTo?.name ?? "Nobody"}</dd>
+        {ticket.state !== "todo" && (
+          <>
+            <dt>Reserved for</dt>
+            <dd>{reservedFor?.name ?? "Nobody"}</dd>
+          </>
+        )}
       </dl>
 
-      {ticket.unresolved_blockers.length > 0 && (
-        <p className="ticket-blockers">
-          Blocked by{" "}
-          {ticket.unresolved_blockers
-            .map((blocker) => `#${blocker.id} ${blocker.title}`)
-            .join(", ")}
-        </p>
+      <form className="ticket-detail-form" onSubmit={save}>
+        {updatedElsewhere && (
+          <p className="inline-error" role="status">
+            This ticket was updated elsewhere. Your draft has been preserved;
+            review the latest changes before saving.
+          </p>
+        )}
+        <TicketEditorFields
+          value={draft}
+          tickets={tickets}
+          agents={agents}
+          disabled={ticketBusy}
+          currentTicketId={ticket.id}
+          onChange={updateDraft}
+        />
+        <button type="submit" disabled={ticketBusy}>
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        {saveStatus && <p role="status" aria-live="polite">{saveStatus}</p>}
+      </form>
+
+      {ticket.state === "todo" && (
+        <div className="reservation-editor">
+          <label>
+            Reservation
+            <select
+              ref={reservationSelectRef}
+              value={draft.reservation}
+              onChange={(event) => updateDraft({ reservation: event.target.value }, false)}
+            >
+              <option value="">Not reserved</option>
+              {agents.map((agent) => (
+                <option value={agent.id} key={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={reserve}
+            disabled={
+              changingReservation ||
+              !draft.reservation ||
+              draft.reservation ===
+                (ticket.reserved_for_agent_id?.toString() ?? "")
+            }
+          >
+            {ticket.reserved_for_agent_id &&
+            draft.reservation !== ticket.reserved_for_agent_id.toString()
+              ? "Override reservation"
+              : "Reserve"}
+          </button>
+          {ticket.reserved_for_agent_id && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={changingReservation}
+              onClick={clearReservation}
+            >
+              Clear reservation
+            </button>
+          )}
+          {reservationStatus && (
+            <p role="status" aria-live="polite">{reservationStatus}</p>
+          )}
+        </div>
       )}
 
       {(ticket.implementation_branch ||
@@ -571,20 +632,23 @@ export function TicketDetailPanel({
               </dd>
             </>
           )}
-          {ticket.external_change_url && (
-            <>
-              <dt>External change</dt>
-              <dd>
-                {safeExternalUrl(ticket.external_change_url) ? (
-                  <a href={safeExternalUrl(ticket.external_change_url)!} target="_blank" rel="noopener noreferrer">
-                    {ticket.external_change_url}
-                  </a>
-                ) : (
-                  <span>{ticket.external_change_url} (invalid URL)</span>
-                )}
-              </dd>
-            </>
-          )}
+          {ticket.external_change_url &&
+            !(externalWorkflow &&
+              (ticket.state === "review" ||
+                ticket.state === "awaiting_external_merge")) && (
+              <>
+                <dt>External change</dt>
+                <dd>
+                  {safeExternalUrl(ticket.external_change_url) ? (
+                    <a href={safeExternalUrl(ticket.external_change_url)!} target="_blank" rel="noopener noreferrer">
+                      {ticket.external_change_url}
+                    </a>
+                  ) : (
+                    <span>{ticket.external_change_url} (invalid URL)</span>
+                  )}
+                </dd>
+              </>
+            )}
           {ticket.external_merge_reference && (
             <>
               <dt>External merge reference</dt>
@@ -758,75 +822,6 @@ export function TicketDetailPanel({
           {commentStatus && <p role="status">{commentStatus}</p>}
         </form>
       </section>
-
-      <form className="ticket-detail-form" onSubmit={save}>
-        {updatedElsewhere && (
-          <p className="inline-error" role="status">
-            This ticket was updated elsewhere. Your draft has been preserved;
-            review the latest changes before saving.
-          </p>
-        )}
-        <TicketEditorFields
-          value={draft}
-          tickets={tickets}
-          agents={agents}
-          disabled={ticketBusy}
-          currentTicketId={ticket.id}
-          onChange={updateDraft}
-        />
-        <button type="submit" disabled={ticketBusy}>
-          {saving ? "Saving…" : "Save changes"}
-        </button>
-        {saveStatus && <p role="status" aria-live="polite">{saveStatus}</p>}
-      </form>
-
-      {ticket.state === "todo" && (
-        <div className="reservation-editor">
-          <label>
-            Reservation
-            <select
-              ref={reservationSelectRef}
-              value={draft.reservation}
-              onChange={(event) => updateDraft({ reservation: event.target.value }, false)}
-            >
-              <option value="">Not reserved</option>
-              {agents.map((agent) => (
-                <option value={agent.id} key={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={reserve}
-            disabled={
-              changingReservation ||
-              !draft.reservation ||
-              draft.reservation ===
-                (ticket.reserved_for_agent_id?.toString() ?? "")
-            }
-          >
-            {ticket.reserved_for_agent_id &&
-            draft.reservation !== ticket.reserved_for_agent_id.toString()
-              ? "Override reservation"
-              : "Reserve"}
-          </button>
-          {ticket.reserved_for_agent_id && (
-            <button
-              type="button"
-              className="ghost"
-              disabled={changingReservation}
-              onClick={clearReservation}
-            >
-              Clear reservation
-            </button>
-          )}
-          {reservationStatus && (
-            <p role="status" aria-live="polite">{reservationStatus}</p>
-          )}
-        </div>
-      )}
 
       {actions.length > 0 && (
         <div className="ticket-actions" aria-label="Ticket state actions">

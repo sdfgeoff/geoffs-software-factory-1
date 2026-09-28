@@ -347,14 +347,6 @@ nav a.active {
   font-size: 0.75rem;
   font-weight: 700;
 }
-.ticket-blockers {
-  margin: 0.75rem 0;
-  padding: 0.65rem;
-  border-left: 3px solid #b83b2d;
-  background: #f9ded7;
-  color: #8d261d;
-  font-size: 0.8rem;
-}
 aside form,
 .conversation form {
   display: grid;

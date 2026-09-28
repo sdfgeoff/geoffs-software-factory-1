@@ -217,8 +217,9 @@ describe("App agent routes", () => {
       (screen.getByLabelText("Filter projects") as HTMLSelectElement).value,
     ).toBe("2");
     expect(
-      screen.getByRole("heading", { name: "Durable routes" }),
+      screen.getByRole("heading", { name: "Ticket details" }),
     ).toBeTruthy();
+    expect(screen.getByDisplayValue("Durable routes")).toBeTruthy();
     expect(api.ticket).toHaveBeenCalledWith(ticket.id);
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(window.location.hash).toBe("#board?project=2");
