@@ -20,6 +20,7 @@ interface Props<T extends TicketEditorValue> {
 }
 
 const stateLabels = {
+  draft: "Draft",
   todo: "To do",
   in_progress: "In progress",
   review: "Review",

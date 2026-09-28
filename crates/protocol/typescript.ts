@@ -19,7 +19,7 @@ export interface Project {
 
 export type ProjectCompletionWorkflow = "board_managed" | "external";
 
-export type TicketState = "todo" | "in_progress" | "review" | "awaiting_external_merge" | "done" | "cancelled";
+export type TicketState = "draft" | "todo" | "in_progress" | "review" | "awaiting_external_merge" | "done" | "cancelled";
 
 export interface TicketBlocker {
   id: number;
@@ -355,6 +355,7 @@ export interface CreateTicketRequest {
   title: string;
   description?: string;
   blocker_ids?: number[];
+  state?: TicketState | null;
 }
 
 export interface UpdateTicketRequest {

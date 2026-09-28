@@ -304,7 +304,7 @@ describe("App agent routes", () => {
 
     expect(await screen.findByDisplayValue(repaired.title)).toBeTruthy();
     expect(api.ticket).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(8);
+    expect(api.tickets).toHaveBeenCalledTimes(10);
   });
 
   it("keeps a newer typed ticket event over delayed detail and summary responses", async () => {
@@ -366,7 +366,7 @@ describe("App agent routes", () => {
     act(() => {
       latestEventSource.onmessage?.({ data: JSON.stringify({ kind: "refresh" }) } as MessageEvent);
     });
-    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(8));
+    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(10));
     act(() => {
       latestEventSource.onmessage?.({
         data: JSON.stringify({
@@ -418,7 +418,7 @@ describe("App agent routes", () => {
     act(() => {
       latestEventSource.onmessage?.({ data: JSON.stringify({ kind: "refresh" }) } as MessageEvent);
     });
-    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(8));
+    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(10));
     await act(async () => {
       resolveRepair({
         tickets: [{
@@ -463,7 +463,7 @@ describe("App agent routes", () => {
           : Promise.resolve({ tickets: [], has_more: false }),
       );
       render(<App />);
-      await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(4));
+      await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(5));
 
       act(() => {
         latestEventSource.onmessage?.({
@@ -530,7 +530,7 @@ describe("App agent routes", () => {
       } as MessageEvent);
     });
     expect(screen.queryByText("Other project")).toBeNull();
-    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.tickets).toHaveBeenCalledTimes(5);
   });
 
   it("loads terminal history on demand and details only when opened", async () => {
@@ -661,7 +661,7 @@ describe("App agent routes", () => {
     expect(screen.getByRole("heading", { name: "architect" })).toBeTruthy();
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
     expect(api.agents).toHaveBeenCalledTimes(1);
-    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.tickets).toHaveBeenCalledTimes(5);
     expect(api.settings).toHaveBeenCalledTimes(1);
 
     act(() => {
@@ -672,7 +672,7 @@ describe("App agent routes", () => {
 
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
     expect(api.projects).toHaveBeenCalledTimes(2);
-    expect(api.tickets).toHaveBeenCalledTimes(8);
+    expect(api.tickets).toHaveBeenCalledTimes(10);
     expect(api.channels).toHaveBeenCalledTimes(2);
     expect(api.settings).toHaveBeenCalledTimes(2);
 
@@ -688,7 +688,7 @@ describe("App agent routes", () => {
     expect(api.agents).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(3));
     expect(api.projects).toHaveBeenCalledTimes(3);
-    expect(api.tickets).toHaveBeenCalledTimes(12);
+    expect(api.tickets).toHaveBeenCalledTimes(15);
     expect(api.channels).toHaveBeenCalledTimes(3);
     expect(api.settings).toHaveBeenCalledTimes(3);
   });
@@ -719,7 +719,7 @@ describe("App agent routes", () => {
 
     await waitFor(() => expect(api.projects).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(api.channels).toHaveBeenCalledTimes(2));
-    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.tickets).toHaveBeenCalledTimes(5);
     expect(api.agents).toHaveBeenCalledTimes(1);
     expect(api.settings).toHaveBeenCalledTimes(1);
   });
@@ -987,7 +987,7 @@ describe("App agent routes", () => {
 
     expect(api.agents).toHaveBeenCalledTimes(1);
     expect(api.projects).toHaveBeenCalledTimes(1);
-    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.tickets).toHaveBeenCalledTimes(5);
     expect(api.channels).toHaveBeenCalledTimes(1);
     expect(api.settings).toHaveBeenCalledTimes(1);
   });
@@ -1064,6 +1064,6 @@ describe("App agent routes", () => {
 
     expect(screen.getByDisplayValue("My unfinished title")).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("updated elsewhere");
-    expect(api.tickets).toHaveBeenCalledTimes(4);
+    expect(api.tickets).toHaveBeenCalledTimes(5);
   });
 });

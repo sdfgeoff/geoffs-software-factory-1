@@ -34,6 +34,7 @@ pub enum ProjectCompletionWorkflow {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketState {
+    Draft,
     Todo,
     InProgress,
     Review,
@@ -561,6 +562,8 @@ pub struct CreateTicketRequest {
     pub description: String,
     #[serde(default)]
     pub blocker_ids: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<TicketState>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -148,7 +148,51 @@ describe("KanbanBoard", () => {
         description: "A detailed ticket",
         blocker_ids: [7],
         project_id: 2,
+        state: "todo",
       }),
+    );
+  });
+
+  it("creates drafts and lets a human publish them to todo", async () => {
+    const draft = { ...ticket, state: "draft" as const };
+    vi.mocked(api.createTicket).mockResolvedValue(draft);
+    vi.mocked(api.updateTicket).mockResolvedValue({ ...draft, state: "todo" });
+    const { rerender } = render(
+      <KanbanBoard {...baseProps} tickets={[]} filterProjectId={1} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
+    const panel = screen.getByRole("heading", { name: "Create ticket" }).closest("aside")!;
+    fireEvent.change(within(panel).getByLabelText("Title"), {
+      target: { value: "Plan this work" },
+    });
+    fireEvent.change(within(panel).getByLabelText("Initial status"), {
+      target: { value: "draft" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Create ticket" }));
+
+    await waitFor(() =>
+      expect(api.createTicket).toHaveBeenCalledWith({
+        title: "Plan this work",
+        description: "",
+        blocker_ids: [],
+        project_id: 1,
+        state: "draft",
+      }),
+    );
+
+    rerender(
+      <KanbanBoard
+        {...baseProps}
+        tickets={[draft]}
+        selectedTicketId={draft.id}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: /Draft/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start work" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Publish to to do" }));
+    await waitFor(() =>
+      expect(api.updateTicket).toHaveBeenCalledWith(draft, { state: "todo" }),
     );
   });
 
@@ -515,7 +559,7 @@ describe("KanbanBoard", () => {
 
     const status = screen.getByRole("combobox", { name: "Ticket status" });
     expect(container.querySelector(".column-todo.mobile-active")).toBeTruthy();
-    expect(container.querySelectorAll(".column")).toHaveLength(4);
+    expect(container.querySelectorAll(".column")).toHaveLength(5);
     fireEvent.change(status, { target: { value: "review" } });
     expect(container.querySelector(".column-review.mobile-active")).toBeTruthy();
     expect(container.querySelector(".column-todo.mobile-active")).toBeNull();
@@ -532,7 +576,7 @@ describe("KanbanBoard", () => {
     );
 
     expect(screen.queryByRole("heading", { name: /Awaiting external merge/ })).toBeNull();
-    expect(container.querySelectorAll(".column")).toHaveLength(4);
+    expect(container.querySelectorAll(".column")).toHaveLength(5);
 
     const external = {
       ...ticket,

@@ -182,6 +182,7 @@ pub fn register(registry: &mut ToolRegistry) -> Result<(), McpError> {
                         title: arguments.title,
                         description: arguments.description,
                         blocker_ids: arguments.blocker_ids,
+                        state: None,
                     })
                     .await
             })
