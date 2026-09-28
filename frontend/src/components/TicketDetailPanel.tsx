@@ -69,6 +69,7 @@ export function ticketDraft(ticket: Ticket): TicketDraft {
 }
 
 const stateLabels: Record<TicketState, string> = {
+  draft: "Draft",
   todo: "To do",
   in_progress: "In progress",
   review: "Review",
@@ -473,9 +474,15 @@ export function TicketDetailPanel({
   }
 
   const actions =
-    ticket.state === "todo"
+    ticket.state === "draft"
+      ? [
+          { label: "Publish to to do", state: "todo" as const },
+          { label: "Cancel ticket", state: "cancelled" as const },
+        ]
+      : ticket.state === "todo"
       ? [
           { label: "Start work", state: "in_progress" as const },
+          { label: "Move to draft", state: "draft" as const },
           { label: "Cancel ticket", state: "cancelled" as const },
         ]
       : ticket.state === "in_progress"
@@ -510,7 +517,7 @@ export function TicketDetailPanel({
         </dd>
         <dt>Created by</dt>
         <dd>{creator?.name ?? "User/system"}</dd>
-        {ticket.state !== "todo" && (
+        {ticket.state !== "todo" && ticket.state !== "draft" && (
           <>
             <dt>Reserved for</dt>
             <dd>{reservedFor?.name ?? "Nobody"}</dd>
@@ -531,6 +538,7 @@ export function TicketDetailPanel({
           agents={agents}
           disabled={ticketBusy}
           currentTicketId={ticket.id}
+          showAssignee={ticket.state !== "draft"}
           onChange={updateDraft}
         />
         <button type="submit" disabled={ticketBusy}>
