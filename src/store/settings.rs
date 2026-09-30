@@ -1,4 +1,4 @@
-use crate::{error::AppError, store::validate_channel};
+use crate::{domain::BoardSettings, error::AppError, store::validate_channel};
 
 use super::Store;
 
@@ -13,24 +13,33 @@ impl Store {
             .await
     }
 
+    pub async fn board_settings(&self) -> Result<Option<BoardSettings>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT merge_notification_channel, revision FROM board_settings WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+    }
+
     pub async fn set_merge_notification_channel(
         &self,
         channel: Option<&str>,
-    ) -> Result<Option<String>, AppError> {
+    ) -> Result<BoardSettings, AppError> {
         if let Some(channel) = channel {
             validate_channel(channel)?;
             self.ensure_channel(channel, MERGE_NOTIFICATION_CHANNEL_DESCRIPTION)
                 .await?;
         }
-        sqlx::query(
+        let settings = sqlx::query_as(
             "INSERT INTO board_settings (id, merge_notification_channel) VALUES (1, ?) \
              ON CONFLICT(id) DO UPDATE SET merge_notification_channel = excluded.merge_notification_channel, \
-             updated_at = unixepoch()",
+             revision = board_settings.revision + 1, updated_at = unixepoch() \
+             RETURNING merge_notification_channel, revision",
         )
         .bind(channel)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(channel.map(str::to_owned))
+        Ok(settings)
     }
 }
 

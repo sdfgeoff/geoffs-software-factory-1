@@ -93,6 +93,10 @@ export function mergeAgentsByRevision(current: Agent[], updates: Agent[]) {
   return [...byId.values()];
 }
 
+export function newerSettings(current: Settings | null, update: Settings) {
+  return current && current.revision > update.revision ? current : update;
+}
+
 function reconcileBufferedActivity(
   summary: TicketSummary,
   activity: Record<number, TicketActivity>,
@@ -226,6 +230,8 @@ export function App() {
   const pendingDelta = useRef<{ agentId: number; text: string } | null>(null);
   const requiredAgentRevisions = useRef(new Map<number, number>());
   const refreshingAgents = useRef(new Set<number>());
+  const requiredTicketRevisions = useRef(new Map<number, number>());
+  const refreshingTickets = useRef(new Set<number>());
   const reloadGeneration = useRef(0);
   const projectGeneration = useRef(0);
   const channelGeneration = useRef(0);
@@ -319,7 +325,7 @@ export function App() {
       if (
         generation === reloadGeneration.current &&
         startingSettingsGeneration === settingsGeneration.current
-      ) setSettings(nextSettings);
+      ) setSettings((current) => newerSettings(current, nextSettings));
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -404,7 +410,9 @@ export function App() {
     const generation = ++settingsGeneration.current;
     try {
       const settings = await api.settings();
-      if (generation === settingsGeneration.current) setSettings(settings);
+      if (generation === settingsGeneration.current) {
+        setSettings((current) => newerSettings(current, settings));
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -433,6 +441,30 @@ export function App() {
       return updated;
     });
   }, [mergeSummaries]);
+  const refreshTicket = useCallback(async (ticketId: number, revision = 0) => {
+    requiredTicketRevisions.current.set(
+      ticketId,
+      Math.max(requiredTicketRevisions.current.get(ticketId) ?? 0, revision),
+    );
+    if (refreshingTickets.current.has(ticketId)) return;
+    refreshingTickets.current.add(ticketId);
+    try {
+      while (true) {
+        const required = requiredTicketRevisions.current.get(ticketId) ?? revision;
+        const ticket = await api.ticket(ticketId);
+        mergeTickets(ticket);
+        if (ticket.revision >= required) break;
+      }
+    } catch (cause) {
+      if (isNotFound(cause)) {
+        setMissingTicketIds((ids) => new Set(ids).add(ticketId));
+      } else {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      refreshingTickets.current.delete(ticketId);
+    }
+  }, [mergeTickets]);
 
   const loadHistory = useCallback(async (state: "done" | "cancelled") => {
     try {
@@ -520,6 +552,45 @@ export function App() {
             }, 16);
           }
           break;
+        case "projection_invalidated": {
+          const numericKey = positiveId(event.key);
+          switch (event.scope) {
+            case "tickets":
+              if (numericKey) void refreshTicket(numericKey, event.revision ?? 0);
+              break;
+            case "ticket_activity":
+              if (numericKey === activeTicketIdRef.current) {
+                setTicketDetailRepair((value) => value + 1);
+              }
+              break;
+            case "projects":
+              void reloadProjects();
+              break;
+            case "channels":
+              void reloadChannels();
+              break;
+            case "settings":
+              void reloadSettings();
+              void reloadChannels();
+              break;
+            case "board_messages":
+              if (event.key === activeChannelRef.current) {
+                setMessageCatchUp((value) => value + 1);
+              }
+              break;
+            case "agent_messages":
+              if (numericKey === activeAgentIdRef.current) {
+                setMessageCatchUp((value) => value + 1);
+              }
+              break;
+            case "agent_details":
+              if (numericKey === activeAgentIdRef.current) {
+                setAgentDetailRefresh((value) => value + 1);
+              }
+              break;
+          }
+          break;
+        }
         case "agent_changed":
           void refreshAgent(event.agent_id, event.revision);
           break;
@@ -615,7 +686,7 @@ export function App() {
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
       if (deltaTimer.current !== null) window.clearTimeout(deltaTimer.current);
     };
-  }, [mergeAgent, mergeTickets, refreshAgent, reload, reloadChannels, reloadProjects, reloadSettings, scheduleReload]);
+  }, [mergeAgent, mergeTickets, refreshAgent, refreshTicket, reload, reloadChannels, reloadProjects, reloadSettings, scheduleReload]);
 
   useEffect(() => {
     pendingDelta.current = null;
@@ -847,7 +918,7 @@ export function App() {
         <BoardSettings
           settings={settings}
           channels={channels}
-          onChanged={setSettings}
+          onChanged={(update) => setSettings((current) => newerSettings(current, update))}
           onError={report}
         />
         <ProjectPicker projects={projects} onChanged={reloadProjects} />

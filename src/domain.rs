@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, FromRow, PartialEq, Eq)]
 pub struct BoardSettings {
     pub merge_notification_channel: Option<String>,
+    pub revision: i64,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow, PartialEq, Eq)]
@@ -500,6 +501,7 @@ impl From<BoardSettings> for wire::BoardSettings {
     fn from(value: BoardSettings) -> Self {
         Self {
             merge_notification_channel: value.merge_notification_channel,
+            revision: value.revision,
         }
     }
 }

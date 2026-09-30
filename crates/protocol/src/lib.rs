@@ -5,6 +5,35 @@ pub const AGENT_ID_HEADER: &str = "x-multi-agent-board-agent-id";
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BoardSettings {
     pub merge_notification_channel: Option<String>,
+    pub revision: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionScope {
+    Tickets,
+    TicketActivity,
+    Projects,
+    Channels,
+    Settings,
+    BoardMessages,
+    AgentMessages,
+    AgentDetails,
+}
+
+impl ProjectionScope {
+    pub fn resource_type(self) -> &'static str {
+        match self {
+            Self::Tickets => "tickets",
+            Self::TicketActivity => "ticket_activity",
+            Self::Projects => "projects",
+            Self::Channels => "channels",
+            Self::Settings => "settings",
+            Self::BoardMessages => "board_messages",
+            Self::AgentMessages => "agent_messages",
+            Self::AgentDetails => "agent_details",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -459,6 +488,12 @@ pub enum AgentEvent {
     },
     ProjectsChanged,
     ChannelsChanged,
+    ProjectionInvalidated {
+        scope: ProjectionScope,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<i64>,
+    },
     AgentChanged {
         agent_id: i64,
         revision: i64,

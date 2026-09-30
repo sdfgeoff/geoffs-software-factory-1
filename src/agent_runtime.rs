@@ -34,6 +34,11 @@ pub enum AgentEvent {
     Refresh,
     ProjectsChanged,
     ChannelsChanged,
+    ProjectionInvalidated {
+        scope: multi_agent_board_protocol::ProjectionScope,
+        key: String,
+        revision: Option<i64>,
+    },
     AgentChanged {
         agent_id: i64,
         revision: i64,
@@ -127,6 +132,15 @@ impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
             AgentEvent::Refresh => Self::Refresh,
             AgentEvent::ProjectsChanged => Self::ProjectsChanged,
             AgentEvent::ChannelsChanged => Self::ChannelsChanged,
+            AgentEvent::ProjectionInvalidated {
+                scope,
+                key,
+                revision,
+            } => Self::ProjectionInvalidated {
+                scope,
+                key,
+                revision,
+            },
             AgentEvent::AgentChanged { agent_id, revision } => {
                 Self::AgentChanged { agent_id, revision }
             }
@@ -242,10 +256,10 @@ impl AgentManager {
     }
 
     pub async fn settings(&self) -> Result<BoardSettings, AppError> {
-        let merge_notification_channel = self
-            .store
-            .saved_merge_notification_channel()
-            .await?
+        let saved = self.store.board_settings().await?;
+        let merge_notification_channel = saved
+            .as_ref()
+            .map(|settings| settings.merge_notification_channel.clone())
             .unwrap_or_else(|| self.merge_notification_channel_fallback.clone());
         if let Some(channel) = merge_notification_channel.as_deref() {
             self.store
@@ -254,6 +268,7 @@ impl AgentManager {
         }
         Ok(BoardSettings {
             merge_notification_channel,
+            revision: saved.map_or(0, |settings| settings.revision),
         })
     }
 
@@ -262,17 +277,15 @@ impl AgentManager {
         merge_notification_channel: Option<&str>,
     ) -> Result<BoardSettings, AppError> {
         let _operation = self.operations.lock().await;
-        let merge_notification_channel = self
+        let settings = self
             .store
             .set_merge_notification_channel(merge_notification_channel)
             .await?;
-        let settings = BoardSettings {
-            merge_notification_channel,
-        };
-        self.emit(AgentEvent::SettingsUpdated {
-            agent_id: 0,
-            data: settings.clone(),
-        })
+        self.publish_projection_invalidated(
+            multi_agent_board_protocol::ProjectionScope::Settings,
+            "board".into(),
+            Some(settings.revision),
+        )
         .await;
         Ok(settings)
     }
@@ -452,7 +465,14 @@ impl AgentManager {
         agent_id: i64,
         scopes: &[String],
     ) -> Result<Vec<String>, AppError> {
-        self.store.set_agent_scopes(agent_id, scopes).await
+        let scopes = self.store.set_agent_scopes(agent_id, scopes).await?;
+        self.publish_projection_invalidated(
+            multi_agent_board_protocol::ProjectionScope::AgentDetails,
+            agent_id.to_string(),
+            None,
+        )
+        .await;
+        Ok(scopes)
     }
 
     pub async fn channel_subscriptions(&self, agent_id: i64) -> Result<Vec<String>, AppError> {
@@ -735,6 +755,37 @@ impl AgentManager {
         let published = match self
             .store
             .agent_change_event_id(agent.id, agent.revision)
+            .await
+        {
+            Ok(id) => PublishedAgentEvent {
+                id: Some(id),
+                event,
+            },
+            Err(_) => PublishedAgentEvent {
+                id: None,
+                event: AgentEvent::Refresh,
+            },
+        };
+        let _ = self.events.send(published);
+    }
+
+    async fn publish_projection_invalidated(
+        &self,
+        scope: multi_agent_board_protocol::ProjectionScope,
+        key: String,
+        revision: Option<i64>,
+    ) {
+        let _publish = self.event_publish.lock().await;
+        let resource_type = scope.resource_type();
+        let resource_id = key.parse().ok();
+        let event = AgentEvent::ProjectionInvalidated {
+            scope,
+            key,
+            revision,
+        };
+        let published = match self
+            .store
+            .latest_projection_event_id(resource_type, resource_id)
             .await
         {
             Ok(id) => PublishedAgentEvent {

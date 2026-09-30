@@ -467,18 +467,19 @@ mod tests {
     async fn fresh_event_stream_starts_at_the_high_water_mark_without_replaying_history() {
         let store = Store::memory().await.unwrap();
         let manager = AgentManager::new(
-            store,
+            store.clone(),
             "codex".into(),
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
         );
         manager.set_settings(Some("historical")).await.unwrap();
+        let high_water = store.latest_board_event_id().await.unwrap();
         let response = router(manager)
             .oneshot(Request::get("/events").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let event = next_event(response).await;
-        assert!(event.contains("\nid: 1\n"));
+        assert!(event.contains(&format!("\nid: {high_water}\n")));
         assert!(event.contains(r#""kind":"snapshot_reset""#));
         assert!(!event.contains("historical"));
     }
@@ -486,6 +487,7 @@ mod tests {
     #[tokio::test]
     async fn event_stream_replays_missed_events_in_order_with_sse_ids() {
         let store = Store::memory().await.unwrap();
+        let cursor = store.latest_board_event_id().await.unwrap();
         let manager = AgentManager::new(
             store,
             "codex".into(),
@@ -498,22 +500,27 @@ mod tests {
         let response = router(manager)
             .oneshot(
                 Request::get("/events")
-                    .header("last-event-id", "0")
+                    .header("last-event-id", cursor)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         let mut body = Box::pin(response.into_body().into_data_stream());
-        for (id, channel) in [(1, "first"), (2, "second")] {
-            let event = poll_fn(|context| Pin::new(&mut body).poll_next(context))
-                .await
-                .unwrap()
-                .unwrap();
-            let event = String::from_utf8(event.to_vec()).unwrap();
-            assert!(event.contains(&format!("\nid: {id}\n")));
-            assert!(event.contains("\"kind\":\"settings_updated\""));
-            assert!(event.contains(&format!("\"merge_notification_channel\":\"{channel}\"")));
+        for revision in [1, 2] {
+            loop {
+                let event = poll_fn(|context| Pin::new(&mut body).poll_next(context))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let event = String::from_utf8(event.to_vec()).unwrap();
+                if event.contains("\"kind\":\"projection_invalidated\"")
+                    && event.contains("\"scope\":\"settings\"")
+                {
+                    assert!(event.contains(&format!("\"revision\":{revision}")));
+                    break;
+                }
+            }
         }
     }
 
@@ -525,6 +532,7 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("board-events-{unique}.sqlite3"));
         let store = Store::open(&path).await.unwrap();
+        let cursor = store.latest_board_event_id().await.unwrap();
         let manager = AgentManager::new(
             store.clone(),
             "codex".into(),
@@ -545,16 +553,26 @@ mod tests {
         let response = router(manager)
             .oneshot(
                 Request::get("/events")
-                    .header("last-event-id", "0")
+                    .header("last-event-id", cursor)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        let event = next_event(response).await;
-        assert!(event.contains("\nid: 1\n"));
-        assert!(event.contains("\"merge_notification_channel\":\"durable\""));
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        loop {
+            let event = poll_fn(|context| Pin::new(&mut body).poll_next(context))
+                .await
+                .unwrap()
+                .unwrap();
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            if event.contains("\"kind\":\"projection_invalidated\"")
+                && event.contains("\"scope\":\"settings\"")
+            {
+                break;
+            }
+        }
         store.close().await;
         std::fs::remove_file(path).unwrap();
     }
@@ -562,6 +580,7 @@ mod tests {
     #[tokio::test]
     async fn lagged_event_stream_catches_up_from_the_durable_log() {
         let store = Store::memory().await.unwrap();
+        let cursor = store.latest_board_event_id().await.unwrap();
         let manager = AgentManager::new(
             store,
             "codex".into(),
@@ -571,22 +590,29 @@ mod tests {
         let response = router(manager.clone())
             .oneshot(
                 Request::get("/events")
-                    .header("last-event-id", "0")
+                    .header("last-event-id", cursor)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        for index in 0..600 {
-            manager
-                .set_settings(Some(&format!("channel-{index}")))
-                .await
-                .unwrap();
+        for _ in 0..600 {
+            manager.set_settings(Some("lag-channel")).await.unwrap();
         }
 
-        let event = next_event(response).await;
-        assert!(event.contains("\nid: 1\n"));
-        assert!(event.contains("\"merge_notification_channel\":\"channel-0\""));
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        loop {
+            let event = poll_fn(|context| Pin::new(&mut body).poll_next(context))
+                .await
+                .unwrap()
+                .unwrap();
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            if event.contains("\"kind\":\"projection_invalidated\"")
+                && event.contains("\"scope\":\"settings\"")
+            {
+                break;
+            }
+        }
     }
 
     #[tokio::test]
@@ -596,11 +622,13 @@ mod tests {
             agent_id: 0,
             data: protocol::BoardSettings {
                 merge_notification_channel: None,
+                revision: 1,
             },
         };
         for _ in 0..=BOARD_EVENT_RETENTION {
             store.append_board_event(&protocol_event).await.unwrap();
         }
+        let latest = store.latest_board_event_id().await.unwrap();
         let manager = AgentManager::new(
             store,
             "codex".into(),
@@ -618,7 +646,7 @@ mod tests {
             .unwrap();
 
         let event = next_event(response).await;
-        assert!(event.contains(&format!("\nid: {}\n", BOARD_EVENT_RETENTION + 1)));
+        assert!(event.contains(&format!("\nid: {latest}\n")));
         assert!(
             event.contains(r#""kind":"snapshot_reset","data":{"scopes":["board","messages"]}"#)
         );

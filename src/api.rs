@@ -1470,6 +1470,7 @@ mod tests {
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
         );
+        let cursor = store.latest_board_event_id().await.unwrap();
         let app = router(store, manager.clone()).merge(crate::agent_api::router(manager));
 
         let channel = app
@@ -1524,30 +1525,29 @@ mod tests {
         let response = app
             .oneshot(
                 Request::get("/events")
-                    .header("last-event-id", "0")
+                    .header("last-event-id", cursor)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         let mut body = Box::pin(response.into_body().into_data_stream());
-        for (id, kind) in [
-            (1, "channels_changed"),
-            (2, "projects_changed"),
-            (3, "projects_changed"),
-            (4, "projects_changed"),
-        ] {
-            let chunk = tokio::time::timeout(
-                Duration::from_secs(2),
-                poll_fn(|context| Pin::new(&mut body).poll_next(context)),
-            )
-            .await
-            .expect("replayed event should arrive")
-            .unwrap()
-            .unwrap();
-            let event = String::from_utf8(chunk.to_vec()).unwrap();
-            assert!(event.contains(&format!("\"kind\":\"{kind}\"")));
-            assert!(event.contains(&format!("\nid: {id}\n")));
+        for scope in ["channels", "projects", "projects", "projects"] {
+            loop {
+                let chunk = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+                )
+                .await
+                .expect("replayed event should arrive")
+                .unwrap()
+                .unwrap();
+                let event = String::from_utf8(chunk.to_vec()).unwrap();
+                if event.contains("\"kind\":\"projection_invalidated\"") {
+                    assert!(event.contains(&format!("\"scope\":\"{scope}\"")));
+                    break;
+                }
+            }
         }
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -1632,26 +1632,30 @@ mod tests {
             .await
             .unwrap();
         let mut body = Box::pin(response.into_body().into_data_stream());
-        for (offset, title, state, revision) in [
-            (1, "Live ticket", "todo", 1),
-            (2, "Live ticket", "in_progress", 2),
-            (3, "Claimable ticket", "todo", 1),
-            (4, "Claimable ticket", "in_progress", 2),
+        for (ticket_id, revision) in [
+            (created["id"].as_i64().unwrap(), 1),
+            (created["id"].as_i64().unwrap(), 2),
+            (claimable["id"].as_i64().unwrap(), 1),
+            (claimable["id"].as_i64().unwrap(), 2),
         ] {
-            let chunk = tokio::time::timeout(
-                Duration::from_secs(2),
-                poll_fn(|context| Pin::new(&mut body).poll_next(context)),
-            )
-            .await
-            .expect("replayed ticket event should arrive")
-            .unwrap()
-            .unwrap();
-            let event = String::from_utf8(chunk.to_vec()).unwrap();
-            assert!(event.contains("\"kind\":\"ticket_updated\""));
-            assert!(event.contains(&format!("\nid: {}\n", cursor + offset)));
-            assert!(event.contains(&format!("\"title\":\"{title}\"")));
-            assert!(event.contains(&format!("\"state\":\"{state}\"")));
-            assert!(event.contains(&format!("\"revision\":{revision}")));
+            loop {
+                let chunk = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+                )
+                .await
+                .expect("replayed ticket invalidation should arrive")
+                .unwrap()
+                .unwrap();
+                let event = String::from_utf8(chunk.to_vec()).unwrap();
+                if event.contains("\"kind\":\"projection_invalidated\"")
+                    && event.contains("\"scope\":\"tickets\"")
+                {
+                    assert!(event.contains(&format!("\"key\":\"{ticket_id}\"")));
+                    assert!(event.contains(&format!("\"revision\":{revision}")));
+                    break;
+                }
+            }
         }
     }
 
@@ -2602,7 +2606,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let event = events.recv().await.unwrap();
-        assert_eq!(event.id, Some(1));
+        assert!(event.id.is_some());
         let crate::agent_runtime::AgentEvent::BoardMessage { agent_id, data } = event.event else {
             panic!("expected board message event");
         };

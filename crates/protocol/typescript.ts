@@ -1,7 +1,10 @@
 // Generated from crates/protocol/src/lib.rs. Do not edit.
 export interface BoardSettings {
   merge_notification_channel: string | null;
+  revision: number;
 }
+
+export type ProjectionScope = "tickets" | "ticket_activity" | "projects" | "channels" | "settings" | "board_messages" | "agent_messages" | "agent_details";
 
 export interface SetBoardSettingsRequest {
   merge_notification_channel?: string | null;
@@ -313,6 +316,7 @@ export type AgentEvent =
   | { kind: "snapshot_reset"; data: SnapshotReset }
   | { kind: "projects_changed" }
   | { kind: "channels_changed" }
+  | { kind: "projection_invalidated"; scope: ProjectionScope; key: string; revision: number | null }
   | { kind: "agent_changed"; agent_id: number; revision: number }
   | { kind: "agent_created"; agent_id: number; data: Agent }
   | { kind: "agent_updated"; agent_id: number; data: Agent }

@@ -9,7 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { App } from "./App";
-import type { Agent, Project, Ticket, TicketActivity } from "./types";
+import type { Agent, BoardSettings as Settings, Project, Ticket, TicketActivity } from "./types";
 
 vi.mock("./api", () => ({
   api: {
@@ -23,6 +23,7 @@ vi.mock("./api", () => ({
     channels: vi.fn(),
     projects: vi.fn(),
     settings: vi.fn(),
+    setSettings: vi.fn(),
     tickets: vi.fn(),
     ticket: vi.fn(),
     ticketActivity: vi.fn(async () => ({ entries: [], has_more: false })),
@@ -122,6 +123,11 @@ describe("App agent routes", () => {
     vi.mocked(api.projects).mockResolvedValue([]);
     vi.mocked(api.settings).mockResolvedValue({
       merge_notification_channel: null,
+      revision: 0,
+    });
+    vi.mocked(api.setSettings).mockResolvedValue({
+      merge_notification_channel: null,
+      revision: 1,
     });
     vi.mocked(api.tickets).mockResolvedValue({ tickets: [], has_more: false });
     vi.mocked(api.ticket).mockResolvedValue(ticket);
@@ -656,7 +662,7 @@ describe("App agent routes", () => {
         data: JSON.stringify({
           agent_id: 0,
           kind: "settings_updated",
-          data: { merge_notification_channel: "general" },
+          data: { merge_notification_channel: "general", revision: 1 },
         }),
       } as MessageEvent);
     });
@@ -1079,6 +1085,46 @@ describe("App agent routes", () => {
       (screen.getByLabelText("Merge notification channel") as HTMLInputElement)
         .value,
     ).toBe("release-draft");
+  });
+
+  it("does not let a delayed settings mutation overwrite a newer invalidation refresh", async () => {
+    window.history.replaceState(null, "", "#settings");
+    vi.mocked(api.settings).mockResolvedValueOnce({
+      merge_notification_channel: "initial",
+      revision: 1,
+    });
+    let resolveSave!: (settings: Settings) => void;
+    vi.mocked(api.setSettings).mockReturnValueOnce(
+      new Promise((resolve) => { resolveSave = resolve; }),
+    );
+    render(<App />);
+    const input = await screen.findByLabelText("Merge notification channel");
+    fireEvent.change(input, { target: { value: "local-save" } });
+    fireEvent.submit(input.closest("form")!);
+
+    vi.mocked(api.settings).mockResolvedValueOnce({
+      merge_notification_channel: "remote-newer",
+      revision: 3,
+    });
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          kind: "projection_invalidated",
+          scope: "settings",
+          key: "board",
+          revision: 3,
+        }),
+      } as MessageEvent);
+    });
+    await waitFor(() =>
+      expect((input as HTMLInputElement).value).toBe("remote-newer"),
+    );
+
+    await act(async () => resolveSave({
+      merge_notification_channel: "local-save",
+      revision: 2,
+    }));
+    expect((input as HTMLInputElement).value).toBe("remote-newer");
   });
 
   it("preserves a dirty ticket when that ticket changes remotely", async () => {

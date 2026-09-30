@@ -16,11 +16,12 @@ describe("BoardSettings", () => {
   it("selects or enters a channel and clears it to disable notifications", async () => {
     vi.mocked(api.setSettings).mockResolvedValue({
       merge_notification_channel: "release-notes",
+      revision: 2,
     });
     const onChanged = vi.fn().mockResolvedValue(undefined);
     render(
       <BoardSettings
-        settings={{ merge_notification_channel: "merges" }}
+        settings={{ merge_notification_channel: "merges", revision: 1 }}
         channels={[
           { name: "general", description: "", most_recent_message_at: null },
           { name: "merges", description: "", most_recent_message_at: null },
@@ -61,7 +62,7 @@ describe("BoardSettings", () => {
     const onError = vi.fn();
     render(
       <BoardSettings
-        settings={{ merge_notification_channel: "merges" }}
+        settings={{ merge_notification_channel: "merges", revision: 1 }}
         channels={[]}
         onChanged={async () => {}}
         onError={onError}
@@ -85,6 +86,7 @@ describe("BoardSettings", () => {
 
     vi.mocked(api.setSettings).mockResolvedValueOnce({
       merge_notification_channel: "release-notes",
+      revision: 2,
     });
     fireEvent.submit(input.closest("form")!);
     expect(await screen.findByText("Saved")).toBeTruthy();
