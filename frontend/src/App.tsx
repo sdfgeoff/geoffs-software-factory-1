@@ -100,17 +100,22 @@ export function newerSettings(current: Settings | null, update: Settings) {
 function reconcileBufferedActivity(
   summary: TicketSummary,
   activity: Record<number, TicketActivity>,
+  invalidatedIds: ReadonlySet<number> = new Set(),
 ) {
-  const newer = Object.values(activity).filter(
-    (entry) =>
-      entry.ticket_id === summary.id &&
-      entry.id > (summary.latest_activity_id ?? 0),
+  const newerIds = new Set(
+    Object.values(activity)
+      .filter((entry) => entry.ticket_id === summary.id)
+      .map((entry) => entry.id),
+  );
+  invalidatedIds.forEach((id) => newerIds.add(id));
+  const newer = [...newerIds].filter(
+    (id) => id > (summary.latest_activity_id ?? 0),
   );
   if (newer.length === 0) return summary;
   return {
     ...summary,
     activity_count: summary.activity_count + newer.length,
-    latest_activity_id: Math.max(...newer.map((entry) => entry.id)),
+    latest_activity_id: Math.max(...newer),
   };
 }
 
@@ -210,6 +215,7 @@ export function App() {
     Record<number, TicketActivity>
   >({});
   const liveTicketActivityRef = useRef<Record<number, TicketActivity>>({});
+  const invalidatedTicketActivityIds = useRef(new Map<number, Set<number>>());
   const seenTicketActivityIds = useRef(new Set<number>());
   const [missingTicketIds, setMissingTicketIds] = useState<Set<number>>(() => new Set());
   const [ticketDetailRepair, setTicketDetailRepair] = useState(0);
@@ -244,6 +250,9 @@ export function App() {
       : null;
   const activeAgentIdRef = useRef(activeAgentId);
   activeAgentIdRef.current = activeAgentId;
+  const visibleAgentId = route.view === "agents" ? route.agentId : null;
+  const visibleAgentIdRef = useRef(visibleAgentId);
+  visibleAgentIdRef.current = visibleAgentId;
   const activeChannel = route.view === "messages" ? route.channel : null;
   const activeChannelRef = useRef(activeChannel);
   activeChannelRef.current = activeChannel;
@@ -270,7 +279,11 @@ export function App() {
       mergeTicketSummaries(
         current,
         updates.map((summary) =>
-          reconcileBufferedActivity(summary, liveTicketActivityRef.current),
+          reconcileBufferedActivity(
+            summary,
+            liveTicketActivityRef.current,
+            invalidatedTicketActivityIds.current.get(summary.id),
+          ),
         ),
       ),
     [],
@@ -559,6 +572,25 @@ export function App() {
               if (numericKey) void refreshTicket(numericKey, event.revision ?? 0);
               break;
             case "ticket_activity":
+              if (numericKey && event.revision) {
+                const activityId = event.revision;
+                const ids = invalidatedTicketActivityIds.current.get(numericKey) ?? new Set();
+                ids.add(activityId);
+                invalidatedTicketActivityIds.current.set(numericKey, ids);
+                setTickets((current) =>
+                  current.map((ticket) =>
+                    ticket.id === numericKey
+                      ? reconcileBufferedActivity(
+                          ticket,
+                          liveTicketActivityRef.current,
+                          ids,
+                        )
+                      : ticket,
+                  ),
+                );
+              } else if (numericKey) {
+                scheduleReload();
+              }
               if (numericKey === activeTicketIdRef.current) {
                 setTicketDetailRepair((value) => value + 1);
               }
@@ -584,7 +616,7 @@ export function App() {
               }
               break;
             case "agent_details":
-              if (numericKey === activeAgentIdRef.current) {
+              if (numericKey === visibleAgentIdRef.current) {
                 setAgentDetailRefresh((value) => value + 1);
               }
               break;

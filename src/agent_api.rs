@@ -323,6 +323,8 @@ async fn events(
     let mut receiver = manager.subscribe();
     let initial = manager.replay_events(cursor).await?;
     let stream = async_stream::stream! {
+        let mut outbox_tail = tokio::time::interval(Duration::from_millis(100));
+        outbox_tail.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_sent_id = cursor.unwrap_or_default();
         match initial {
             AgentEventReplay::Events(events) => {
@@ -337,34 +339,34 @@ async fn events(
             }
         }
         loop {
-            match receiver.recv().await {
-                Ok(published) => {
-                    if published.id.is_some_and(|id| id <= last_sent_id) {
-                        continue;
+            let should_replay = tokio::select! {
+                _ = outbox_tail.tick() => true,
+                received = receiver.recv() => match received {
+                    Ok(published) if published.id.is_none() => {
+                        let event = protocol::AgentEvent::try_from(published.event)
+                            .unwrap_or(protocol::AgentEvent::Refresh);
+                        yield Ok(sse_event(None, event));
+                        false
                     }
-                    let event = protocol::AgentEvent::try_from(published.event)
-                        .unwrap_or(protocol::AgentEvent::Refresh);
-                    if let Some(id) = published.id {
-                        last_sent_id = id;
-                    }
-                    yield Ok(sse_event(published.id, event));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    match manager.replay_events(Some(last_sent_id)).await {
-                        Ok(AgentEventReplay::Events(events)) => {
-                            for event in events {
-                                last_sent_id = event.id;
-                                yield Ok(sse_event(Some(event.id), event.event));
-                            }
-                        }
-                        Ok(AgentEventReplay::Reset { latest_id }) => {
-                            last_sent_id = latest_id;
-                            yield Ok(sse_event(Some(latest_id), snapshot_reset()));
-                        }
-                        Err(_) => yield Ok(sse_event(None, snapshot_reset())),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+            };
+            if !should_replay {
+                continue;
+            }
+            match manager.replay_events(Some(last_sent_id)).await {
+                Ok(AgentEventReplay::Events(events)) => {
+                    for event in events {
+                        last_sent_id = event.id;
+                        yield Ok(sse_event(Some(event.id), event.event));
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(AgentEventReplay::Reset { latest_id }) => {
+                    last_sent_id = latest_id;
+                    yield Ok(sse_event(Some(latest_id), snapshot_reset()));
+                }
+                Err(_) => yield Ok(sse_event(None, snapshot_reset())),
             }
         }
     };
@@ -482,6 +484,80 @@ mod tests {
         assert!(event.contains(&format!("\nid: {high_water}\n")));
         assert!(event.contains(r#""kind":"snapshot_reset""#));
         assert!(!event.contains("historical"));
+    }
+
+    #[tokio::test]
+    async fn connected_event_stream_tails_store_commits_without_a_manager_broadcast() {
+        let store = Store::memory().await.unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        let response = router(manager)
+            .oneshot(Request::get("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut body = Box::pin(response.into_body().into_data_stream());
+        let initial = poll_fn(|context| Pin::new(&mut body).poll_next(context))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8(initial.to_vec())
+                .unwrap()
+                .contains("\"kind\":\"snapshot_reset\"")
+        );
+
+        store
+            .create_channel("tail-only", "Written directly through Store")
+            .await
+            .unwrap();
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(2),
+            poll_fn(|context| Pin::new(&mut body).poll_next(context)),
+        )
+        .await
+        .expect("the connected stream should tail the committed outbox row")
+        .unwrap()
+        .unwrap();
+        let event = String::from_utf8(event.to_vec()).unwrap();
+        assert!(event.contains("\"kind\":\"projection_invalidated\""));
+        assert!(event.contains("\"scope\":\"channels\""));
+        assert!(event.contains("\"key\":\"tail-only\""));
+    }
+
+    #[tokio::test]
+    async fn mutable_broadcast_is_only_a_wake_for_its_transactional_invalidation() {
+        let store = Store::memory().await.unwrap();
+        let cursor = store.latest_board_event_id().await.unwrap();
+        let manager = AgentManager::new(
+            store.clone(),
+            "codex".into(),
+            "multi-agent-board".into(),
+            "http://127.0.0.1:1/api".into(),
+        );
+        store
+            .create_channel("single-event", "One durable invalidation")
+            .await
+            .unwrap();
+        manager.emit_channels_changed().await;
+
+        let crate::store::BoardEventReplay::Events(events) =
+            store.replay_board_events(Some(cursor)).await.unwrap()
+        else {
+            panic!("the channel invalidation should replay");
+        };
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            protocol::AgentEvent::ProjectionInvalidated {
+                scope: protocol::ProjectionScope::Channels,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

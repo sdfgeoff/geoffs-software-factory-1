@@ -732,6 +732,24 @@ impl AgentManager {
 
     async fn emit(&self, event: AgentEvent) {
         let _publish = self.event_publish.lock().await;
+        if let Some((resource_type, resource_id)) = event.transactional_projection() {
+            let published = match self
+                .store
+                .latest_projection_event_id(resource_type, resource_id)
+                .await
+            {
+                Ok(id) => PublishedAgentEvent {
+                    id: Some(id),
+                    event,
+                },
+                Err(_) => PublishedAgentEvent {
+                    id: None,
+                    event: AgentEvent::Refresh,
+                },
+            };
+            let _ = self.events.send(published);
+            return;
+        }
         let (id, event) = if event.is_replayable() {
             match multi_agent_board_protocol::AgentEvent::try_from(event.clone()) {
                 Ok(protocol_event) => match self.store.append_board_event(&protocol_event).await {
@@ -802,6 +820,24 @@ impl AgentManager {
 }
 
 impl AgentEvent {
+    fn transactional_projection(&self) -> Option<(&'static str, Option<i64>)> {
+        match self {
+            Self::ProjectsChanged => Some(("projects", None)),
+            Self::ChannelsChanged => Some(("channels", None)),
+            Self::TicketUpdated { data, .. }
+            | Self::ExternalReviewApproved { data, .. }
+            | Self::ExternalChangeUpdated { data, .. }
+            | Self::ExternalMergeReturned { data, .. }
+            | Self::ExternalMergeCompleted { data, .. } => Some(("tickets", Some(data.id))),
+            Self::SettingsUpdated { .. } => Some(("settings", None)),
+            Self::ChannelSubscriptions { agent_id, .. }
+            | Self::ProjectSubscriptions { agent_id, .. } => {
+                Some(("agent_details", Some(*agent_id)))
+            }
+            _ => None,
+        }
+    }
+
     fn is_replayable(&self) -> bool {
         !matches!(
             self,

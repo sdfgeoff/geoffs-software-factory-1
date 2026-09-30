@@ -25,9 +25,10 @@ WHEN OLD.revision != NEW.revision BEGIN
         'key', CAST(NEW.id AS TEXT), 'revision', NEW.revision), 'tickets', NEW.id, NEW.revision);
 END;
 CREATE TRIGGER ticket_activity_live_sync AFTER INSERT ON ticket_activity BEGIN
-    INSERT INTO board_change_events(event_json, resource_type, resource_id)
+    INSERT INTO board_change_events(event_json, resource_type, resource_id, resource_revision)
     VALUES (json_object('kind', 'projection_invalidated', 'scope', 'ticket_activity',
-        'key', CAST(NEW.ticket_id AS TEXT)), 'ticket_activity', NEW.ticket_id);
+        'key', CAST(NEW.ticket_id AS TEXT), 'revision', NEW.id),
+        'ticket_activity', NEW.ticket_id, NEW.id);
 END;
 CREATE TRIGGER projects_live_sync_insert AFTER INSERT ON projects BEGIN
     INSERT INTO board_change_events(event_json, resource_type, resource_id)

@@ -455,6 +455,81 @@ describe("App agent routes", () => {
     expect(screen.getByText("1 timeline item")).toBeTruthy();
   });
 
+  it("updates a ticket card once from a replay-only activity invalidation", async () => {
+    window.history.replaceState(null, "", "#board?project=2");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    vi.mocked(api.tickets).mockImplementation(async ({ state } = {}) => ({
+      tickets: state === ticket.state
+        ? [{
+            ...ticket,
+            has_review_feedback: false,
+            activity_count: 0,
+            latest_activity_id: null,
+          }]
+        : [],
+      has_more: false,
+    }));
+    render(<App />);
+    await screen.findByText(ticket.title);
+
+    const invalidation = {
+      data: JSON.stringify({
+        kind: "projection_invalidated",
+        scope: "ticket_activity",
+        key: String(ticket.id),
+        revision: 72,
+      }),
+    } as MessageEvent;
+    act(() => {
+      latestEventSource.onmessage?.(invalidation);
+      latestEventSource.onmessage?.(invalidation);
+    });
+
+    expect(screen.getByText("1 timeline item")).toBeTruthy();
+    expect(screen.queryByText("2 timeline items")).toBeNull();
+  });
+
+  it("retains a replay-only activity invalidation across initial summary loading", async () => {
+    window.history.replaceState(null, "", "#board?project=2");
+    vi.mocked(api.projects).mockResolvedValue([project]);
+    let resolveSummary!: (value: Awaited<ReturnType<typeof api.tickets>>) => void;
+    const summary = new Promise<Awaited<ReturnType<typeof api.tickets>>>((resolve) => {
+      resolveSummary = resolve;
+    });
+    vi.mocked(api.tickets).mockImplementation(({ state } = {}) =>
+      state === ticket.state
+        ? summary
+        : Promise.resolve({ tickets: [], has_more: false }),
+    );
+    render(<App />);
+    await waitFor(() => expect(api.tickets).toHaveBeenCalledTimes(5));
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          kind: "projection_invalidated",
+          scope: "ticket_activity",
+          key: String(ticket.id),
+          revision: 73,
+        }),
+      } as MessageEvent);
+    });
+    await act(async () => {
+      resolveSummary({
+        tickets: [{
+          ...ticket,
+          has_review_feedback: false,
+          activity_count: 0,
+          latest_activity_id: null,
+        }],
+        has_more: false,
+      });
+      await summary;
+    });
+
+    expect(await screen.findByText("1 timeline item")).toBeTruthy();
+  });
+
   it.each([
     ["older summary", 0, null],
     ["summary containing the event", 1, 50],
@@ -619,6 +694,27 @@ describe("App agent routes", () => {
     expect(await screen.findByText("Current history")).toBeTruthy();
     expect(api.agentMessages).toHaveBeenCalledTimes(1);
     expect(api.agentMessages).toHaveBeenCalledWith(agent.id, { limit: 50 });
+  });
+
+  it("refreshes agent details from an invalidation while settings are visible", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Agent settings" });
+    await waitFor(() => expect(api.agentScopes).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          kind: "projection_invalidated",
+          scope: "agent_details",
+          key: String(agent.id),
+        }),
+      } as MessageEvent);
+    });
+
+    await waitFor(() => expect(api.agentScopes).toHaveBeenCalledTimes(2));
+    expect(api.agentChannelSubscriptions).toHaveBeenCalledTimes(2);
+    expect(api.agentProjectSubscriptions).toHaveBeenCalledTimes(2);
+    expect(api.agentProjectWorktrees).toHaveBeenCalledTimes(2);
   });
 
   it("shows a useful fallback for a missing entity", async () => {
