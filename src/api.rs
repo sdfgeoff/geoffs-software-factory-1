@@ -1556,6 +1556,10 @@ mod tests {
     async fn ticket_creation_and_movement_replay_after_reconnect() {
         let store = Store::memory().await.unwrap();
         let worker = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        let cursor = store
+            .agent_change_event_id(worker.id, worker.revision)
+            .await
+            .unwrap();
         let manager = AgentManager::new(
             store.clone(),
             "codex".into(),
@@ -1621,14 +1625,14 @@ mod tests {
         let response = app
             .oneshot(
                 Request::get("/events")
-                    .header("last-event-id", "0")
+                    .header("last-event-id", cursor)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         let mut body = Box::pin(response.into_body().into_data_stream());
-        for (id, title, state, revision) in [
+        for (offset, title, state, revision) in [
             (1, "Live ticket", "todo", 1),
             (2, "Live ticket", "in_progress", 2),
             (3, "Claimable ticket", "todo", 1),
@@ -1644,7 +1648,7 @@ mod tests {
             .unwrap();
             let event = String::from_utf8(chunk.to_vec()).unwrap();
             assert!(event.contains("\"kind\":\"ticket_updated\""));
-            assert!(event.contains(&format!("\nid: {id}\n")));
+            assert!(event.contains(&format!("\nid: {}\n", cursor + offset)));
             assert!(event.contains(&format!("\"title\":\"{title}\"")));
             assert!(event.contains(&format!("\"state\":\"{state}\"")));
             assert!(event.contains(&format!("\"revision\":{revision}")));

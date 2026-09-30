@@ -42,6 +42,7 @@ const agent: Agent = {
   wake_on_pending_review: false,
   idle_heartbeat_minutes: null,
   idle_since: 0,
+  revision: 1,
   created_at: 0,
   updated_at: 0,
 };

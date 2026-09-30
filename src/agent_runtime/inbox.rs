@@ -126,11 +126,7 @@ impl AgentManager {
         if let Some(running) = self.retire_process(agent_id).await {
             let _ = running.child.lock().await.kill().await;
         }
-        self.emit(AgentEvent::AgentUpdated {
-            agent_id: agent.id,
-            data: agent.clone(),
-        })
-        .await;
+        self.publish_agent_changed(&agent).await;
         Ok(agent)
     }
 
@@ -164,11 +160,7 @@ impl AgentManager {
         if let Some(running) = self.retire_process(agent_id).await {
             let _ = running.child.lock().await.kill().await;
         }
-        self.emit(AgentEvent::AgentUpdated {
-            agent_id,
-            data: agent.clone(),
-        })
-        .await;
+        self.publish_agent_changed(&agent).await;
         Ok(agent)
     }
 
@@ -248,9 +240,11 @@ impl AgentManager {
                     .pointer("/turn/id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| AppError::internal("Codex did not return a turn ID"))?;
-                self.store
+                let agent = self
+                    .store
                     .update_agent_runtime(agent.id, AgentState::Running, None, Some(turn_id), None)
                     .await?;
+                self.publish_agent_changed(&agent).await;
                 Ok(())
             }
             Err(error) => {
@@ -316,11 +310,13 @@ impl AgentManager {
                 AgentState::Paused | AgentState::Error => unreachable!(),
             };
             if delivered.is_err() {
-                if ticket_transition_id(&event).is_some() {
-                    let _ = self
+                if ticket_transition_id(&event).is_some()
+                    && let Ok(reverted) = self
                         .store
                         .set_agent_active_project(agent.id, agent.active_project_id)
-                        .await;
+                        .await
+                {
+                    self.publish_agent_changed(&reverted).await;
                 }
                 let _ = self.store.retry_wake_event(event.id).await;
                 return;
@@ -368,11 +364,7 @@ impl AgentManager {
             }
             let _ = running.child.lock().await.kill().await;
         }
-        self.emit(AgentEvent::AgentUpdated {
-            agent_id,
-            data: agent.clone(),
-        })
-        .await;
+        self.publish_agent_changed(&agent).await;
         Ok(agent)
     }
 
@@ -382,11 +374,7 @@ impl AgentManager {
             .store
             .update_agent_runtime(agent_id, AgentState::Idle, None, None, None)
             .await?;
-        self.emit(AgentEvent::AgentUpdated {
-            agent_id,
-            data: agent.clone(),
-        })
-        .await;
+        self.publish_agent_changed(&agent).await;
         drop(operation);
         let manager = self.clone();
         tokio::spawn(async move { manager.deliver_pending(agent_id).await });
@@ -444,9 +432,8 @@ impl AgentManager {
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .ok_or_else(|| AppError::internal("Codex did not return a thread ID"))?;
-        self.store
-            .update_agent_runtime(agent.id, AgentState::Running, Some(thread_id), None, None)
-            .await?;
+        let agent = self.store.set_agent_thread(agent.id, thread_id).await?;
+        self.publish_agent_changed(&agent).await;
         let _ = running
             .rpc
             .request(
@@ -527,10 +514,6 @@ impl AgentManager {
     async fn handle_event(&self, agent_id: i64, rpc: &RpcPeer, event: Value) {
         let method = event.get("method").and_then(Value::as_str).unwrap_or("");
         if event.get("id").is_some() && method.contains("request") {
-            let _ = self
-                .store
-                .update_agent_runtime(agent_id, AgentState::AwaitingApproval, None, None, None)
-                .await;
             self.emit(AgentEvent::ApprovalDeclined { agent_id }).await;
             let _ = rpc
                 .respond(event["id"].clone(), json!({"decision": "decline"}))
@@ -584,11 +567,7 @@ impl AgentManager {
                     .finish_agent_turn(agent_id, turn_id, state, error)
                     .await
                 {
-                    self.emit(AgentEvent::AgentUpdated {
-                        agent_id,
-                        data: agent,
-                    })
-                    .await;
+                    self.publish_agent_changed(&agent).await;
                     if state == AgentState::Idle {
                         let manager = self.clone();
                         tokio::spawn(async move { manager.deliver_pending(agent_id).await });
@@ -618,11 +597,7 @@ impl AgentManager {
             .update_agent_runtime(agent_id, AgentState::Error, None, None, Some(message))
             .await
         {
-            self.emit(AgentEvent::AgentUpdated {
-                agent_id,
-                data: agent,
-            })
-            .await;
+            self.publish_agent_changed(&agent).await;
         }
     }
 
@@ -1261,7 +1236,8 @@ mod tests {
 
     #[tokio::test]
     async fn messages_start_a_turn_for_an_idle_agent() {
-        let (manager, agent, _rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
+        let (manager, agent, rpc, server) = manager_with_fake_agent(AgentState::Idle, None).await;
+        let mut events = manager.subscribe();
         tokio::spawn(async move {
             let (reader, mut writer) = split(server);
             let mut lines = BufReader::new(reader).lines();
@@ -1284,6 +1260,66 @@ mod tests {
 
         assert_eq!(updated.state, AgentState::Running);
         assert_eq!(updated.active_turn_id.as_deref(), Some("turn-2"));
+        loop {
+            let published = events.recv().await.unwrap();
+            if let AgentEvent::AgentChanged { agent_id, revision } = published.event {
+                assert_eq!(agent_id, agent.id);
+                assert_eq!(revision, updated.revision);
+                assert!(published.id.is_some());
+                break;
+            }
+        }
+
+        manager
+            .handle_event(
+                agent.id,
+                &rpc,
+                json!({
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-2", "status": "completed"}}
+                }),
+            )
+            .await;
+        let idle = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(idle.state, AgentState::Idle);
+        assert!(idle.active_turn_id.is_none());
+        let published = events.recv().await.unwrap();
+        assert!(matches!(
+            published.event,
+            AgentEvent::AgentChanged { agent_id, revision }
+                if agent_id == agent.id && revision == idle.revision
+        ));
+    }
+
+    #[tokio::test]
+    async fn automatically_declined_approvals_leave_the_active_turn_running() {
+        let (manager, agent, rpc, mut server) =
+            manager_with_fake_agent(AgentState::Running, Some("turn-1")).await;
+        let before = manager.store.agent(agent.id).await.unwrap().unwrap();
+        let mut events = manager.subscribe();
+
+        manager
+            .handle_event(
+                agent.id,
+                &rpc,
+                json!({"id": 9, "method": "item/commandExecution/requestApproval"}),
+            )
+            .await;
+
+        let mut response = String::new();
+        BufReader::new(&mut server)
+            .read_line(&mut response)
+            .await
+            .unwrap();
+        assert!(response.contains(r#""decision":"decline""#));
+        let after = manager.store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.state, AgentState::Running);
+        assert_eq!(after.active_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(after.revision, before.revision);
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            AgentEvent::ApprovalDeclined { agent_id } if agent_id == agent.id
+        ));
     }
 
     #[tokio::test]

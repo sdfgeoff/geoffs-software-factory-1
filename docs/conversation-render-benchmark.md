@@ -16,4 +16,4 @@ The before count comes from the previous inline conversation lists: each compose
 ## Repeat it
 
 1. Run `npm --prefix frontend test -- --run src/App.test.tsx src/components/AgentWorkspace.test.tsx src/components/MessageBoard.test.tsx`.
-2. Run `cargo test event_stream_uses_transport_keep_alives_without_refresh_payloads` to verify that idle SSE traffic is a transport comment rather than a refresh payload.
+2. Run `cargo test fresh_event_stream_starts_at_the_high_water_mark_without_replaying_history` to verify that a new SSE connection synchronizes once without replaying historical payloads; subsequent idle traffic remains transport-only keep-alives.

@@ -18,6 +18,7 @@ vi.mock("./api", () => ({
     agentProjectSubscriptions: vi.fn(),
     agentProjectWorktrees: vi.fn(),
     agentScopes: vi.fn(),
+    agent: vi.fn(),
     agents: vi.fn(),
     channels: vi.fn(),
     projects: vi.fn(),
@@ -44,6 +45,7 @@ const agent: Agent = {
   wake_on_pending_review: false,
   idle_heartbeat_minutes: null,
   idle_since: 0,
+  revision: 1,
   created_at: 0,
   updated_at: 0,
 };
@@ -125,6 +127,7 @@ describe("App agent routes", () => {
     vi.mocked(api.ticket).mockResolvedValue(ticket);
     vi.mocked(api.channels).mockResolvedValue([]);
     vi.mocked(api.agents).mockResolvedValue([agent]);
+    vi.mocked(api.agent).mockResolvedValue(agent);
     vi.mocked(api.agentMessages).mockResolvedValue({ messages: [], has_more: false });
     vi.mocked(api.agentProjectSubscriptions).mockResolvedValue([]);
     vi.mocked(api.agentProjectWorktrees).mockResolvedValue([]);
@@ -663,7 +666,7 @@ describe("App agent routes", () => {
     await act(() => new Promise((resolve) => window.setTimeout(resolve, 75)));
     expect(api.agents).toHaveBeenCalledTimes(1);
     expect(api.tickets).toHaveBeenCalledTimes(5);
-    expect(api.settings).toHaveBeenCalledTimes(1);
+    expect(api.settings).toHaveBeenCalledTimes(2);
 
     act(() => {
       latestEventSource.onmessage?.({
@@ -675,7 +678,7 @@ describe("App agent routes", () => {
     expect(api.projects).toHaveBeenCalledTimes(2);
     expect(api.tickets).toHaveBeenCalledTimes(10);
     expect(api.channels).toHaveBeenCalledTimes(2);
-    expect(api.settings).toHaveBeenCalledTimes(2);
+    expect(api.settings).toHaveBeenCalledTimes(3);
 
     act(() => {
       latestEventSource.onmessage?.({
@@ -691,7 +694,46 @@ describe("App agent routes", () => {
     expect(api.projects).toHaveBeenCalledTimes(3);
     expect(api.tickets).toHaveBeenCalledTimes(15);
     expect(api.channels).toHaveBeenCalledTimes(3);
-    expect(api.settings).toHaveBeenCalledTimes(3);
+    expect(api.settings).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps a revisioned agent invalidation newer than an in-flight list snapshot", async () => {
+    window.history.replaceState(null, "", "#agents/1");
+    render(<App />);
+    await screen.findByRole("heading", { name: "worker" });
+
+    let resolveStale!: (agents: Agent[]) => void;
+    vi.mocked(api.agents).mockReturnValueOnce(
+      new Promise((resolve) => { resolveStale = resolve; }),
+    );
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({ kind: "refresh" }),
+      } as MessageEvent);
+    });
+    await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
+
+    const running = {
+      ...agent,
+      state: "running" as const,
+      active_turn_id: "turn-1",
+      revision: 2,
+    };
+    vi.mocked(api.agent).mockResolvedValueOnce(running);
+    act(() => {
+      latestEventSource.onmessage?.({
+        data: JSON.stringify({
+          kind: "agent_changed",
+          agent_id: agent.id,
+          revision: running.revision,
+        }),
+      } as MessageEvent);
+    });
+    expect((await screen.findAllByText("running")).length).toBeGreaterThan(0);
+
+    await act(async () => resolveStale([agent]));
+    expect(screen.getAllByText("running").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("idle")).toHaveLength(0);
   });
 
   it("refreshes only project and channel snapshots for their durable events", async () => {

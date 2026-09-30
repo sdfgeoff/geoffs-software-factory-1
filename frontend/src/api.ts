@@ -207,6 +207,7 @@ export const api = {
       body: JSON.stringify({ author: "human", body, attachment_ids: attachmentIds }),
     }),
   agents: () => request<Agent[]>("/agents"),
+  agent: (id: number) => request<Agent>(`/agents/${id}`),
   createAgent: (name: string, projectId: number) =>
     request<Agent>("/agents", {
       method: "POST",

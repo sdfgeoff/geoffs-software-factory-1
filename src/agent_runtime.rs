@@ -34,6 +34,10 @@ pub enum AgentEvent {
     Refresh,
     ProjectsChanged,
     ChannelsChanged,
+    AgentChanged {
+        agent_id: i64,
+        revision: i64,
+    },
     AgentCreated {
         agent_id: i64,
         data: Agent,
@@ -123,6 +127,9 @@ impl TryFrom<AgentEvent> for multi_agent_board_protocol::AgentEvent {
             AgentEvent::Refresh => Self::Refresh,
             AgentEvent::ProjectsChanged => Self::ProjectsChanged,
             AgentEvent::ChannelsChanged => Self::ChannelsChanged,
+            AgentEvent::AgentChanged { agent_id, revision } => {
+                Self::AgentChanged { agent_id, revision }
+            }
             AgentEvent::AgentCreated { agent_id, data } => Self::AgentCreated {
                 agent_id,
                 data: data.into(),
@@ -363,6 +370,13 @@ impl AgentManager {
         Ok(self.store.agents().await?)
     }
 
+    pub async fn agent(&self, agent_id: i64) -> Result<Agent, AppError> {
+        self.store
+            .agent(agent_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent not found"))
+    }
+
     pub async fn project_worktrees(
         &self,
         agent_id: i64,
@@ -417,11 +431,7 @@ impl AgentManager {
             .store
             .set_agent_active_project(agent_id, Some(project.id))
             .await?;
-        self.emit(AgentEvent::AgentUpdated {
-            agent_id,
-            data: updated,
-        })
-        .await;
+        self.publish_agent_changed(&updated).await;
         Ok(Some(ProjectTransition {
             agent_id,
             ticket_id: ticket.id,
@@ -572,11 +582,7 @@ impl AgentManager {
                 idle_heartbeat_minutes,
             )
             .await?;
-        self.emit(AgentEvent::AgentUpdated {
-            agent_id,
-            data: agent.clone(),
-        })
-        .await;
+        self.publish_agent_changed(&agent).await;
         Ok(agent)
     }
 
@@ -633,11 +639,7 @@ impl AgentManager {
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        self.emit(AgentEvent::AgentCreated {
-            agent_id: agent.id,
-            data: agent.clone(),
-        })
-        .await;
+        self.publish_agent_changed(&agent).await;
         Ok(agent)
     }
 
@@ -722,6 +724,29 @@ impl AgentManager {
             (None, event)
         };
         let _ = self.events.send(PublishedAgentEvent { id, event });
+    }
+
+    async fn publish_agent_changed(&self, agent: &Agent) {
+        let _publish = self.event_publish.lock().await;
+        let event = AgentEvent::AgentChanged {
+            agent_id: agent.id,
+            revision: agent.revision,
+        };
+        let published = match self
+            .store
+            .agent_change_event_id(agent.id, agent.revision)
+            .await
+        {
+            Ok(id) => PublishedAgentEvent {
+                id: Some(id),
+                event,
+            },
+            Err(_) => PublishedAgentEvent {
+                id: None,
+                event: AgentEvent::Refresh,
+            },
+        };
+        let _ = self.events.send(published);
     }
 }
 
@@ -821,6 +846,7 @@ mod tests {
             wake_on_pending_review: false,
             idle_heartbeat_minutes: None,
             idle_since: None,
+            revision: 1,
             created_at: 0,
             updated_at: 0,
         };

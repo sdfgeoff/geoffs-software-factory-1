@@ -83,6 +83,16 @@ function mergeTicketSummaries(current: TicketSummary[], updates: TicketSummary[]
   return [...byId.values()];
 }
 
+export function mergeAgentsByRevision(current: Agent[], updates: Agent[]) {
+  const byId = new Map(current.map((agent) => [agent.id, agent]));
+  updates.forEach((agent) => {
+    if ((byId.get(agent.id)?.revision ?? -1) <= agent.revision) {
+      byId.set(agent.id, agent);
+    }
+  });
+  return [...byId.values()];
+}
+
 function reconcileBufferedActivity(
   summary: TicketSummary,
   activity: Record<number, TicketActivity>,
@@ -214,6 +224,12 @@ export function App() {
   const reloadTimer = useRef<number | null>(null);
   const deltaTimer = useRef<number | null>(null);
   const pendingDelta = useRef<{ agentId: number; text: string } | null>(null);
+  const requiredAgentRevisions = useRef(new Map<number, number>());
+  const refreshingAgents = useRef(new Set<number>());
+  const reloadGeneration = useRef(0);
+  const projectGeneration = useRef(0);
+  const channelGeneration = useRef(0);
+  const settingsGeneration = useRef(0);
   const ticketsRef = useRef(tickets);
   ticketsRef.current = tickets;
   const activeAgentId =
@@ -255,6 +271,10 @@ export function App() {
   );
 
   const reload = useCallback(async (repair = false) => {
+    const generation = ++reloadGeneration.current;
+    const startingProjectGeneration = projectGeneration.current;
+    const startingChannelGeneration = channelGeneration.current;
+    const startingSettingsGeneration = settingsGeneration.current;
     const startingRevisions = new Map(
       ticketsRef.current.map((ticket) => [ticket.id, ticket.revision]),
     );
@@ -276,7 +296,10 @@ export function App() {
           api.agents(),
           api.settings(),
         ]);
-      setProjects(nextProjects);
+      if (
+        generation === reloadGeneration.current &&
+        startingProjectGeneration === projectGeneration.current
+      ) setProjects(nextProjects);
       setTickets((current) => {
         const active = activePages.flat();
         const activeIds = new Set(active.map((ticket) => ticket.id));
@@ -288,9 +311,15 @@ export function App() {
         );
         return mergeSummaries(unchanged, active);
       });
-      setChannels(nextChannels);
-      setAgents(nextAgents);
-      setSettings(nextSettings);
+      if (
+        generation === reloadGeneration.current &&
+        startingChannelGeneration === channelGeneration.current
+      ) setChannels(nextChannels);
+      setAgents((current) => mergeAgentsByRevision(current, nextAgents));
+      if (
+        generation === reloadGeneration.current &&
+        startingSettingsGeneration === settingsGeneration.current
+      ) setSettings(nextSettings);
       setLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -352,16 +381,30 @@ export function App() {
   }, [activeTicketId, mergeSummaries, missingTicketIds, route.view, ticketDetailRepair]);
 
   const reloadProjects = useCallback(async () => {
+    const generation = ++projectGeneration.current;
     try {
-      setProjects(await api.projects());
+      const projects = await api.projects();
+      if (generation === projectGeneration.current) setProjects(projects);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
 
   const reloadChannels = useCallback(async () => {
+    const generation = ++channelGeneration.current;
     try {
-      setChannels(await api.channels());
+      const channels = await api.channels();
+      if (generation === channelGeneration.current) setChannels(channels);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  const reloadSettings = useCallback(async () => {
+    const generation = ++settingsGeneration.current;
+    try {
+      const settings = await api.settings();
+      if (generation === settingsGeneration.current) setSettings(settings);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -407,12 +450,28 @@ export function App() {
     }
   }, [historyBefore, mergeSummaries]);
   const mergeAgent = useCallback((updated: Agent) => {
-    setAgents((current) => {
-      const index = current.findIndex((agent) => agent.id === updated.id);
-      if (index < 0) return [...current, updated];
-      return current.map((agent) => agent.id === updated.id ? updated : agent);
-    });
+    setAgents((current) => mergeAgentsByRevision(current, [updated]));
   }, []);
+  const refreshAgent = useCallback(async (agentId: number, revision: number) => {
+    requiredAgentRevisions.current.set(
+      agentId,
+      Math.max(requiredAgentRevisions.current.get(agentId) ?? 0, revision),
+    );
+    if (refreshingAgents.current.has(agentId)) return;
+    refreshingAgents.current.add(agentId);
+    try {
+      while (true) {
+        const required = requiredAgentRevisions.current.get(agentId) ?? revision;
+        const agent = await api.agent(agentId);
+        mergeAgent(agent);
+        if (agent.revision >= required) break;
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      refreshingAgents.current.delete(agentId);
+    }
+  }, [mergeAgent]);
   const mergeChannel = useCallback((updated?: Channel) => {
     if (!updated) return;
     setChannels((current) =>
@@ -461,6 +520,9 @@ export function App() {
             }, 16);
           }
           break;
+        case "agent_changed":
+          void refreshAgent(event.agent_id, event.revision);
+          break;
         case "agent_updated":
         case "agent_created":
           mergeAgent(event.data);
@@ -498,7 +560,7 @@ export function App() {
           );
           break;
         case "settings_updated":
-          setSettings(event.data);
+          void reloadSettings();
           break;
         case "board_message":
           if (event.data.channel_name !== activeChannelRef.current) break;
@@ -553,7 +615,7 @@ export function App() {
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
       if (deltaTimer.current !== null) window.clearTimeout(deltaTimer.current);
     };
-  }, [mergeAgent, mergeTickets, reload, reloadChannels, reloadProjects, scheduleReload]);
+  }, [mergeAgent, mergeTickets, refreshAgent, reload, reloadChannels, reloadProjects, reloadSettings, scheduleReload]);
 
   useEffect(() => {
     pendingDelta.current = null;

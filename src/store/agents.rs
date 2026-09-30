@@ -8,8 +8,27 @@ use crate::{
 
 use super::attachments::{AttachmentOwner, attachments_for, link_attachments};
 use super::{Store, message_page_size};
+use sqlx::{Sqlite, Transaction};
 
 pub const MAX_AGENT_INSTRUCTIONS_CHARS: usize = 10_000;
+
+const AGENT_COLUMNS: &str = "id, name, instructions, state, thread_id, home_path, active_project_id, \
+    active_turn_id, last_error, wake_on_pending_work, wake_on_pending_review, \
+    idle_heartbeat_minutes, idle_since, revision, created_at, updated_at";
+
+async fn finish_agent_change(
+    mut transaction: Transaction<'_, Sqlite>,
+    id: i64,
+) -> Result<Agent, AppError> {
+    let query = format!("SELECT {AGENT_COLUMNS} FROM agents WHERE id = ?");
+    let agent: Agent = sqlx::query_as(&query)
+        .bind(id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    Store::append_agent_change_event(&mut transaction, id, agent.revision).await?;
+    transaction.commit().await?;
+    Ok(agent)
+}
 
 pub(crate) fn normalize_agent_instructions(instructions: &str) -> Result<String, AppError> {
     let instructions = instructions
@@ -83,7 +102,7 @@ impl Store {
         sqlx::query_as(
             "SELECT a.id, a.name, a.instructions, a.state, a.thread_id, a.home_path, a.active_project_id, a.active_turn_id, \
              a.last_error, a.wake_on_pending_work, a.wake_on_pending_review, a.idle_heartbeat_minutes, \
-             a.idle_since, a.created_at, a.updated_at FROM agents a \
+             a.idle_since, a.revision, a.created_at, a.updated_at FROM agents a \
              JOIN agent_scopes s ON s.agent_id = a.id \
              WHERE s.scope = ? AND a.id != ? AND a.state != 'paused' \
              ORDER BY CASE a.state WHEN 'idle' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, a.id",
@@ -97,7 +116,7 @@ impl Store {
     pub async fn agents(&self) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
-             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, revision, created_at, updated_at \
              FROM agents ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -107,7 +126,7 @@ impl Store {
     pub async fn agents_due_for_idle_heartbeat(&self, now: i64) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
-             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, revision, created_at, updated_at \
              FROM agents WHERE state = 'idle' AND idle_heartbeat_minutes IS NOT NULL \
              AND idle_since IS NOT NULL AND idle_since + idle_heartbeat_minutes * 60 <= ? \
              ORDER BY id",
@@ -120,7 +139,7 @@ impl Store {
     pub async fn agent(&self, id: i64) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
-             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, revision, created_at, updated_at \
              FROM agents WHERE id = ?",
         )
         .bind(id)
@@ -131,7 +150,7 @@ impl Store {
     pub async fn agent_named(&self, name: &str) -> Result<Option<Agent>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, instructions, state, thread_id, home_path, active_project_id, active_turn_id, last_error, \
-             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, created_at, updated_at \
+             wake_on_pending_work, wake_on_pending_review, idle_heartbeat_minutes, idle_since, revision, created_at, updated_at \
              FROM agents WHERE name = ?",
         )
         .bind(name)
@@ -173,8 +192,7 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
-        transaction.commit().await?;
-        Ok(self.agent(id).await?.unwrap())
+        finish_agent_change(transaction, id).await
     }
 
     pub async fn create_agent_for_project(
@@ -222,9 +240,9 @@ impl Store {
             .bind(project_id)
             .execute(&mut *transaction)
             .await?;
-        transaction.commit().await?;
+        let agent = finish_agent_change(transaction, agent_id).await?;
         Ok((
-            self.agent(agent_id).await?.unwrap(),
+            agent,
             self.agent_project_worktree(agent_id, project_id)
                 .await?
                 .unwrap(),
@@ -289,17 +307,18 @@ impl Store {
         agent_id: i64,
         project_id: Option<i64>,
     ) -> Result<Agent, AppError> {
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
-            "UPDATE agents SET active_project_id = ?, updated_at = unixepoch() WHERE id = ?",
+            "UPDATE agents SET active_project_id = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ?",
         )
         .bind(project_id)
         .bind(agent_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
-        Ok(self.agent(agent_id).await?.unwrap())
+        finish_agent_change(transaction, agent_id).await
     }
 
     pub async fn agent_project_subscriptions(&self, agent_id: i64) -> Result<Vec<i64>, AppError> {
@@ -405,24 +424,34 @@ impl Store {
     }
 
     pub(crate) async fn delete_agent(&self, id: i64) -> Result<(), sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
         sqlx::query("DELETE FROM agents WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
+        sqlx::query(
+            "DELETE FROM board_change_events WHERE resource_type = 'agent' AND resource_id = ?",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
     pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Agent, AppError> {
-        let result =
-            sqlx::query("UPDATE agents SET name = ?, updated_at = unixepoch() WHERE id = ?")
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE agents SET name = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ?",
+        )
                 .bind(name)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
-        Ok(self.agent(id).await?.unwrap())
+        finish_agent_change(transaction, id).await
     }
 
     pub async fn set_agent_instructions(
@@ -431,17 +460,18 @@ impl Store {
         instructions: &str,
     ) -> Result<Agent, AppError> {
         let instructions = normalize_agent_instructions(instructions)?;
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
-            "UPDATE agents SET instructions = ?, updated_at = unixepoch() WHERE id = ?",
+            "UPDATE agents SET instructions = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ?",
         )
         .bind(instructions)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
-        Ok(self.agent(id).await?.unwrap())
+        finish_agent_change(transaction, id).await
     }
 
     pub async fn set_agent_wake_settings(
@@ -456,20 +486,21 @@ impl Store {
                 "idle heartbeat must be between 1 and 10080 minutes",
             ));
         }
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE agents SET wake_on_pending_work = ?, wake_on_pending_review = ?, idle_heartbeat_minutes = ?, \
-             updated_at = unixepoch() WHERE id = ?",
+             revision = revision + 1, updated_at = unixepoch() WHERE id = ?",
         )
         .bind(wake_on_pending_work)
         .bind(wake_on_pending_review)
         .bind(idle_heartbeat_minutes)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
-        Ok(self.agent(id).await?.unwrap())
+        finish_agent_change(transaction, id).await
     }
 
     pub async fn update_agent_runtime(
@@ -480,12 +511,23 @@ impl Store {
         active_turn_id: Option<&str>,
         last_error: Option<&str>,
     ) -> Result<Agent, AppError> {
+        if state == AgentState::AwaitingApproval {
+            return Err(AppError::bad_request(
+                "awaiting approval is unavailable while approvals are automatically declined",
+            ));
+        }
+        if (state == AgentState::Running) != active_turn_id.is_some() {
+            return Err(AppError::bad_request(
+                "running agent state requires an active turn, and other states forbid one",
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE agents SET state = ?, thread_id = COALESCE(?, thread_id), \
              active_turn_id = ?, last_error = ?, \
              idle_since = CASE WHEN ? = 'idle' THEN \
                  CASE WHEN state = 'idle' THEN idle_since ELSE unixepoch() END \
-                 ELSE NULL END, updated_at = unixepoch() WHERE id = ?",
+                 ELSE NULL END, revision = revision + 1, updated_at = unixepoch() WHERE id = ?",
         )
         .bind(state)
         .bind(thread_id)
@@ -493,12 +535,28 @@ impl Store {
         .bind(last_error)
         .bind(state)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("agent not found"));
         }
-        Ok(self.agent(id).await?.unwrap())
+        finish_agent_change(transaction, id).await
+    }
+
+    pub async fn set_agent_thread(&self, id: i64, thread_id: &str) -> Result<Agent, AppError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE agents SET thread_id = ?, revision = revision + 1, updated_at = unixepoch()
+             WHERE id = ?",
+        )
+        .bind(thread_id)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("agent not found"));
+        }
+        finish_agent_change(transaction, id).await
     }
 
     pub async fn finish_agent_turn(
@@ -508,22 +566,29 @@ impl Store {
         state: AgentState,
         last_error: Option<&str>,
     ) -> Result<Option<Agent>, AppError> {
+        if matches!(state, AgentState::Running | AgentState::AwaitingApproval) {
+            return Err(AppError::bad_request(
+                "a finished turn must transition to an inactive agent state",
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE agents SET state = ?, active_turn_id = NULL, last_error = ?, \
              idle_since = CASE WHEN ? = 'idle' THEN unixepoch() ELSE NULL END, \
-             updated_at = unixepoch() WHERE id = ? AND active_turn_id = ?",
+             revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND active_turn_id = ?",
         )
         .bind(state)
         .bind(last_error)
         .bind(state)
         .bind(id)
         .bind(turn_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
+            transaction.rollback().await?;
             return Ok(None);
         }
-        Ok(self.agent(id).await?)
+        Ok(Some(finish_agent_change(transaction, id).await?))
     }
 
     pub async fn agent_messages(
@@ -660,14 +725,25 @@ impl Store {
     }
 
     pub async fn recover_agents_after_restart(&self) -> Result<u64, sqlx::Error> {
-        Ok(sqlx::query(
-            "UPDATE agents SET state = 'error', active_turn_id = NULL, \
-             last_error = 'The board restarted during an active turn; send a message to retry.', \
-             updated_at = unixepoch() WHERE state IN ('running', 'awaiting_approval')",
+        let mut transaction = self.pool.begin().await?;
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE state IN ('running', 'awaiting_approval') ORDER BY id",
         )
-        .execute(&self.pool)
-        .await?
-        .rows_affected())
+        .fetch_all(&mut *transaction)
+        .await?;
+        for id in &ids {
+            let revision: i64 = sqlx::query_scalar(
+                "UPDATE agents SET state = 'error', active_turn_id = NULL, \
+                 last_error = 'The board restarted during an active turn; send a message to retry.', \
+                 revision = revision + 1, updated_at = unixepoch() WHERE id = ? RETURNING revision",
+            )
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            Store::append_agent_change_event(&mut transaction, *id, revision).await?;
+        }
+        transaction.commit().await?;
+        Ok(ids.len() as u64)
     }
 }
 
@@ -916,6 +992,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn visible_agent_mutations_commit_their_revisioned_invalidation_atomically() {
+        let store = Store::memory().await.unwrap();
+        let agent = store.create_agent("worker", "/tmp/worker").await.unwrap();
+        assert_eq!(agent.revision, 1);
+
+        let renamed = store.rename_agent(agent.id, "builder").await.unwrap();
+        assert_eq!(renamed.revision, 2);
+        assert!(
+            store
+                .update_agent_runtime(agent.id, AgentState::Running, None, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .update_agent_runtime(agent.id, AgentState::AwaitingApproval, None, None, None,)
+                .await
+                .is_err()
+        );
+        let event_id = store
+            .agent_change_event_id(agent.id, renamed.revision)
+            .await
+            .unwrap();
+        let crate::store::BoardEventReplay::Events(events) =
+            store.replay_board_events(Some(event_id - 1)).await.unwrap()
+        else {
+            panic!("agent invalidation should replay");
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [crate::store::StoredBoardEvent {
+                event: multi_agent_board_protocol::AgentEvent::AgentChanged {
+                    agent_id,
+                    revision: 2,
+                },
+                ..
+            }] if *agent_id == agent.id
+        ));
+
+        store
+            .execute_test_sql("DROP TABLE board_change_events")
+            .await
+            .unwrap();
+        assert!(store.rename_agent(agent.id, "uncommitted").await.is_err());
+        let unchanged = store.agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.name, "builder");
+        assert_eq!(unchanged.revision, 2);
+    }
+
+    #[tokio::test]
     async fn separate_wake_settings_migration_preserves_existing_preferences() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query(
@@ -1035,8 +1161,9 @@ mod tests {
         );
 
         for state in [AgentState::Paused, AgentState::Running, AgentState::Error] {
+            let active_turn_id = (state == AgentState::Running).then_some("turn-2");
             store
-                .update_agent_runtime(agent.id, state, None, None, None)
+                .update_agent_runtime(agent.id, state, None, active_turn_id, None)
                 .await
                 .unwrap();
             assert!(

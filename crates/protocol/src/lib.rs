@@ -226,6 +226,7 @@ pub struct Agent {
     pub wake_on_pending_review: bool,
     pub idle_heartbeat_minutes: Option<i64>,
     pub idle_since: Option<i64>,
+    pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -458,6 +459,10 @@ pub enum AgentEvent {
     },
     ProjectsChanged,
     ChannelsChanged,
+    AgentChanged {
+        agent_id: i64,
+        revision: i64,
+    },
     AgentCreated {
         agent_id: i64,
         data: Agent,

@@ -22,7 +22,7 @@ use crate::{
 pub fn router(manager: AgentManager) -> Router {
     Router::new()
         .route("/agents", get(list_agents).post(create_agent))
-        .route("/agents/{id}", axum::routing::patch(rename_agent))
+        .route("/agents/{id}", get(get_agent).patch(rename_agent))
         .route(
             "/agents/{id}/instructions",
             axum::routing::put(set_agent_instructions),
@@ -76,6 +76,13 @@ async fn create_agent(
     Ok(Json(
         manager.create(&input.name, input.project_id).await?.into(),
     ))
+}
+
+async fn get_agent(
+    State(manager): State<AgentManager>,
+    Path(id): Path<i64>,
+) -> Result<Json<protocol::Agent>, AppError> {
+    Ok(Json(manager.agent(id).await?.into()))
 }
 
 async fn rename_agent(
@@ -457,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_stream_uses_transport_keep_alives_without_refresh_payloads() {
+    async fn fresh_event_stream_starts_at_the_high_water_mark_without_replaying_history() {
         let store = Store::memory().await.unwrap();
         let manager = AgentManager::new(
             store,
@@ -465,24 +472,15 @@ mod tests {
             "multi-agent-board".into(),
             "http://127.0.0.1:1/api".into(),
         );
-        let app = router(manager);
-        let response = app
-            .clone()
+        manager.set_settings(Some("historical")).await.unwrap();
+        let response = router(manager)
             .oneshot(Request::get("/events").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let mut body = Box::pin(response.into_body().into_data_stream());
-
-        let chunk = tokio::time::timeout(
-            Duration::from_millis(2_500),
-            poll_fn(|context| Pin::new(&mut body).poll_next(context)),
-        )
-        .await
-        .expect("keep-alive should arrive")
-        .expect("stream should remain open")
-        .expect("keep-alive body should be readable");
-
-        assert_eq!(chunk.as_ref(), b": keep-alive\n\n");
+        let event = next_event(response).await;
+        assert!(event.contains("\nid: 1\n"));
+        assert!(event.contains(r#""kind":"snapshot_reset""#));
+        assert!(!event.contains("historical"));
     }
 
     #[tokio::test]
@@ -789,10 +787,16 @@ mod tests {
         assert_eq!(body["instructions"], "Be skeptical.\nExplain tradeoffs.");
         let published = events.recv().await.unwrap();
         assert!(published.id.is_some());
-        let crate::agent_runtime::AgentEvent::AgentUpdated { data, .. } = published.event else {
-            panic!("expected agent update");
+        let crate::agent_runtime::AgentEvent::AgentChanged { agent_id, revision } = published.event
+        else {
+            panic!("expected agent invalidation");
         };
-        assert_eq!(data.instructions, "Be skeptical.\nExplain tradeoffs.");
+        assert_eq!(agent_id, agent.id);
+        assert_eq!(revision, body["revision"]);
+        assert_eq!(
+            store.agent(agent.id).await.unwrap().unwrap().instructions,
+            "Be skeptical.\nExplain tradeoffs."
+        );
     }
 
     #[tokio::test]

@@ -176,6 +176,7 @@ export interface Agent {
   wake_on_pending_review: boolean;
   idle_heartbeat_minutes: number | null;
   idle_since: number | null;
+  revision: number;
   created_at: number;
   updated_at: number;
 }
@@ -312,6 +313,7 @@ export type AgentEvent =
   | { kind: "snapshot_reset"; data: SnapshotReset }
   | { kind: "projects_changed" }
   | { kind: "channels_changed" }
+  | { kind: "agent_changed"; agent_id: number; revision: number }
   | { kind: "agent_created"; agent_id: number; data: Agent }
   | { kind: "agent_updated"; agent_id: number; data: Agent }
   | { kind: "agent_message_delta"; agent_id: number; data: AgentMessageDelta }

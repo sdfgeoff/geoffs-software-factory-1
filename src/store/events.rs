@@ -1,4 +1,5 @@
 use multi_agent_board_protocol::AgentEvent;
+use sqlx::{Sqlite, Transaction};
 
 use super::Store;
 
@@ -17,6 +18,41 @@ pub(crate) enum BoardEventReplay {
 }
 
 impl Store {
+    pub(crate) async fn append_agent_change_event(
+        transaction: &mut Transaction<'_, Sqlite>,
+        agent_id: i64,
+        revision: i64,
+    ) -> Result<i64, sqlx::Error> {
+        let event = AgentEvent::AgentChanged { agent_id, revision };
+        let id = sqlx::query_scalar(
+            "INSERT INTO board_change_events
+             (event_json, resource_type, resource_id, resource_revision)
+             VALUES (?, 'agent', ?, ?) RETURNING id",
+        )
+        .bind(serde_json::to_string(&event).expect("protocol events serialize"))
+        .bind(agent_id)
+        .bind(revision)
+        .fetch_one(&mut **transaction)
+        .await?;
+        prune_board_events(transaction).await?;
+        Ok(id)
+    }
+
+    pub(crate) async fn agent_change_event_id(
+        &self,
+        agent_id: i64,
+        revision: i64,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT id FROM board_change_events
+             WHERE resource_type = 'agent' AND resource_id = ? AND resource_revision = ?",
+        )
+        .bind(agent_id)
+        .bind(revision)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     pub(crate) async fn append_board_event(&self, event: &AgentEvent) -> Result<i64, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         let id: i64 = sqlx::query_scalar(
@@ -25,16 +61,7 @@ impl Store {
         .bind(serde_json::to_string(event).expect("protocol events serialize"))
         .fetch_one(&mut *transaction)
         .await?;
-        sqlx::query(
-            "DELETE FROM board_change_events
-             WHERE id <= COALESCE((
-                 SELECT id FROM board_change_events
-                 ORDER BY id DESC LIMIT 1 OFFSET ?
-             ), 0)",
-        )
-        .bind(BOARD_EVENT_RETENTION)
-        .execute(&mut *transaction)
-        .await?;
+        prune_board_events(&mut transaction).await?;
         transaction.commit().await?;
         Ok(id)
     }
@@ -48,6 +75,9 @@ impl Store {
                 .fetch_one(&self.pool)
                 .await?;
         let latest_id = latest_id.unwrap_or_default();
+        if after_id.is_none() {
+            return Ok(BoardEventReplay::Reset { latest_id });
+        }
         if after_id.is_some_and(|id| {
             id > latest_id || oldest_id.is_some_and(|oldest| id < oldest.saturating_sub(1))
         }) {
@@ -70,6 +100,20 @@ impl Store {
             .collect::<Result<_, _>>()?;
         Ok(BoardEventReplay::Events(events))
     }
+}
+
+async fn prune_board_events(transaction: &mut Transaction<'_, Sqlite>) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM board_change_events
+         WHERE id <= COALESCE((
+             SELECT id FROM board_change_events
+             ORDER BY id DESC LIMIT 1 OFFSET ?
+         ), 0)",
+    )
+    .bind(BOARD_EVENT_RETENTION)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

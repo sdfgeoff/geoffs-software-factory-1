@@ -183,6 +183,7 @@ pub struct Agent {
     pub wake_on_pending_review: bool,
     pub idle_heartbeat_minutes: Option<i64>,
     pub idle_since: Option<i64>,
+    pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -750,6 +751,7 @@ impl From<Agent> for wire::Agent {
             wake_on_pending_review: value.wake_on_pending_review,
             idle_heartbeat_minutes: value.idle_heartbeat_minutes,
             idle_since: value.idle_since,
+            revision: value.revision,
             created_at: value.created_at,
             updated_at: value.updated_at,
         }
